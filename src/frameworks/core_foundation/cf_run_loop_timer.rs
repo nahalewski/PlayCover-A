@@ -39,7 +39,7 @@ unsafe impl SafeRead for CFRunLoopTimerContext {}
 fn CFRunLoopTimerCreate(
     env: &mut Environment,
     allocator: CFAllocatorRef,
-    _fire_date: CFAbsoluteTime, // TODO
+    fire_date: CFAbsoluteTime,
     interval: CFTimeInterval,
     flags: CFOptionFlags,
     order: CFIndex,
@@ -84,6 +84,13 @@ fn CFRunLoopTimerCreate(
     // apps keep the reference (and e.g. call CFRunLoopTimerIsValid() on it)
     // long after the autorelease pool is drained.
     crate::objc::retain(env, timer);
+    // Honour the first fire date. Games such as Zenonia re-create a one-shot
+    // timer every frame with a fire date one frame in the future, and rely on
+    // that for their frame pacing.
+    let now = crate::frameworks::core_foundation::time::CFAbsoluteTimeGetCurrent(env);
+    if fire_date > now {
+        crate::frameworks::foundation::ns_timer::set_due_in(env, timer, fire_date - now);
+    }
     timer
 }
 
