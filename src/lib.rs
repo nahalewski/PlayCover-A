@@ -27,6 +27,8 @@
 
 #[macro_use]
 mod log;
+#[cfg(feature = "a64")]
+mod a64;
 mod abi;
 mod audio;
 mod bundle;
@@ -87,8 +89,18 @@ pub extern "C" fn SDL_main(
         }
     }));
 
-    // Empty args: brings up app picker.
-    match main([String::new()].into_iter()) {
+    // The Java side (MainActivity.getArguments) passes the app to run and any
+    // options as arguments. With no arguments, this brings up the built-in app
+    // picker.
+    let mut args = vec![String::new()]; // stands in for argv[0]
+    for i in 1.._argc.max(1) {
+        let arg_ptr = unsafe { *_argv.add(i as usize) };
+        if !arg_ptr.is_null() {
+            let arg = unsafe { std::ffi::CStr::from_ptr(arg_ptr) };
+            args.push(arg.to_string_lossy().into_owned());
+        }
+    }
+    match main(args.into_iter()) {
         Ok(_) => echo!("touchHLE finished"),
         Err(e) => echo!("touchHLE errored: {e:?}"),
     }
@@ -104,6 +116,50 @@ PATH should be a path to a .app bundle or .ipa file.
 If no app path or special option is specified, a GUI app picker is displayed.
 
 Special options:
+    --a64-selftest
+        Test the experimental ARM64 CPU and standalone Mach-O loader.
+
+    --a64-run=PATH
+        Run an experimental ARM64 Mach-O, including supported local dylibs.
+
+    --a64-runtime=PATH
+        Read ARM64 runtime dependencies from this filesystem root.
+        Extracted Apple shared-cache images still require cache/runtime support.
+
+    --a64-cache-info=PATH
+        Validate an original ARM64 dyld cache and describe its sparse mappings.
+
+    --a64-cache-map-test=PATH
+        Privately map and decode cache slide information without executing it.
+
+    --a64-cache-import-test=PATH
+        Check an ARM64 app's direct imports against this original cache.
+        Reports symbol availability without running the app or Apple code.
+
+    --a64-cache-prepare=PATH
+        Map an original ARM64 cache and bind app imports without executing
+        Apple initializers or main; unsupported runtime requirements fail.
+
+    --a64-legacy-cpp-prepare=PATH
+        Validate the original iOS 11 legacy C++ provider and bind app imports
+        against its coherent cache; does not execute initializers or main.
+
+    --a64-cache-image-info-prepare=PATH
+        Bind against an original cache with explicit loader-owned image info.
+        Reports mapped images; does not execute initializers or main.
+
+    --a64-cache-session-test=PATH
+    --a64-cache-session-image-info-test=PATH
+        Test original libSystem initialization with retained process state.
+        Does not establish full runtime readiness or execute app main.
+
+    --a64-cache-entry-prefix-test=PATH
+        Single-step a diagnostic ARM64 app entry prefix with owned services.
+        Stops before uninitialized cached code; does not establish app startup.
+
+    --a64-cache-resolver-test=PATH
+        Test the audited original-cache atomic resolver with a virtual commpage.
+
     --help
         Display this help text.
 
@@ -113,6 +169,32 @@ Special options:
     --info
         Print basic information about the app bundle without running the app.
 ";
+
+#[cfg(feature = "a64")]
+fn read_a64_runtime(root: Option<&std::path::Path>, dependency: &str) -> Result<Vec<u8>, String> {
+    let root = root.ok_or_else(|| {
+        format!("ARM64 dependency {dependency} needs a runtime root; use --a64-runtime=PATH")
+    })?;
+    if root.join(".shared-cache-exports").is_file() {
+        return Err(format!(
+            "{dependency}: extracted shared-cache libraries require original cache mappings and iOS runtime services; ARM64 shared-cache loading is not implemented"
+        ));
+    }
+    let relative = dependency.trim_start_matches('/');
+    if relative
+        .split('/')
+        .any(|part| part == ".." || part.contains('\\') || part.contains(':'))
+    {
+        return Err("Invalid ARM64 runtime dependency path".into());
+    }
+    let root = std::fs::canonicalize(root).map_err(|e| e.to_string())?;
+    let path =
+        std::fs::canonicalize(root.join(relative)).map_err(|e| format!("{dependency}: {e}"))?;
+    if !path.starts_with(&root) {
+        return Err("ARM64 runtime dependency escapes runtime root".into());
+    }
+    std::fs::read(path).map_err(|e| format!("{dependency}: {e}"))
+}
 
 pub fn main<T: Iterator<Item = String>>(mut args: T) -> Result<(), String> {
     echo!(
@@ -146,6 +228,20 @@ pub fn main<T: Iterator<Item = String>>(mut args: T) -> Result<(), String> {
     let mut option_args = Vec::new();
     let mut options = options::Options::default();
     let mut app_args = None::<Vec<String>>;
+    let mut a64_run = None::<PathBuf>;
+    let mut a64_runtime = None::<PathBuf>;
+    let mut a64_cache_info = None::<PathBuf>;
+    let mut a64_cache_map_test = None::<PathBuf>;
+    let mut a64_cache_import_test = None::<PathBuf>;
+    let mut a64_cache_prepare = None::<PathBuf>;
+    let mut a64_legacy_cpp_prepare = None::<PathBuf>;
+    let mut a64_image_info_prepare = None::<PathBuf>;
+    let mut a64_cache_session_test = None::<PathBuf>;
+    let mut a64_cache_session_image_info_test = None::<PathBuf>;
+    let mut a64_cache_services_test = None::<PathBuf>;
+    let mut a64_cache_entry_prefix_test = None::<PathBuf>;
+    let mut a64_cache_initializer_test = None::<PathBuf>;
+    let mut a64_cache_resolver_test = None::<PathBuf>;
 
     for arg in args {
         if let Some(ref mut app_args) = app_args {
@@ -161,6 +257,39 @@ pub fn main<T: Iterator<Item = String>>(mut args: T) -> Result<(), String> {
             return Ok(());
         } else if arg == "--info" {
             just_info = true;
+        } else if arg == "--a64-selftest" {
+            #[cfg(feature = "a64")]
+            return a64::selftest();
+            #[cfg(not(feature = "a64"))]
+            return Err("ARM64 support requires a build with --features a64".into());
+        } else if let Some(path) = arg.strip_prefix("--a64-run=") {
+            a64_run = Some(PathBuf::from(path));
+        } else if let Some(path) = arg.strip_prefix("--a64-runtime=") {
+            a64_runtime = Some(PathBuf::from(path));
+        } else if let Some(path) = arg.strip_prefix("--a64-cache-info=") {
+            a64_cache_info = Some(PathBuf::from(path));
+        } else if let Some(path) = arg.strip_prefix("--a64-cache-map-test=") {
+            a64_cache_map_test = Some(PathBuf::from(path));
+        } else if let Some(path) = arg.strip_prefix("--a64-cache-import-test=") {
+            a64_cache_import_test = Some(PathBuf::from(path));
+        } else if let Some(path) = arg.strip_prefix("--a64-cache-prepare=") {
+            a64_cache_prepare = Some(PathBuf::from(path));
+        } else if let Some(path) = arg.strip_prefix("--a64-legacy-cpp-prepare=") {
+            a64_legacy_cpp_prepare = Some(PathBuf::from(path));
+        } else if let Some(path) = arg.strip_prefix("--a64-cache-image-info-prepare=") {
+            a64_image_info_prepare = Some(PathBuf::from(path));
+        } else if let Some(path) = arg.strip_prefix("--a64-cache-session-test=") {
+            a64_cache_session_test = Some(PathBuf::from(path));
+        } else if let Some(path) = arg.strip_prefix("--a64-cache-session-image-info-test=") {
+            a64_cache_session_image_info_test = Some(PathBuf::from(path));
+        } else if let Some(path) = arg.strip_prefix("--a64-cache-services-test=") {
+            a64_cache_services_test = Some(PathBuf::from(path));
+        } else if let Some(path) = arg.strip_prefix("--a64-cache-initializer-test=") {
+            a64_cache_initializer_test = Some(PathBuf::from(path));
+        } else if let Some(path) = arg.strip_prefix("--a64-cache-entry-prefix-test=") {
+            a64_cache_entry_prefix_test = Some(PathBuf::from(path));
+        } else if let Some(path) = arg.strip_prefix("--a64-cache-resolver-test=") {
+            a64_cache_resolver_test = Some(PathBuf::from(path));
         // Parse an option and store a backup in option_args so that we can
         // reapply them after file options are loaded. This ensures that
         // command line options take precedence over file options.
@@ -175,6 +304,63 @@ pub fn main<T: Iterator<Item = String>>(mut args: T) -> Result<(), String> {
         }
     }
 
+    if let Some(path) = a64_cache_resolver_test {
+        #[cfg(feature = "a64")]
+        return a64::cache_resolver_test(&path);
+        #[cfg(not(feature = "a64"))]
+        return Err("ARM64 support requires a build with --features a64".into());
+    }
+
+    if let Some(path) = a64_cache_map_test {
+        #[cfg(feature = "a64")]
+        return a64::cache_map_test(&path);
+        #[cfg(not(feature = "a64"))]
+        return Err("ARM64 support requires a build with --features a64".into());
+    }
+
+    if let Some(path) = a64_cache_info {
+        #[cfg(feature = "a64")]
+        return a64::cache_info(&path);
+        #[cfg(not(feature = "a64"))]
+        return Err("ARM64 support requires a build with --features a64".into());
+    }
+
+    if let Some(path) = a64_run {
+        #[cfg(feature = "a64")]
+        {
+            let path = std::fs::canonicalize(path).map_err(|e| e.to_string())?;
+            let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+            let app_root = path
+                .parent()
+                .ok_or("ARM64 executable has no parent directory")?;
+            let executable = format!(
+                "/__a64_app/{}",
+                path.file_name()
+                    .ok_or("ARM64 executable has no filename")?
+                    .to_string_lossy()
+            );
+            let code = a64::run_file_with_reader(&bytes, &executable, |dependency| {
+                if dependency.starts_with("/System/") || dependency.starts_with("/usr/") {
+                    read_a64_runtime(a64_runtime.as_deref(), dependency)
+                } else {
+                    let relative = dependency.strip_prefix("/__a64_app/").ok_or_else(|| {
+                        format!("ARM64 dependency outside app/runtime roots: {dependency}")
+                    })?;
+                    let candidate = std::fs::canonicalize(app_root.join(relative))
+                        .map_err(|e| format!("{dependency}: {e}"))?;
+                    if !candidate.starts_with(app_root) {
+                        return Err("ARM64 dependency escapes app directory".into());
+                    }
+                    std::fs::read(candidate).map_err(|e| format!("{dependency}: {e}"))
+                }
+            })?;
+            echo!("ARM64 guest exited with code {code}");
+            return Ok(());
+        }
+        #[cfg(not(feature = "a64"))]
+        return Err("ARM64 support requires a build with --features a64".into());
+    }
+
     if options.dumping_options.symbols {
         let mut file = std::fs::File::create(&options.dumping_file).map_err(|e| e.to_string())?;
         dyld::Dyld::dump_host_symbols(&mut file).unwrap();
@@ -184,23 +370,33 @@ pub fn main<T: Iterator<Item = String>>(mut args: T) -> Result<(), String> {
     let bundle_path = if let Some(bundle_path) = bundle_path {
         bundle_path
     } else {
-        let mut options = options::Options::default();
-        // Apply command-line options only (no app-specific options apply)
-        for option_arg in &option_args {
-            let parse_result = options.parse_argument(option_arg);
-            assert!(parse_result == Ok(true));
+        #[cfg(target_os = "android")]
+        {
+            // Android's native launcher owns IPA selection and settings. An
+            // empty/restored SDL activity exits instead of showing a second UI.
+            echo!("No IPA selected; returning to the PlayCover-A launcher.");
+            return Ok(());
         }
-        if options.headless {
-            return Err(
-                "No app specified. Use the --help flag to see command-line usage.".to_string(),
-            );
-        }
-        echo!(
+        #[cfg(not(target_os = "android"))]
+        {
+            let mut options = options::Options::default();
+            // Apply command-line options only (no app-specific options apply)
+            for option_arg in &option_args {
+                let parse_result = options.parse_argument(option_arg);
+                assert!(parse_result == Ok(true));
+            }
+            if options.headless {
+                return Err(
+                    "No app specified. Use the --help flag to see command-line usage.".to_string(),
+                );
+            }
+            echo!(
             "No app specified, opening app picker. Use the --help flag to see command-line usage."
         );
-        let (bundle_path, mut extra_options) = environment::app_picker::app_picker(options)?;
-        option_args.append(&mut extra_options);
-        bundle_path
+            let (bundle_path, mut extra_options) = environment::app_picker::app_picker(options)?;
+            option_args.append(&mut extra_options);
+            bundle_path
+        }
     };
 
     // When PowerShell does tab-completion on a directory, for some reason it
@@ -283,6 +479,137 @@ pub fn main<T: Iterator<Item = String>>(mut args: T) -> Result<(), String> {
 
     if just_info {
         return Ok(());
+    }
+
+    // Keep universal apps on the mature ARM32 runtime when they have an ARM32
+    // slice. ARM64-only bundles use the separate experimental loader.
+    #[cfg(feature = "a64")]
+    {
+        let executable = fs
+            .read(bundle.executable_path())
+            .map_err(|_| "Could not read app executable".to_string())?;
+        if a64::is_arm64_only(&executable)? {
+            let executable_path = bundle.executable_path();
+            if let Some(cache_path) = &a64_cache_session_image_info_test {
+                let directory = executable_path.as_str().rsplit_once('/')
+                    .ok_or("ARM64 executable has no bundle directory")?.0;
+                let unity_path = format!("{directory}/Frameworks/UnityFramework.framework/UnityFramework");
+                let with_unity = fs.exists(fs::GuestPath::new(&unity_path));
+                return a64::cache_session_image_info_test(&executable, executable_path.as_str(), cache_path,
+                    |dependency| {
+                        if dependency.starts_with("/System/") || dependency.starts_with("/usr/") {
+                            read_a64_runtime(a64_runtime.as_deref(), dependency)
+                        } else {
+                            fs.read(fs::GuestPath::new(dependency)).map_err(|_| format!("Could not read ARM64 dependency {dependency}"))
+                        }
+                    }, with_unity);
+            }
+            if let Some(cache_path) = &a64_cache_session_test {
+                let directory = executable_path.as_str().rsplit_once('/')
+                    .ok_or("ARM64 executable has no bundle directory")?.0;
+                let unity_path = format!("{directory}/Frameworks/UnityFramework.framework/UnityFramework");
+                let with_unity = fs.exists(fs::GuestPath::new(&unity_path));
+                return a64::cache_session_initializer_test(&executable, executable_path.as_str(), cache_path,
+                    |dependency| {
+                        if dependency.starts_with("/System/") || dependency.starts_with("/usr/") {
+                            read_a64_runtime(a64_runtime.as_deref(), dependency)
+                        } else {
+                            fs.read(fs::GuestPath::new(dependency)).map_err(|_| format!("Could not read ARM64 dependency {dependency}"))
+                        }
+                    }, with_unity);
+            }
+            if let Some(cache_path) = &a64_cache_initializer_test {
+                return a64::cache_initializer_test(&executable, executable_path.as_str(), cache_path,
+                    |dependency| {
+                        if dependency.starts_with("/System/") || dependency.starts_with("/usr/") {
+                            read_a64_runtime(a64_runtime.as_deref(), dependency)
+                        } else {
+                            fs.read(fs::GuestPath::new(dependency)).map_err(|_| format!("Could not read ARM64 dependency {dependency}"))
+                        }
+                    });
+            }
+            if let Some(cache_path) = &a64_cache_entry_prefix_test {
+                return a64::cache_entry_prefix_test(
+                    &executable,
+                    executable_path.as_str(),
+                    cache_path,
+                    |dependency| {
+                        if dependency.starts_with("/System/") || dependency.starts_with("/usr/") {
+                            read_a64_runtime(a64_runtime.as_deref(), dependency)
+                        } else {
+                            fs.read(fs::GuestPath::new(dependency)).map_err(|_| {
+                                format!("Could not read ARM64 dependency {dependency}")
+                            })
+                        }
+                    },
+                );
+            }
+            if let Some(cache_path) = &a64_cache_services_test {
+                return a64::cache_services_test(
+                    &executable,
+                    executable_path.as_str(),
+                    cache_path,
+                    |dependency| {
+                        if dependency.starts_with("/System/") || dependency.starts_with("/usr/") {
+                            read_a64_runtime(a64_runtime.as_deref(), dependency)
+                        } else {
+                            fs.read(fs::GuestPath::new(dependency)).map_err(|_| {
+                                format!("Could not read ARM64 dependency {dependency}")
+                            })
+                        }
+                    },
+                );
+            }
+            if let Some(cache_path) = a64_legacy_cpp_prepare.as_ref()
+                .or(a64_image_info_prepare.as_ref()).or(a64_cache_prepare.as_ref()) {
+                let reader = |dependency: &str| {
+                        if dependency.starts_with("/System/") || dependency.starts_with("/usr/") {
+                            read_a64_runtime(a64_runtime.as_deref(), dependency)
+                        } else {
+                            fs.read(fs::GuestPath::new(dependency)).map_err(|_| {
+                                format!("Could not read ARM64 dependency {dependency}")
+                            })
+                        }
+                    };
+                return if a64_legacy_cpp_prepare.is_some() {
+                    a64::cache_legacy_cpp_prepare(&executable, executable_path.as_str(), cache_path, reader)
+                } else if a64_image_info_prepare.is_some() {
+                    a64::cache_image_info_prepare(&executable, executable_path.as_str(), cache_path, reader)
+                } else {
+                    a64::cache_prepare(&executable, executable_path.as_str(), cache_path, reader)
+                };
+            }
+            if let Some(cache_path) = &a64_cache_import_test {
+                return a64::cache_import_test(
+                    &executable,
+                    executable_path.as_str(),
+                    cache_path,
+                    |dependency| Ok(fs.read(fs::GuestPath::new(dependency)).ok()),
+                );
+            }
+            let result =
+                a64::run_file_with_reader(&executable, executable_path.as_str(), |dependency| {
+                    if dependency.starts_with("/System/") || dependency.starts_with("/usr/") {
+                        read_a64_runtime(a64_runtime.as_deref(), dependency)
+                    } else {
+                        fs.read(fs::GuestPath::new(dependency))
+                            .map_err(|_| format!("Could not read ARM64 dependency {dependency}"))
+                    }
+                });
+            match result {
+                Ok(code) => {
+                    echo!("ARM64 guest exited with code {code}");
+                    return Ok(());
+                }
+                Err(error) => {
+                    let error = format!("Could not run ARM64 app: {error}");
+                    if options.popup_errors {
+                        window::show_error_messagebox(None, &error);
+                    }
+                    return Err(error);
+                }
+            }
+        }
     }
 
     // Apply options from files

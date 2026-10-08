@@ -110,32 +110,42 @@ private:
     }
   }
 
-  bool MemoryWriteExclusive8(VAddr, std::uint8_t, std::uint8_t) override {
-    std::fprintf(stderr, "MemoryWriteExclusive8: TODO");
-    abort();
+  // Exclusive stores (strexb/strexh/strex/strexd): guest threads are run one at
+  // a time on the host, so the store only fails if the memory no longer holds
+  // the value that the matching load-exclusive saw (another guest thread wrote
+  // it in between). A failed store makes the guest retry its loop.
+  // TODO: revisit once (if) we switch to host multi-threading.
+  bool MemoryWriteExclusive8(VAddr addr, std::uint8_t value,
+                             std::uint8_t expected) override {
+    if (MemoryRead8(addr) != expected) {
+      return false;
+    }
+    MemoryWrite8(addr, value);
+    return true;
   }
-  bool MemoryWriteExclusive16(VAddr, std::uint16_t, std::uint16_t) override {
-    std::fprintf(stderr, "MemoryWriteExclusive16: TODO");
-    abort();
+  bool MemoryWriteExclusive16(VAddr addr, std::uint16_t value,
+                              std::uint16_t expected) override {
+    if (MemoryRead16(addr) != expected) {
+      return false;
+    }
+    MemoryWrite16(addr, value);
+    return true;
   }
   bool MemoryWriteExclusive32(VAddr addr, std::uint32_t value,
                               std::uint32_t expected) override {
-    // As long as we stay single threaded on the host side,
-    // this implementation is OK
-    // TODO: revisit once (if) we switch to a host multi-threading
     if (MemoryRead32(addr) != expected) {
-      // TODO: implement CAS mechanism or similar
-      // (be aware that implementation may need to be platform specific!)
-      std::fprintf(stderr, "MemoryWriteExclusive32: expected %u, got %u\n",
-                   expected, MemoryRead32(addr));
-      abort();
+      return false;
     }
     MemoryWrite32(addr, value);
     return true;
   }
-  bool MemoryWriteExclusive64(VAddr, std::uint64_t, std::uint64_t) override {
-    std::fprintf(stderr, "MemoryWriteExclusive64: TODO");
-    abort();
+  bool MemoryWriteExclusive64(VAddr addr, std::uint64_t value,
+                              std::uint64_t expected) override {
+    if (MemoryRead64(addr) != expected) {
+      return false;
+    }
+    MemoryWrite64(addr, value);
+    return true;
   }
 
   void InterpreterFallback(std::uint32_t, size_t) override {

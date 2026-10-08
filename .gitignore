@@ -27,3 +27,19 @@ android/build
 # Default developer dump file
 
 DUMP.txt
+
+# Local test inputs, private account state, and generated outputs
+*.ipa
+*.ipsw
+*.apk
+*.aab
+__pycache__/
+*.pyc
+.env
+.env.*
+*.p12
+*.mobileprovision
+ios-runtime/
+pixel-fold-tests/
+runtime-sources/
+apple-store-state/

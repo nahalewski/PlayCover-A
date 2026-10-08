@@ -395,8 +395,12 @@ pub fn write(
     // TODO: handle errno properly
     set_errno(env, 0);
 
-    // TODO: error handling for unknown fd?
-    let file = env.libc_state.posix_io.file_for_fd(fd).unwrap();
+    let Some(file) = env.libc_state.posix_io.file_for_fd(fd) else {
+        // Not an open file (e.g. an app writing to a descriptor whose open()
+        // failed): report an error like a real system, instead of crashing.
+        set_errno(env, crate::libc::errno::EBADF);
+        return -1;
+    };
 
     if buffer.is_null() {
         assert_eq!(size, 0);

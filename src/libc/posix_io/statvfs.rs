@@ -19,6 +19,11 @@ pub type fsfilcnt_t = u32;
 pub const ST_RDONLY: u32 = 1;
 pub const ST_NOSUID: u32 = 2;
 
+fn statvfs_flags(mount_flags: u32) -> u32 {
+    // Darwin MNT_RDONLY=1 and MNT_NOSUID=8; statvfs uses 1 and 2.
+    (mount_flags & 1) | if mount_flags & 8 != 0 { ST_NOSUID } else { 0 }
+}
+
 #[allow(non_camel_case_types)]
 #[derive(Default)]
 #[repr(C, packed)]
@@ -61,7 +66,7 @@ fn statvfs(env: &mut Environment, path: ConstPtr<u8>, buf: MutPtr<statvfs>) -> i
                 // According to the manpage:
                 // "There are two flags defined for the f_flag member"
                 // ST_RDONLY and ST_NOSUID
-                f_flag: statfs.f_flags & ST_RDONLY & ST_NOSUID,
+                f_flag: statvfs_flags(statfs.f_flags),
                 f_namemax: 255,
             };
             env.mem.write(buf, statvfs);
@@ -84,3 +89,16 @@ fn statvfs(env: &mut Environment, path: ConstPtr<u8>, buf: MutPtr<statvfs>) -> i
 }
 
 pub const FUNCTIONS: FunctionExports = &[export_c_func!(statvfs(_, _))];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn darwin_mount_flags_translate_independently() {
+        assert_eq!(statvfs_flags(0), 0);
+        assert_eq!(statvfs_flags(1), ST_RDONLY);
+        assert_eq!(statvfs_flags(8), ST_NOSUID);
+        assert_eq!(statvfs_flags(1 | 8 | 0x1000 | 0x10), ST_RDONLY | ST_NOSUID);
+        assert_eq!(statvfs_flags(2), 0); // MNT_SYNCHRONOUS is not ST_NOSUID
+    }
+}

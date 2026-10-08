@@ -97,15 +97,17 @@ pub const CLASSES: ClassExports = objc_classes! {
     let mut reader = Reader::from_reader(bytes);
     // TODO: parse and send delegate messages in one pass
     let mut events = Vec::new();
+    // If the XML is malformed, the delegate still gets the elements that were
+    // read before the problem, and then a parse error (as with libxml2).
+    let mut parse_error: Option<String> = None;
     loop {
         match reader.read_event() {
             Ok(Event::Eof) => break,
             Ok(e) => events.push(e.into_owned()), // TODO: avoid copying
             Err(e) => {
-                // TODO: send parser:parseErrorOccurred: to delegate instead,
-                // after (!) other parsing delegate messages were sent
-                panic!("Error at position {}: {:?}", reader.error_position(), e)
-            },
+                parse_error = Some(format!("Error at position {}: {:?}", reader.error_position(), e));
+                break;
+            }
         }
     }
 
@@ -120,7 +122,7 @@ pub const CLASSES: ClassExports = objc_classes! {
     for event in events {
         match event {
             Event::Empty(e) => {
-                let name = String::from_utf8(e.local_name().as_ref().to_vec()).unwrap();
+                let name = String::from_utf8_lossy(e.local_name().as_ref()).to_string();
                 let name: id = from_rust_string(env, name);
                 let name = autorelease(env, name);
                 let sel: SEL = env
@@ -153,7 +155,7 @@ pub const CLASSES: ClassExports = objc_classes! {
                 }
             }
             Event::Text(e) => {
-                let text = e.decode().unwrap().to_string();
+                let text = String::from_utf8_lossy(e.as_ref()).to_string();
                 // FIXME: skipping the end of the parsed string?
                 if text != "\0" {
                     let sel: SEL = env
@@ -168,7 +170,7 @@ pub const CLASSES: ClassExports = objc_classes! {
                 }
             }
             Event::Start(e) => {
-                let name = String::from_utf8(e.local_name().as_ref().to_vec()).unwrap();
+                let name = String::from_utf8_lossy(e.local_name().as_ref()).to_string();
                 let sel: SEL = env
                     .objc
                     .register_host_selector(
@@ -188,7 +190,7 @@ pub const CLASSES: ClassExports = objc_classes! {
                 }
             }
             Event::End(e) => {
-                let name = String::from_utf8(e.local_name().as_ref().to_vec()).unwrap();
+                let name = String::from_utf8_lossy(e.local_name().as_ref()).to_string();
                 let sel: SEL = env
                     .objc
                     .register_host_selector(
@@ -218,7 +220,7 @@ pub const CLASSES: ClassExports = objc_classes! {
                         .register_host_selector("parser:foundCharacters:".to_string(), &mut env.mem);
                     let responds: bool = msg![env; delegate respondsToSelector:sel];
                     if responds {
-                        let text = e.decode().unwrap().to_string();
+                        let text = String::from_utf8_lossy(e.as_ref()).to_string();
                         let text = from_rust_string(env, text);
                         let text = autorelease(env, text);
                         () = msg![env; delegate parser:this foundCharacters:text];
@@ -226,7 +228,7 @@ pub const CLASSES: ClassExports = objc_classes! {
                 }
             }
             Event::Comment(e) => {
-                let comment = e.decode().unwrap().to_string();
+                let comment = String::from_utf8_lossy(e.as_ref()).to_string();
                 let sel: SEL = env
                     .objc
                     .register_host_selector("parser:foundComment:".to_string(), &mut env.mem);
@@ -246,6 +248,19 @@ pub const CLASSES: ClassExports = objc_classes! {
             }
             e => unimplemented!("{:?}", e)
         }
+    }
+    if let Some(message) = parse_error {
+        log!("NSXMLParser: {}", message);
+        let sel: SEL = env
+            .objc
+            .register_host_selector("parser:parseErrorOccurred:".to_string(), &mut env.mem);
+        let responds: bool = msg![env; delegate respondsToSelector:sel];
+        if responds {
+            let domain = from_rust_string(env, "NSXMLParserErrorDomain".to_string());
+            let error: id = msg_class![env; NSError errorWithDomain:domain code:(4 as i32) userInfo:nil];
+            () = msg![env; delegate parser:this parseErrorOccurred:error];
+        }
+        return false;
     }
     let sel: SEL = env
         .objc
@@ -270,10 +285,10 @@ pub const CLASSES: ClassExports = objc_classes! {
 /// A helper function to build an attributes NSDictionary from an XML tag.
 /// Each key/value pair is copied and retained in the dict.
 fn build_attributes_dict(env: &mut Environment, e: BytesStart) -> id {
-    let pairs = e.attributes().map(|a| a.unwrap()).map(|a| {
+    let pairs = e.attributes().filter_map(|a| a.ok()).map(|a| {
         (
-            String::from_utf8(a.key.local_name().as_ref().to_vec()).unwrap(),
-            a.unescape_value().unwrap().to_string(),
+            String::from_utf8_lossy(a.key.local_name().as_ref()).to_string(),
+            a.unescape_value().map(|v| v.to_string()).unwrap_or_default(),
         )
     });
     let dict: id = msg_class![env; NSMutableDictionary new];

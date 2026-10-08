@@ -74,9 +74,9 @@ fn task_set_exception_ports(
     behavior: exception_behavior_t,
     new_flavor: thread_state_flavor_t,
 ) -> kern_return_t {
-    assert_eq!(task, MACH_TASK_SELF);
-    assert_eq!(exception_mask, EXC_MASK_BAD_ACCESS);
-    assert_eq!(behavior, EXCEPTION_DEFAULT);
+    // Crash reporters (Crashlytics, Unity/mono) install handlers for other masks and
+    // behaviours too; none of them can fire here.
+    let _ = (task, exception_mask, behavior, EXC_MASK_BAD_ACCESS, EXCEPTION_DEFAULT);
     // This function is used by Unity to install an `exception handler`.
     // (See mono's [mini-darwin.c](https://github.com/mono/mono/blob/62121afbb28f0b62f100ec9a942d10c5e0f4814f/mono/mini/mini-darwin.c#L188))
     // We would prefer to crash on exception anyway,

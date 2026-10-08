@@ -66,7 +66,7 @@ type AudioFilePropertyID = u32;
 pub const kAudioFilePropertyFileFormat: AudioFilePropertyID = fourcc(b"ffmt");
 pub const kAudioFilePropertyDataFormat: AudioFilePropertyID = fourcc(b"dfmt");
 const kAudioFilePropertyAudioDataByteCount: AudioFilePropertyID = fourcc(b"bcnt");
-const kAudioFilePropertyAudioDataPacketCount: AudioFilePropertyID = fourcc(b"pcnt");
+pub const kAudioFilePropertyAudioDataPacketCount: AudioFilePropertyID = fourcc(b"pcnt");
 pub const kAudioFilePropertyPacketSizeUpperBound: AudioFilePropertyID = fourcc(b"pkub");
 const kAudioFilePropertyMagicCookieData: AudioFilePropertyID = fourcc(b"mgic");
 const kAudioFilePropertyChannelLayout: AudioFilePropertyID = fourcc(b"cmap");
@@ -99,12 +99,14 @@ pub fn AudioFileOpenURL(
     }
 
     let path = to_rust_path(env, in_file_ref);
+    let path_for_log = format!("{:?}", path);
     let audio_file = match audio::AudioFile::open_for_reading(path, &env.fs) {
         Ok(audio_file) => audio_file,
         Err(error) => {
             log!(
-                "Warning: AudioFileOpenURL() for path {:?} failed",
-                in_file_ref
+                "Warning: AudioFileOpenURL() for path {} failed ({:?})",
+                path_for_log,
+                error
             );
             return match error {
                 audio::AudioFileOpenError::FileDecodeError => kAudioFileUnsupportedFileTypeError,

@@ -65,12 +65,14 @@
 
 pub mod gles1_native;
 pub mod gles1_on_gl2;
+pub mod gles2_native;
 mod gles_generic;
 pub mod present;
 mod util;
 
 use touchHLE_gl_bindings::gl21compat as gl21compat_raw;
 pub use touchHLE_gl_bindings::gles11 as gles11_raw;
+use touchHLE_gl_bindings::gles20 as gles20_raw;
 
 use gles1_native::GLES1NativeContext;
 use gles1_on_gl2::GLES1OnGL2Context;
@@ -158,4 +160,24 @@ pub fn create_gles1_ctx_no_parent_stack(
         }
     }
     gles1_ctx.expect("Couldn't create OpenGL ES 1.1 context!")
+}
+
+/// Try to create an OpenGL ES 2.0 context. Unlike [create_gles1_ctx], this
+/// returns [None] on failure instead of panicking, so that the app gets to
+/// see the failure (a `nil` `EAGLContext`) and can fall back or give up.
+pub fn create_gles2_ctx(env: &mut Environment) -> Option<Box<dyn GLESContext>> {
+    env.on_parent_stack_in_coroutine(|window, _options| {
+        assert!(window.on_main_stack());
+        log!("Creating an OpenGL ES 2.0 context:");
+        match gles2_native::GLES2NativeContext::new(window) {
+            Ok(ctx) => {
+                log!("=> Success!");
+                Some(Box::new(ctx) as Box<dyn GLESContext>)
+            }
+            Err(err) => {
+                log!("=> Failed: {}.", err);
+                None
+            }
+        }
+    })
 }

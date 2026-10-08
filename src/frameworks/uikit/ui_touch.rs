@@ -27,6 +27,10 @@ pub const UITouchPhaseEnded: UITouchPhase = 3;
 #[derive(Default)]
 pub struct State {
     current_touches: HashMap<FingerId, id>,
+    /// The one `UIEvent` object that is reused for every touch event, as on
+    /// iOS. Apps (e.g. LEGO Harry Potter) keep an unretained pointer to it and
+    /// read `allTouches` from it later. Never freed.
+    pub(super) shared_event: Option<id>,
 }
 
 pub(super) struct UITouchHostObject {
@@ -488,6 +492,24 @@ fn handle_touches_up(env: &mut Environment, map: HashMap<FingerId, Coords>) {
         );
         let _: () = msg![env; view touchesEnded:touches withEvent:event];
     }
+
+    // The event object is reused and apps may keep reading `allTouches` from
+    // it after this callback returns (without checking touch phases), so now
+    // that the touches have ended it must only list the ones still down.
+    let remaining: id = msg_class![env; NSMutableSet allocWithZone:(MutVoidPtr::null())];
+    for &touch in env
+        .framework_state
+        .uikit
+        .ui_touch
+        .current_touches
+        .clone()
+        .values()
+    {
+        let _: () = msg![env; remaining addObject:touch];
+    }
+    let shared_event = ui_event::new_event(env, remaining);
+    release(env, shared_event);
+    release(env, remaining);
 
     release(env, pool);
 }

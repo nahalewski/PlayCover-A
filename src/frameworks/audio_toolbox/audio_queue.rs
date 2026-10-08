@@ -279,14 +279,29 @@ fn AudioQueueAllocateBufferWithPacketDescriptions(
     _in_number_packet_desc: GuestUSize,
     out_buffer: MutPtr<AudioQueueBufferRef>,
 ) -> OSStatus {
-    // TODO: support packet descriptions
-    AudioQueueAllocateBuffer(env, in_aq, in_buffer_byte_size, out_buffer)
+    allocate_buffer(
+        env,
+        in_aq,
+        in_buffer_byte_size,
+        _in_number_packet_desc,
+        out_buffer,
+    )
 }
 
 pub fn AudioQueueAllocateBuffer(
     env: &mut Environment,
     in_aq: AudioQueueRef,
     in_buffer_byte_size: GuestUSize,
+    out_buffer: MutPtr<AudioQueueBufferRef>,
+) -> OSStatus {
+    allocate_buffer(env, in_aq, in_buffer_byte_size, 0, out_buffer)
+}
+
+fn allocate_buffer(
+    env: &mut Environment,
+    in_aq: AudioQueueRef,
+    in_buffer_byte_size: GuestUSize,
+    in_number_packet_desc: GuestUSize,
     out_buffer: MutPtr<AudioQueueBufferRef>,
 ) -> OSStatus {
     return_if_null!(in_aq);
@@ -296,7 +311,7 @@ pub fn AudioQueueAllocateBuffer(
         .get_mut(&in_aq)
         .unwrap();
 
-    let packet_description_capacity = if env
+    let mut packet_description_capacity = if env
         .bundle
         .bundle_identifier()
         .starts_with("com.ea.candcra")
@@ -307,6 +322,14 @@ pub fn AudioQueueAllocateBuffer(
         0
     };
 
+    // `AudioStreamPacketDescription` is 16 bytes. The app fills these in (or
+    // reads them back), so they must exist even though we do not use them.
+    let packet_descriptions: MutVoidPtr = if in_number_packet_desc > 0 {
+        packet_description_capacity = in_number_packet_desc;
+        env.mem.alloc(in_number_packet_desc * 16)
+    } else {
+        Ptr::null()
+    };
     let audio_data = env.mem.alloc(in_buffer_byte_size);
     let buffer_ptr = env.mem.alloc_and_write(AudioQueueBuffer {
         audio_data_bytes_capacity: in_buffer_byte_size,
@@ -314,7 +337,7 @@ pub fn AudioQueueAllocateBuffer(
         audio_data_byte_size: 0,
         user_data: Ptr::null(),
         packet_description_capacity,
-        _packet_descriptions: Ptr::null(),
+        _packet_descriptions: packet_descriptions,
         _packet_description_count: 0,
     });
     host_object.buffers.push(buffer_ptr);

@@ -296,3 +296,34 @@ Other options:
         stack and branch based on the stack's content. There is normally
         no reason to enable this option. The number of bytes must be
         chosen carefully on a per-app basis.
+
+    --ignore-unknown-selectors
+        (Local fork, debugging aid.) Instead of crashing when an app sends a
+        message that no class implements, log it and carry on as if the method
+        returned nil/0. Also ignores messages sent to deallocated objects and
+        to classes touchHLE doesn't implement (as if sent to nil), and calls
+        to C functions touchHLE doesn't implement, which return 0 (each such
+        function is logged only once). Lets apps get past dead code such as
+        ad SDKs, but will also hide genuine bugs.
+
+    --trace-messages
+        (Local fork, debugging aid.) Log every Objective-C message the app
+        sends, as "[Class 0xobject selector]". Also logs every call to a host
+        (C) function that is already linked, as "[C] name", and logs
+        "[C] name (first call)" when a host function is first linked.
+        Produces very large logs, since frequently called functions such as
+        _malloc are included.
+
+    --probe-guest=ADDR,ADDR,...
+        (Local fork, debugging aid.) For each hexadecimal address given, which
+        must be the first instruction of ARM-mode (not Thumb) guest code, log
+        the first time that code runs, with the argument registers and the 112
+        bytes of memory at r0, r0+216 and r1 when those are valid addresses.
+        Works by temporarily replacing the instruction; later calls are not
+        logged. Useful for finding out which of an app's routines really run.
+--reported-ios-version=X
+  Report a validated numeric iOS version to the guest UIDevice. Android uses
+  the detected IPA minimum version. This reports metadata and does not provide
+  additional framework support. Without this option, use the bundle's valid
+  MinimumOSVersion, falling back to 2.0.
+

@@ -36,7 +36,10 @@ pub const CLASSES: ClassExports = objc_classes! {
 }
 + (id)allocWithZone:(NSZonePtr)_zone { // struct _NSZone*
     log_dbg!("[{:?} allocWithZone:]", this);
-    env.objc.alloc_object(this, Box::new(TrivialHostObject), &mut env.mem)
+    let object = env.objc.alloc_object(this, Box::new(TrivialHostObject), &mut env.mem);
+    // Run C++ member constructors (see call_cxx_construct).
+    crate::objc::call_cxx_construct(env, object);
+    object
 }
 
 + (id)new {
@@ -58,8 +61,11 @@ pub const CLASSES: ClassExports = objc_classes! {
 + (())release {
     // classes are not refcounted
 }
-+ (())autorelease {
-    // classes are not refcounted
++ (id)autorelease {
+    this // classes are not refcounted
+}
++ (Class)superclass {
+    env.objc.superclass_of(this)
 }
 
 + (bool)instancesRespondToSelector:(SEL)selector {
@@ -234,6 +240,13 @@ forUndefinedKey:(id)key { // NSString*
     let class: Class = ObjC::read_isa(this, &env.mem);
     let class_name_string = env.objc.get_class_name(class).to_owned(); // TODO: Avoid copying
     let key_string = to_rust_string(env, key);
+    if env.options.ignore_unknown_selectors {
+        log!(
+            "Ignoring setValue:forUndefinedKey: {:?} on {:?} (instance of {})",
+            key_string, this, class_name_string
+        );
+        return;
+    }
     panic!("Object {:?} of class {:?} ({:?}) does not have a setter for {} ({:?})\
         \nAvailable selectors: {}\nAvailable ivars: {}",
         this, class_name_string, class, key_string, key,

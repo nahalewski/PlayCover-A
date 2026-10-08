@@ -41,7 +41,7 @@ fn CFNumberCreate(
     value_ptr: ConstVoidPtr,
 ) -> CFNumberRef {
     // TODO: unique some common numbers to improve performance
-    assert!(allocator == kCFAllocatorDefault || env.mem.read(allocator).is_system_default()); // unimplemented
+    assert!(allocator.is_null() || allocator == kCFAllocatorDefault || env.mem.read(allocator).is_system_default()); // unimplemented
     log_dbg!("CFNumberCreate type {}", type_);
     let num = msg_class![env; NSNumber alloc];
     match type_ {

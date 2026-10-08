@@ -26,4 +26,13 @@ extern "C" {
     ) -> *mut c_uchar;
     pub fn stbi_image_free(retval_from_stbi_load: *mut c_void);
     pub fn stbi_failure_reason() -> *const c_char;
+    pub fn touchHLE_encode_image(
+        jpeg: c_int,
+        quality: c_int,
+        rgba: *const c_uchar,
+        w: c_int,
+        h: c_int,
+        out_len: *mut usize,
+    ) -> *mut c_uchar;
+    pub fn touchHLE_free_encoded(encoded: *mut c_void);
 }

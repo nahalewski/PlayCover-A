@@ -20,10 +20,12 @@ pub mod ui_device;
 pub mod ui_event;
 pub mod ui_font;
 pub mod ui_geometry;
+pub mod ui_gesture_recognizer;
 pub mod ui_graphics;
 pub mod ui_image;
 pub mod ui_image_picker_controller;
 pub mod ui_local_notification;
+pub mod ui_navigation_item;
 pub mod ui_nib;
 pub mod ui_pasteboard;
 pub mod ui_responder;
@@ -42,6 +44,7 @@ pub const DYLIB: crate::dyld::HostDylib = crate::dyld::HostDylib {
         ui_color::CLASSES,
         ui_device::CLASSES,
         ui_event::CLASSES,
+        ui_gesture_recognizer::CLASSES,
         ui_font::CLASSES,
         ui_image::CLASSES,
         ui_image_picker_controller::CLASSES,
@@ -61,9 +64,14 @@ pub const DYLIB: crate::dyld::HostDylib = crate::dyld::HostDylib {
         ui_view::ui_control::ui_switch::CLASSES,
         ui_view::ui_image_view::CLASSES,
         ui_view::ui_label::CLASSES,
+        ui_view::ui_navigation_bar::CLASSES,
+        ui_navigation_item::CLASSES,
         ui_view::ui_page_control::CLASSES,
         ui_view::ui_picker_view::CLASSES,
         ui_view::ui_scroll_view::CLASSES,
+        ui_view::ui_table_view::CLASSES,
+        ui_view::ui_table_view_cell::CLASSES,
+        ui_view::ui_toolbar::CLASSES,
         ui_view::ui_scroll_view::ui_text_view::CLASSES,
         ui_view::ui_web_view::CLASSES,
         ui_view::ui_window::CLASSES,
@@ -80,6 +88,7 @@ pub const DYLIB: crate::dyld::HostDylib = crate::dyld::HostDylib {
         ui_application::FUNCTIONS,
         ui_geometry::FUNCTIONS,
         ui_graphics::FUNCTIONS,
+        ui_image::FUNCTIONS,
     ],
 };
 
@@ -132,8 +141,20 @@ pub fn handle_events(env: &mut Environment) -> Option<Instant> {
                 // We can usually handle this in time, so there won't be data
                 // loss, nor problems with background resource usage or audio.
                 // TODO: Handle this better.
-                log!("Handling app-will-resign-active event: exiting.");
-                ui_application::exit(env);
+                if cfg!(target_os = "android") {
+                    // Local fork change: on Android, SDL itself stops delivering
+                    // events and blocks the (single) emulation thread while the
+                    // app is in the background, which freezes every guest thread
+                    // at once. So rather than shutting the app down (which let
+                    // other guest threads run into half-torn-down objects and
+                    // crash), just stay alive and resume when the app comes
+                    // back. If Android kills the process meanwhile, the usual
+                    // app-will-terminate path handles it.
+                    log!("Handling app-will-resign-active event: staying alive (Android pauses the event loop).");
+                } else {
+                    log!("Handling app-will-resign-active event: exiting.");
+                    ui_application::exit(env);
+                }
             }
             Event::AppWillTerminate => {
                 log!("Handling app-will-terminate event.");

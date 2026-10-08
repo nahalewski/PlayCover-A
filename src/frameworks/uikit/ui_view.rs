@@ -12,9 +12,13 @@ pub mod ui_alert_view;
 pub mod ui_control;
 pub mod ui_image_view;
 pub mod ui_label;
+pub mod ui_navigation_bar;
 pub mod ui_page_control;
 pub mod ui_picker_view;
 pub mod ui_scroll_view;
+pub mod ui_table_view;
+pub mod ui_table_view_cell;
+pub mod ui_toolbar;
 pub mod ui_web_view;
 pub mod ui_window;
 
@@ -158,6 +162,11 @@ pub const CLASSES: ClassExports = objc_classes! {
 
 + (Class)layerClass {
     env.objc.get_known_class("CALayer", &mut env.mem)
+}
+
++ (())setAnimationsEnabled:(bool)enabled {
+    // Accepted: animations here only ever run when the app asks for them.
+    log_dbg!("[UIView setAnimationsEnabled:{:?}]", enabled);
 }
 
 + (())setAnimationDuration:(NSTimeInterval)duration {

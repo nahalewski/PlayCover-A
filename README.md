@@ -1,3 +1,26 @@
+# PlayCover-A
+
+Android iOS compatibility project based on touchHLE. This fork adds an Android
+IPA launcher, repository browsing, app icons and shortcuts, persistent downloads,
+and experimental ARM64 loading and runtime compatibility work.
+
+ARM64 support remains experimental: the verified test path executes original
+runtime startup code, but no 64-bit game title screen or gameplay is verified.
+The current native snapshot passes 534 tests (nine opt-in tests ignored).
+See [current status](dev-docs/playcover/WHERE_WE_ARE.md) and
+[remaining work](dev-docs/playcover/NEEDS_TO_DO.md) for the evidence and limitations.
+
+Clone with `git clone --recurse-submodules https://github.com/nahalewski/PlayCover-A.git`.
+The `tools/` directory contains the project build, auditing, and regression helpers.
+Some helpers retain machine-specific paths from the development environment;
+configure those paths before using them on another machine. Firmware, app inputs,
+private account state, and generated APKs are not included.
+
+Upstream licensing and acknowledgments remain applicable. The original touchHLE
+README follows and describes upstream support, which differs from this fork.
+
+---
+
 # touchHLE: high-level emulator for early iOS apps
 
 **touchHLE** is a high-level emulator for early iOS apps. It runs on modern desktop operating systems and Android, and is written in Rust.

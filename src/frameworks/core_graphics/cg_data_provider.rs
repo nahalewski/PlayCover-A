@@ -202,6 +202,15 @@ pub(super) fn from_cg_image(env: &mut Environment, cg_image: CGImageRef) -> CGDa
 }
 
 /// Generic interface for host code.
+/// Whether the provider reads straight from guest memory that the app may later
+/// rewrite (as opposed to data we own).
+pub(super) fn is_guest_memory(env: &mut Environment, provider: CGDataProviderRef) -> bool {
+    matches!(
+        *env.objc.borrow(provider),
+        CGDataProviderHostObject::DataWithSize { .. }
+    )
+}
+
 pub(super) fn borrow_bytes(env: &mut Environment, provider: CGDataProviderRef) -> &[u8] {
     match *env.objc.borrow(provider) {
         CGDataProviderHostObject::DataWithSize { data, size, .. } => {

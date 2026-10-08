@@ -31,8 +31,49 @@ const NSFileSystemFreeSize: &str = "NSFileSystemFreeSize";
 pub const NSFileType: &str = "NSFileType";
 pub const NSFileTypeDirectory: &str = "NSFileTypeDirectory";
 pub const NSFileTypeRegular: &str = "NSFileTypeRegular";
+pub const NSFilePosixPermissions: &str = "NSFilePosixPermissions";
+pub const NSFileCreationDate: &str = "NSFileCreationDate";
+pub const NSFileOwnerAccountName: &str = "NSFileOwnerAccountName";
+pub const NSFileGroupOwnerAccountName: &str = "NSFileGroupOwnerAccountName";
+pub const NSFileReferenceCount: &str = "NSFileReferenceCount";
+pub const NSFileProtectionKey: &str = "NSFileProtectionKey";
+pub const NSFileProtectionNone: &str = "NSFileProtectionNone";
 
 pub const CONSTANTS: ConstantExports = &[
+    ("_NSFileSystemSize", HostConstant::NSString("NSFileSystemSize")),
+    ("_kCFURLFileLength", HostConstant::NSString("kCFURLFileLength")),
+    (
+        "_NSURLAuthenticationMethodServerTrust",
+        HostConstant::NSString("NSURLAuthenticationMethodServerTrust"),
+    ),
+    (
+        "_NSFilePosixPermissions",
+        HostConstant::NSString(NSFilePosixPermissions),
+    ),
+    (
+        "_NSFileCreationDate",
+        HostConstant::NSString(NSFileCreationDate),
+    ),
+    (
+        "_NSFileOwnerAccountName",
+        HostConstant::NSString(NSFileOwnerAccountName),
+    ),
+    (
+        "_NSFileGroupOwnerAccountName",
+        HostConstant::NSString(NSFileGroupOwnerAccountName),
+    ),
+    (
+        "_NSFileReferenceCount",
+        HostConstant::NSString(NSFileReferenceCount),
+    ),
+    (
+        "_NSFileProtectionKey",
+        HostConstant::NSString(NSFileProtectionKey),
+    ),
+    (
+        "_NSFileProtectionNone",
+        HostConstant::NSString(NSFileProtectionNone),
+    ),
     (
         "_NSFileModificationDate",
         HostConstant::NSString(NSFileModificationDate),
@@ -74,6 +115,14 @@ fn NSSearchPathForDirectoriesInDomains(
         NSDocumentDirectory => env.fs.home_directory().join("Documents"),
         NSLibraryDirectory => env.fs.home_directory().join("Library"),
         NSCachesDirectory => env.fs.home_directory().join("Library").join("Caches"),
+        // NSApplicationSupportDirectory = 14
+        14 => env
+            .fs
+            .home_directory()
+            .join("Library")
+            .join("Application Support"),
+        // NSDownloadsDirectory = 15, NSTrashDirectory = 102: keep them app-local too
+        15 => env.fs.home_directory().join("Documents").join("Downloads"),
         _ => todo!("NSSearchPathDirectory {}", directory),
     };
     let dir = ns_string::from_rust_string(env, String::from(dir));
@@ -127,6 +176,12 @@ pub const CLASSES: ClassExports = objc_classes! {
     }
 }
 
+// Old apps release `[NSFileManager defaultManager]` even though the shared
+// instance must live forever, so reference counting is a no-op for these.
+- (id)retain { this }
+- (())release {}
+- (id)autorelease { this }
+
 - (id)currentDirectoryPath {
     ns_string::from_rust_string(env, env.fs.working_directory().as_str().to_string())
 }
@@ -147,9 +202,10 @@ pub const CLASSES: ClassExports = objc_classes! {
         let path = ns_string::to_rust_string(env, path); // TODO: avoid copy
         // fileExistsAtPath: will return true for directories
         // hence Fs::exists() rather than Fs::is_file() is appropriate.
-        env.fs.exists(GuestPath::new(&path))
+        let exists = env.fs.exists(GuestPath::new(&path));
+        log_dbg!("fileExistsAtPath:{:?} => {}", path, exists);
+        exists
     };
-    log_dbg!("[(NSFileManager*) {:?} fileExistsAtPath:{:?}] => {}", this, path, res_exists);
     res_exists
 }
 
@@ -175,7 +231,10 @@ pub const CLASSES: ClassExports = objc_classes! {
 - (bool)createFileAtPath:(id)path // NSString*
                 contents:(id)data // NSData*
               attributes:(id)attributes { // NSDictionary*
-    assert!(attributes == nil); // TODO
+    if attributes != nil {
+        // TODO: attributes (permissions, dates, ...) are ignored.
+        log_once!("TODO: createFileAtPath:contents:attributes: attributes are ignored");
+    }
     if data == nil {
         let empty: id = msg_class![env; NSData new];
         let res: bool = msg![env; empty writeToFile:path atomically:false];
@@ -240,7 +299,10 @@ pub const CLASSES: ClassExports = objc_classes! {
   withIntermediateDirectories:(bool)with_intermediates
                    attributes:(id)attributes // NSDictionary*
                         error:(MutPtr<id>)error { // NSError**
-    assert_eq!(attributes, nil); // TODO
+    if attributes != nil {
+        // TODO: attributes (permissions, …) are ignored.
+        log_once!("TODO: createDirectoryAtPath:…attributes: attributes are ignored");
+    }
 
     let path_str = ns_string::to_rust_string(env, path); // TODO: avoid copy
     let res = if with_intermediates {
@@ -254,12 +316,24 @@ pub const CLASSES: ClassExports = objc_classes! {
             true
         }
         Err(err) => {
-            assert!(error.is_null()); // TODO
             log!(
                 "Warning: createDirectoryAtPath {} failed with {:?}, returning false",
                 path_str,
                 err,
             );
+            if !error.is_null() {
+                // NSFileWriteFileExistsError, NSFileNoSuchFileError, or the generic write error.
+                let code: super::NSInteger = match err {
+                    FsError::AlreadyExist => 516,
+                    FsError::DoesNotExist | FsError::NonexistentParentDir => 4,
+                    _ => 512,
+                };
+                let domain = get_static_str(env, NSCocoaErrorDomain);
+                let ns_error = msg_class![env; NSError alloc];
+                let ns_error = msg![env; ns_error initWithDomain:domain code:code userInfo:nil];
+                autorelease(env, ns_error);
+                env.mem.write(error, ns_error);
+            }
             false
         }
     }
@@ -395,8 +469,6 @@ pub const CLASSES: ClassExports = objc_classes! {
 
 - (id)attributesOfItemAtPath:(id)path // NSString *
                        error:(MutPtr<id>)error { // NSError **
-    assert!(error.is_null()); // TODO
-
     // TODO: other attributes
     log_once!("Warning: NSFileManager attributesOfItemAtPath:error: returns only NSFileType, NSFileModificationDate and NSFileSize attributes!");
 

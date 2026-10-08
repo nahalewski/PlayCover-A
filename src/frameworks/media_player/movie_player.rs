@@ -6,6 +6,7 @@
 //! `MPMoviePlayerController` etc.
 
 use crate::dyld::{ConstantExports, HostConstant};
+use crate::frameworks::core_graphics::CGRect;
 use crate::frameworks::foundation::{ns_string, ns_url, NSInteger, NSTimeInterval};
 use crate::frameworks::uikit::ui_device::UIDeviceOrientation;
 use crate::objc::{
@@ -47,6 +48,8 @@ pub const MPMoviePlayerContentPreloadDidFinishNotification: &str =
     "MPMoviePlayerContentPreloadDidFinishNotification";
 pub const MPMoviePlayerScalingModeDidChangeNotification: &str =
     "MPMoviePlayerScalingModeDidChangeNotification";
+pub const MPMoviePlayerLoadStateDidChangeNotification: &str =
+    "MPMoviePlayerLoadStateDidChangeNotification";
 // TODO: More notifications?
 const MPMoviePlayerPlaybackDidFinishReasonUserInfoKey: &str =
     "MPMoviePlayerPlaybackDidFinishReasonUserInfoKey";
@@ -66,6 +69,10 @@ pub const CONSTANTS: ConstantExports = &[
         HostConstant::NSString(MPMoviePlayerScalingModeDidChangeNotification),
     ),
     (
+        "_MPMoviePlayerLoadStateDidChangeNotification",
+        HostConstant::NSString(MPMoviePlayerLoadStateDidChangeNotification),
+    ),
+    (
         "_MPMoviePlayerPlaybackDidFinishReasonUserInfoKey",
         HostConstant::NSString(MPMoviePlayerPlaybackDidFinishReasonUserInfoKey),
     ),
@@ -74,8 +81,106 @@ pub const CONSTANTS: ConstantExports = &[
 struct MPMoviePlayerControllerHostObject {
     // NSURL *
     content_url: id,
+    view: id,
+    /// Lazily created black `-backgroundView`.
+    background_view: id,
+    window: id,
+    previous_key_window: id,
+    fullscreen: bool,
 }
 impl HostObject for MPMoviePlayerControllerHostObject {}
+
+fn legacy_fullscreen(version: &str) -> bool {
+    let mut parts = version.split('.');
+    let major = parts
+        .next()
+        .and_then(|v| v.parse::<u16>().ok())
+        .unwrap_or(2);
+    let minor = parts
+        .next()
+        .and_then(|v| v.parse::<u16>().ok())
+        .unwrap_or(0);
+    (major, minor) < (3, 2)
+}
+
+fn player_view(env: &mut Environment, player: id) -> id {
+    let view = env
+        .objc
+        .borrow::<MPMoviePlayerControllerHostObject>(player)
+        .view;
+    if view != nil {
+        return view;
+    }
+    let screen: id = msg_class![env; UIScreen mainScreen];
+    let bounds: CGRect = msg![env; screen bounds];
+    let view: id = msg_class![env; UIView alloc];
+    let view: id = msg![env; view initWithFrame:bounds];
+    let black: id = msg_class![env; UIColor blackColor];
+    () = msg![env; view setBackgroundColor:black];
+    env.objc
+        .borrow_mut::<MPMoviePlayerControllerHostObject>(player)
+        .view = view;
+    view
+}
+
+fn present_fullscreen(env: &mut Environment, player: id) {
+    if env
+        .objc
+        .borrow::<MPMoviePlayerControllerHostObject>(player)
+        .window
+        != nil
+    {
+        return;
+    }
+    let previous = env
+        .framework_state
+        .uikit
+        .ui_view
+        .ui_window
+        .key_window
+        .unwrap_or(nil);
+    retain(env, previous);
+    let screen: id = msg_class![env; UIScreen mainScreen];
+    let bounds: CGRect = msg![env; screen bounds];
+    let window: id = msg_class![env; UIWindow alloc];
+    let window: id = msg![env; window initWithFrame:bounds];
+    let view = player_view(env, player);
+    () = msg![env; window addSubview:view];
+    {
+        let host = env
+            .objc
+            .borrow_mut::<MPMoviePlayerControllerHostObject>(player);
+        host.window = window;
+        host.previous_key_window = previous;
+    }
+    () = msg![env; window makeKeyAndVisible];
+}
+
+fn dismiss_fullscreen(env: &mut Environment, player: id) {
+    let (window, previous) = {
+        let host = env
+            .objc
+            .borrow_mut::<MPMoviePlayerControllerHostObject>(player);
+        (
+            std::mem::replace(&mut host.window, nil),
+            std::mem::replace(&mut host.previous_key_window, nil),
+        )
+    };
+    if window == nil {
+        return;
+    }
+    () = msg![env; window setHidden:true];
+    let view = env
+        .objc
+        .borrow::<MPMoviePlayerControllerHostObject>(player)
+        .view;
+    () = msg![env; view removeFromSuperview];
+    if env.framework_state.uikit.ui_view.ui_window.key_window == Some(window) && previous != nil {
+        () = msg![env; previous makeKeyWindow];
+    }
+    release(env, window);
+    release(env, previous);
+}
 
 pub const CLASSES: ClassExports = objc_classes! {
 
@@ -88,6 +193,11 @@ pub const CLASSES: ClassExports = objc_classes! {
 + (id)allocWithZone:(NSZonePtr)_zone {
     let host_object = Box::new(MPMoviePlayerControllerHostObject {
         content_url: nil,
+        view: nil,
+        background_view: nil,
+        window: nil,
+        previous_key_window: nil,
+        fullscreen: false,
     });
     env.objc.alloc_object(this, host_object, &mut env.mem)
 }
@@ -103,17 +213,24 @@ pub const CLASSES: ClassExports = objc_classes! {
     retain(env, url);
     env.objc.borrow_mut::<MPMoviePlayerControllerHostObject>(this).content_url = url;
 
-    // Act as if loading immediately completed (Spore Origins waits for this).
+    // Defer the unsupported-decoder result until the application returns to
+    // its run loop, allowing it to finish configuring the presentation.
     State::get(env).pending_notifications.push_back(
         (MPMoviePlayerContentPreloadDidFinishNotification, this, Instant::now())
     );
+    retain(env, this); // Pending notifications own their sender.
 
     this
 }
 
 - (())dealloc {
+    dismiss_fullscreen(env, this);
     let url = env.objc.borrow::<MPMoviePlayerControllerHostObject>(this).content_url;
     release(env, url);
+    let view = env.objc.borrow::<MPMoviePlayerControllerHostObject>(this).view;
+    release(env, view);
+    let background_view = env.objc.borrow::<MPMoviePlayerControllerHostObject>(this).background_view;
+    release(env, background_view);
 
     env.objc.dealloc_object(this, &mut env.mem);
 }
@@ -139,17 +256,74 @@ pub const CLASSES: ClassExports = objc_classes! {
     todo_objc_setter!(this, style);
 }
 - (())setFullscreen:(bool)fullsreen {
-    todo_objc_setter!(this, fullsreen);
+    env.objc.borrow_mut::<MPMoviePlayerControllerHostObject>(this).fullscreen = fullsreen;
+    if fullsreen { present_fullscreen(env, this); } else { dismiss_fullscreen(env, this); }
 }
 - (())setInitialPlaybackTime:(NSTimeInterval)initial_time {
     todo_objc_setter!(this, initial_time);
 }
 
 - (id)view {
-    nil // TODO
+    player_view(env, this)
+}
+
+- (id)backgroundView {
+    let existing = env.objc.borrow::<MPMoviePlayerControllerHostObject>(this).background_view;
+    if existing != nil {
+        return existing;
+    }
+    let screen: id = msg_class![env; UIScreen mainScreen];
+    let bounds: CGRect = msg![env; screen bounds];
+    let view: id = msg_class![env; UIView alloc];
+    let view: id = msg![env; view initWithFrame:bounds];
+    let black: id = msg_class![env; UIColor blackColor];
+    () = msg![env; view setBackgroundColor:black];
+    env.objc.borrow_mut::<MPMoviePlayerControllerHostObject>(this).background_view = view;
+    view
+}
+
+- (())setMovieSourceType:(NSInteger)_source_type {
+    // Unused: there is no real decoder.
+}
+
+// Apps wait for a load-state notification before calling `play`. Report the
+// content as ready (MPMovieLoadStatePlayable | MPMovieLoadStatePlaythroughOK);
+// the later `play` ends with the "no decoder" completion notification.
+- (())prepareToPlay {
+    log!("TODO: [(MPMoviePlayerController*){:?} prepareToPlay]", this);
+    State::get(env).pending_notifications.push_back(
+        (MPMoviePlayerLoadStateDidChangeNotification, this, Instant::now())
+    );
+    retain(env, this); // Pending notifications own their sender.
+
+    // There is no movie decoder, so playback cannot happen. Some apps (e.g.
+    // LEGO Harry Potter) never call `play` themselves and only wait for the
+    // completion notification, so report the (failed) playback as finished
+    // shortly afterwards; otherwise they would wait forever on a black screen.
+    let already_pending = State::get(env)
+        .pending_notifications
+        .iter()
+        .any(|&(name, obj, _)| name == MPMoviePlayerPlaybackDidFinishNotification && obj == this);
+    if !already_pending {
+        State::get(env).pending_notifications.push_back((
+            MPMoviePlayerPlaybackDidFinishNotification,
+            this,
+            Instant::now() + Duration::from_millis(1500),
+        ));
+        retain(env, this);
+    }
+}
+- (bool)isPreparedToPlay {
+    log!("[(MPMoviePlayerController*){:?} isPreparedToPlay]", this);
+    true
+}
+- (NSInteger)loadState {
+    log!("[(MPMoviePlayerController*){:?} loadState]", this);
+    3
 }
 
 - (MPMoviePlaybackState)playbackState {
+    log!("[(MPMoviePlayerController*){:?} playbackState]", this);
     MPMoviePlaybackStateStopped // TODO
 }
 
@@ -176,8 +350,15 @@ pub const CLASSES: ClassExports = objc_classes! {
     retain(env, this);
     env.framework_state.media_player.movie_player.active_player = Some(this);
 
-    // Act as if playback immediately completed after 1 second
-    // (various apps wait for this, such as BIA and Hero of Sparta).
+    let version = env.options.reported_ios_version.clone()
+        .or_else(|| env.bundle.minimum_os_version().map(str::to_owned))
+        .unwrap_or_else(|| "2.0".into());
+    if legacy_fullscreen(&version) || env.objc.borrow::<MPMoviePlayerControllerHostObject>(this).fullscreen {
+        present_fullscreen(env, this);
+    }
+
+    // There is currently no movie decoder. Report a playback error through
+    // the documented completion notification, rather than successful playback.
     let notif = (MPMoviePlayerPlaybackDidFinishNotification, this, Instant::now().checked_add(Duration::from_millis(1000)).unwrap());
     for (name, obj, _) in &mut State::get(env).pending_notifications {
         // De-duplicate similar notifications. This can happen if app is calling
@@ -187,6 +368,7 @@ pub const CLASSES: ClassExports = objc_classes! {
         }
     }
     State::get(env).pending_notifications.push_back(notif);
+    retain(env, this);
 }
 
 - (())pause {
@@ -195,11 +377,12 @@ pub const CLASSES: ClassExports = objc_classes! {
 
 - (())stop {
     log!("TODO: [(MPMoviePlayerController*){:?} stop]", this);
-    if env.framework_state.media_player.movie_player.active_player.is_some() {
+    dismiss_fullscreen(env, this);
+    if env.framework_state.media_player.movie_player.active_player == Some(this) {
         // Some applications (like NOVA2) may send 2 `stop` messages for each
         // 1 `play` message for the player. In that case, we want to release
         // the active player only once.
-        assert!(this == env.framework_state.media_player.movie_player.active_player.take().unwrap());
+        env.framework_state.media_player.movie_player.active_player = None;
         release(env, this);
     }
 }
@@ -239,9 +422,46 @@ pub(super) fn handle_players(env: &mut Environment) {
         }
     }
     for (name_str, object) in notifs_to_run {
+        log!("Posting movie player notification {} for {:?}", name_str, object);
         let name = ns_string::get_static_str(env, name_str);
         let center: id = msg_class![env; NSNotificationCenter defaultCenter];
-        // TODO: should there be some user info attached?
-        let _: () = msg![env; center postNotificationName:name object:object];
+        if name_str == MPMoviePlayerPlaybackDidFinishNotification {
+            let reason: id = msg_class![env; NSNumber numberWithInteger:2i32];
+            let key =
+                ns_string::get_static_str(env, MPMoviePlayerPlaybackDidFinishReasonUserInfoKey);
+            let info: id = msg_class![env; NSMutableDictionary dictionary];
+            () = msg![env; info setObject:reason forKey:key];
+            let domain = ns_string::get_static_str(env, "touchHLEMediaPlaybackErrorDomain");
+            let error_code: NSInteger = -1;
+            let error: id =
+                msg_class![env; NSError errorWithDomain:domain code:error_code userInfo:nil];
+            let error_key = ns_string::get_static_str(env, "error");
+            () = msg![env; info setObject:error forKey:error_key];
+            log!("Movie playback failed: no movie decoder is available");
+            () = msg![env; center postNotificationName:name object:object userInfo:info];
+            // The callback can stop the player or start another one. Do not
+            // dismiss a new presentation belonging to a different player.
+            if State::get(env).active_player == Some(object) {
+                () = msg![env; object stop];
+            }
+        } else {
+            () = msg![env; center postNotificationName:name object:object];
+        }
+        release(env, object);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::legacy_fullscreen;
+
+    #[test]
+    fn legacy_presentation_changes_at_ios_3_2() {
+        assert!(legacy_fullscreen("2.0"));
+        assert!(legacy_fullscreen("3.0"));
+        assert!(legacy_fullscreen("3.1.3"));
+        assert!(!legacy_fullscreen("3.2"));
+        assert!(!legacy_fullscreen("4.0"));
+        assert!(!legacy_fullscreen("14.0"));
     }
 }

@@ -9,7 +9,7 @@
 //! - [Itanium C++ ABI specification](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#dso-dtor-runtime-api)
 
 use crate::abi::GuestFunction;
-use crate::dyld::{export_c_func, FunctionExports};
+use crate::dyld::{export_c_func, ConstantExports, FunctionExports, HostConstant};
 use crate::mem::MutVoidPtr;
 use crate::Environment;
 
@@ -37,4 +37,21 @@ fn __cxa_finalize(_env: &mut Environment, d: MutVoidPtr) {
 pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(__cxa_atexit(_, _, _)),
     export_c_func!(__cxa_finalize(_)),
+    export_c_func!(__stack_chk_fail()),
 ];
+
+/// Stack protector (`-fstack-protector`): functions with arrays on the stack
+/// read this canary on entry, stash it in their frame, and compare it again on
+/// exit. The symbol is a data variable, so the app's GOT entry needs to hold
+/// its address. Any fixed non-zero value will do.
+pub const CONSTANTS: ConstantExports = &[(
+    "___stack_chk_guard",
+    HostConstant::Custom(|env| {
+        let guard: u32 = 0x2f3a_9c51;
+        env.mem.alloc_and_write(guard).cast().cast_const()
+    }),
+)];
+
+fn __stack_chk_fail(_env: &mut Environment) {
+    panic!("__stack_chk_fail called: the app detected stack corruption");
+}

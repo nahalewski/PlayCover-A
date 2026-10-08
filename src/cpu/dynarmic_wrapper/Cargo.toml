@@ -15,3 +15,9 @@ path = "lib.rs"
 [build-dependencies]
 cc = { workspace = true }
 cmake = { workspace = true }
+
+[dependencies]
+libc = { version = "0.2.180", optional = true }
+
+[features]
+a64 = ["dep:libc"]

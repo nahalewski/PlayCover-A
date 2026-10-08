@@ -28,7 +28,7 @@ fn __toupper(_env: &mut Environment, c: i32) -> i32 {
     }
 }
 
-fn __maskrune(env: &mut Environment, rune: i32, mask: u32) -> i32 {
+pub fn __maskrune(env: &mut Environment, rune: i32, mask: u32) -> i32 {
     // TODO: do not re-create rune table on each call
     let default_rune_locale_ptr = get_default_rune_locale(env);
     let rune_locale: RuneLocale = env.mem.read(default_rune_locale_ptr.cast());

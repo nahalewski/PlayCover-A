@@ -181,7 +181,9 @@ pub const CLASSES: ClassExports = objc_classes! {
     let ValueVariant::Data(data) = val.value() else {
         unreachable!()
     };
-    assert_eq!(6, data[0]);
+    if data[0] != 6 {
+        log!("Warning: unexpected nib geometry encoding tag {} (len {})", data[0], data.len());
+    }
     let x = f32::from_le_bytes(data[1..5].try_into().unwrap());
     let y = f32::from_le_bytes(data[5..9].try_into().unwrap());
     log_dbg!("decoded CGPoint {} {}", x, y);
@@ -192,7 +194,9 @@ pub const CLASSES: ClassExports = objc_classes! {
     let ValueVariant::Data(data) = val.value() else {
         unreachable!()
     };
-    assert_eq!(6, data[0]);
+    if data[0] != 6 {
+        log!("Warning: unexpected nib geometry encoding tag {} (len {})", data[0], data.len());
+    }
     let x = f32::from_le_bytes(data[1..5].try_into().unwrap());
     let y = f32::from_le_bytes(data[5..9].try_into().unwrap());
     let width = f32::from_le_bytes(data[9..13].try_into().unwrap());

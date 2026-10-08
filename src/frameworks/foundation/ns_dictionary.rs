@@ -327,6 +327,34 @@ fn init_with_dictionary_common(env: &mut Environment, this: id, other_dict: id) 
     this
 }
 
+/// `initWithDictionary:copyItems:`: like `initWithDictionary:`, but every value is
+/// `copy`-ed first when `copy_items` is true.
+fn init_with_dictionary_copy_items_common(
+    env: &mut Environment,
+    this: id,
+    other_dict: id,
+    copy_items: bool,
+) -> id {
+    if !copy_items {
+        return init_with_dictionary_common(env, this, other_dict);
+    }
+    let other_host_object: DictionaryHostObject = std::mem::take(env.objc.borrow_mut(other_dict));
+    let pairs: Vec<(id, id)> = other_host_object
+        .iter_keys()
+        .map(|key| (key, other_host_object.lookup(env, key)))
+        .collect();
+    *env.objc.borrow_mut(other_dict) = other_host_object;
+
+    let mut host_object = <DictionaryHostObject as Default>::default();
+    for (key, object) in pairs {
+        let copied: id = msg![env; object copy];
+        host_object.insert(env, key, copied, /* copy_key: */ true);
+        release(env, copied); // the dictionary now holds its own reference
+    }
+    *env.objc.borrow_mut(this) = host_object;
+    this
+}
+
 /// Helper function so share `initWithObjects:ForKeys:` implementations
 fn init_with_objects_for_keys_common(env: &mut Environment, this: id, objects: id, keys: id) -> id {
     let keys_size: NSUInteger = msg![env; keys count];
@@ -538,6 +566,11 @@ pub const CLASSES: ClassExports = objc_classes! {
     msg![env; this objectForKey:file_type_key]
 }
 
+// Modern Objective-C subscripting: `dictionary[key]`.
+- (id)objectForKeyedSubscript:(id)key {
+    msg![env; this objectForKey:key]
+}
+
 @end
 
 // NSMutableDictionary is an abstract class. A subclass must provide everything
@@ -593,6 +626,15 @@ pub const CLASSES: ClassExports = objc_classes! {
     res
 }
 
+// `dictionary[key] = object`; assigning nil removes the key.
+- (())setObject:(id)object forKeyedSubscript:(id)key {
+    if object == nil {
+        msg![env; this removeObjectForKey:key]
+    } else {
+        msg![env; this setObject:object forKey:key]
+    }
+}
+
 @end
 
 // Our private subclass that is the single implementation of NSDictionary for
@@ -621,6 +663,11 @@ pub const CLASSES: ClassExports = objc_classes! {
 
 - (id)initWithDictionary:(id)dictionary {
     init_with_dictionary_common(env, this, dictionary)
+}
+
+- (id)initWithDictionary:(id)dictionary
+              copyItems:(bool)copy_items {
+    init_with_dictionary_copy_items_common(env, this, dictionary, copy_items)
 }
 
 - (id)initWithObjects:(id)objects //NSArray *
@@ -714,6 +761,11 @@ pub const CLASSES: ClassExports = objc_classes! {
     init_with_dictionary_common(env, this, dictionary)
 }
 
+- (id)initWithDictionary:(id)dictionary
+              copyItems:(bool)copy_items {
+    init_with_dictionary_copy_items_common(env, this, dictionary, copy_items)
+}
+
 - (id)init {
     *env.objc.borrow_mut(this) = <DictionaryHostObject as Default>::default();
     this
@@ -797,10 +849,16 @@ pub const CLASSES: ClassExports = objc_classes! {
 
 - (())setObject:(id)object
          forKey:(id)key {
-    // TODO: raise NSInvalidArgumentException
-    assert_ne!(object, nil);
-    // TODO: raise NSInvalidArgumentException
-    assert_ne!(key, nil);
+    // Real Foundation raises NSInvalidArgumentException here; apps that rely
+    // on a failed lookup upstream (we may return nil where iOS would not) are
+    // kept alive by ignoring the insertion.
+    if object == nil || key == nil {
+        log!(
+            "Warning: -[NSMutableDictionary setObject:forKey:] with a nil {} ignored",
+            if object == nil { "object" } else { "key" }
+        );
+        return;
+    }
     let mut host_obj: DictionaryHostObject = std::mem::take(env.objc.borrow_mut(this));
     host_obj.insert(env, key, object, /* copy_key: */ true);
     *env.objc.borrow_mut(this) = host_obj;

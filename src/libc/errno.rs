@@ -106,6 +106,37 @@ fn strerror(env: &mut Environment, err_num: i32) -> ConstPtr<u8> {
     } else {
         let str = match err_num {
             0 => "Undefined error: 0",
+            6 => "Device not configured",
+            7 => "Argument list too long",
+            8 => "Exec format error",
+            12 => "Cannot allocate memory",
+            18 => "Cross-device link",
+            19 => "Operation not supported by device",
+            23 => "Too many open files in system",
+            24 => "Too many open files",
+            25 => "Inappropriate ioctl for device",
+            27 => "File too large",
+            28 => "No space left on device",
+            31 => "Too many links",
+            32 => "Broken pipe",
+            33 => "Numerical argument out of domain",
+            34 => "Result too large",
+            36 => "Operation now in progress",
+            37 => "Operation already in progress",
+            38 => "Socket operation on non-socket",
+            48 => "Address already in use",
+            49 => "Can't assign requested address",
+            50 => "Network is down",
+            51 => "Network is unreachable",
+            53 => "Software caused connection abort",
+            55 => "No buffer space available",
+            56 => "Socket is already connected",
+            57 => "Socket is not connected",
+            61 => "Connection refused",
+            62 => "Too many levels of symbolic links",
+            63 => "File name too long",
+            65 => "No route to host",
+            66 => "Directory not empty",
             EPERM => "Operation not permitted",
             ENOENT => "No such file or directory",
             ESRCH => "No such process",
@@ -129,7 +160,14 @@ fn strerror(env: &mut Environment, err_num: i32) -> ConstPtr<u8> {
             ECONNRESET => "Connection reset by peer",
             ETIMEDOUT => "Operation timed out",
             EOVERFLOW => "Value too large to be stored in data type",
-            _ => unimplemented!("strerror({})", err_num),
+            _ => "",
+        };
+        let unknown;
+        let str = if str.is_empty() {
+            unknown = format!("Unknown error: {err_num}");
+            unknown.as_str()
+        } else {
+            str
         };
         let new_c_str = env.mem.alloc_and_write_cstr(str.as_bytes()).cast_const();
         env.libc_state

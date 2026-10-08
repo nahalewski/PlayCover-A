@@ -83,8 +83,10 @@ pub const CLASSES: ClassExports = objc_classes! {
         timeout_interval,
     );
 
-    // Preserving old behaviour
-    if !env.options.network_access {
+    // Preserving old behaviour (but compatibility mode returns a real request:
+    // apps like Crashlytics assert on nil, and the connection itself still fails
+    // cleanly in NSURLConnection when there is no network).
+    if !env.options.network_access && !env.options.ignore_unknown_selectors {
         log_dbg!(
             "Network access is disabled, [(NSURLRequest *){:?} initWithURL:{} cachePolicy:{} timeoutInterval:{}] -> nil",
             this,
@@ -115,8 +117,10 @@ pub const CLASSES: ClassExports = objc_classes! {
         to_rust_string(env, url_desc)
     );
 
-    // Preserving old behaviour
-    if !env.options.network_access {
+    // Preserving old behaviour (but compatibility mode returns a real request:
+    // apps like Crashlytics assert on nil, and the connection itself still fails
+    // cleanly in NSURLConnection when there is no network).
+    if !env.options.network_access && !env.options.ignore_unknown_selectors {
         log_dbg!(
             "Network access is disabled, [(NSURLRequest *){:?} initWithURL:{}] -> nil",
             this,

@@ -108,7 +108,32 @@ fn pthread_cond_timedwait(
     let time = env.mem.read(abs_time);
     let deadline = Duration::from_secs(time.tv_sec.try_into().unwrap())
         + Duration::from_nanos(time.tv_nsec.try_into().unwrap());
+    cond_timedwait_inner(env, cond, mutex, deadline)
+}
 
+/// Like [pthread_cond_timedwait], but the timeout is relative to now.
+fn pthread_cond_timedwait_relative_np(
+    env: &mut Environment,
+    cond: MutPtr<pthread_cond_t>,
+    mutex: MutPtr<pthread_mutex_t>,
+    rel_time: ConstPtr<timespec>,
+) -> i32 {
+    let time = env.mem.read(rel_time);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap();
+    let deadline = now
+        + Duration::from_secs(time.tv_sec.try_into().unwrap())
+        + Duration::from_nanos(time.tv_nsec.try_into().unwrap());
+    cond_timedwait_inner(env, cond, mutex, deadline)
+}
+
+fn cond_timedwait_inner(
+    env: &mut Environment,
+    cond: MutPtr<pthread_cond_t>,
+    mutex: MutPtr<pthread_mutex_t>,
+    deadline: Duration,
+) -> i32 {
     match check_or_register_cond(env, cond) {
         Ok(_) => {}
         Err(e) => {
@@ -265,6 +290,7 @@ pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(pthread_cond_init(_, _)),
     export_c_func!(pthread_cond_wait(_, _)),
     export_c_func!(pthread_cond_timedwait(_, _, _)),
+    export_c_func!(pthread_cond_timedwait_relative_np(_, _, _)),
     export_c_func!(pthread_cond_signal(_)),
     export_c_func!(pthread_cond_broadcast(_)),
     export_c_func!(pthread_cond_destroy(_)),

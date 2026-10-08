@@ -51,9 +51,14 @@ pub struct Options {
     pub gles1_implementation: Option<GLESImplementation>,
     pub direct_memory_access: bool,
     pub gdb_listen_addrs: Option<Vec<SocketAddr>>,
+    /// Guest (ARM-mode) addresses to log the first execution of; see --probe-guest.
+    pub probe_guest: Vec<u32>,
     pub preferred_languages: Option<Vec<String>>,
+    pub reported_ios_version: Option<String>,
     pub headless: bool,
     pub print_fps: bool,
+    pub ignore_unknown_selectors: bool,
+    pub trace_messages: bool,
     pub fps_limit: Option<f64>,
     pub force_composition: bool,
     pub network_access: bool,
@@ -84,9 +89,13 @@ impl Default for Options {
             gles1_implementation: None,
             direct_memory_access: true,
             gdb_listen_addrs: None,
+            probe_guest: Vec::new(),
             preferred_languages: None,
+            reported_ios_version: None,
             headless: false,
             print_fps: false,
+            ignore_unknown_selectors: false,
+            trace_messages: false,
             fps_limit: Some(60.0), // Original iPhone is 60Hz and uses v-sync,
             force_composition: false,
             network_access: false,
@@ -116,6 +125,11 @@ impl Options {
 
         if arg == "--fullscreen" {
             self.fullscreen = true;
+        } else if let Some(version) = arg.strip_prefix("--reported-ios-version=") {
+            self.reported_ios_version = Some(
+                crate::frameworks::uikit::ui_device::canonical_ios_version(version)
+                    .ok_or_else(|| "Invalid reported iOS version".to_string())?,
+            );
         } else if arg == "--upside-down" {
             self.initial_orientation = DeviceOrientation::PortraitUpsideDown;
         } else if arg == "--landscape-left" {
@@ -215,6 +229,12 @@ impl Options {
             );
         } else if arg == "--disable-direct-memory-access" {
             self.direct_memory_access = false;
+        } else if let Some(list) = arg.strip_prefix("--probe-guest=") {
+            self.probe_guest = list
+                .split(',')
+                .map(|s| u32::from_str_radix(s.trim_start_matches("0x"), 16))
+                .collect::<Result<_, _>>()
+                .map_err(|_| "Bad --probe-guest= address list (hex, comma-separated)".to_string())?;
         } else if let Some(address) = arg.strip_prefix("--gdb=") {
             let addrs = address
                 .to_socket_addrs()
@@ -229,6 +249,10 @@ impl Options {
             self.popup_errors = false;
         } else if arg == "--print-fps" {
             self.print_fps = true;
+        } else if arg == "--ignore-unknown-selectors" {
+            self.ignore_unknown_selectors = true;
+        } else if arg == "--trace-messages" {
+            self.trace_messages = true;
         } else if let Some(value) = arg.strip_prefix("--fps-limit=") {
             if value == "off" {
                 self.fps_limit = None;

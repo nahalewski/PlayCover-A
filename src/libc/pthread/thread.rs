@@ -322,6 +322,17 @@ fn pthread_join(env: &mut Environment, thread: pthread_t, retval: MutPtr<MutVoid
     0
 }
 
+/// Ends the calling thread, as if its start routine had returned `retval`.
+///
+/// Host functions return to the guest by jumping to the link register, so
+/// pointing it at the thread-exit routine makes this "return" end the thread.
+/// (The return value in r0 is `retval`, which is what that routine expects.)
+fn pthread_exit(env: &mut Environment, retval: MutVoidPtr) -> MutVoidPtr {
+    let thread_exit_routine = env.dyld.thread_exit_routine();
+    env.cpu.regs_mut()[crate::cpu::Cpu::LR] = thread_exit_routine.addr_with_thumb_bit();
+    retval
+}
+
 fn pthread_detach(env: &mut Environment, thread: pthread_t) -> i32 {
     let Some(host_obj_joinee) = State::get(env).threads.get_mut(&thread) else {
         // Defender Chronicles calls with non-existing threadid
@@ -424,6 +435,7 @@ pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(pthread_self()),
     export_c_func!(pthread_join(_, _)),
     export_c_func!(pthread_detach(_)),
+    export_c_func!(pthread_exit(_)),
     export_c_func!(pthread_setcanceltype(_, _)),
     export_c_func!(pthread_testcancel()),
     export_c_func!(pthread_mach_thread_np(_)),

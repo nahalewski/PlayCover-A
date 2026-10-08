@@ -24,6 +24,7 @@ pub const LC_MESSAGES: LocaleCategory = 6;
 #[derive(Default)]
 pub struct State {
     locale: std::collections::HashMap<LocaleCategory, MutPtr<u8>>,
+    lconv: Option<MutPtr<u8>>,
 }
 
 pub fn setlocale(
@@ -51,4 +52,30 @@ pub fn setlocale(
     env.libc_state.clocale.locale.get(&category).unwrap().cast()
 }
 
-pub const FUNCTIONS: FunctionExports = &[export_c_func!(setlocale(_, _))];
+/// `localeconv()` for the "C" locale: a `struct lconv` that is built once. Layout
+/// (Darwin): ten `char *` followed by fourteen `char` fields.
+pub fn localeconv(env: &mut Environment) -> MutPtr<u8> {
+    if let Some(existing) = env.libc_state.clocale.lconv {
+        return existing;
+    }
+    let dot = env.mem.alloc_and_write_cstr(b".");
+    let empty = env.mem.alloc_and_write_cstr(b"");
+    let lconv: MutPtr<u8> = env.mem.alloc(56).cast();
+    env.mem.bytes_at_mut(lconv, 56).fill(0);
+    // decimal_point, then thousands_sep, grouping, int_curr_symbol,
+    // currency_symbol, mon_decimal_point, mon_thousands_sep, mon_grouping,
+    // positive_sign, negative_sign.
+    for (i, text) in [dot, empty, empty, empty, empty, empty, empty, empty, empty, empty]
+        .into_iter()
+        .enumerate()
+    {
+        env.mem
+            .write(lconv.cast::<u32>() + i as u32, text.to_bits());
+    }
+    // All the numeric fields are CHAR_MAX ("not available") in the C locale.
+    env.mem.bytes_at_mut(lconv + 40, 14).fill(127);
+    env.libc_state.clocale.lconv = Some(lconv);
+    lconv
+}
+
+pub const FUNCTIONS: FunctionExports = &[export_c_func!(setlocale(_, _)), export_c_func!(localeconv())];

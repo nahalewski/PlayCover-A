@@ -37,6 +37,8 @@ struct UIViewControllerHostObject {
     /// of the nib by name, may be nil.
     /// `NSBundle*`
     bundle: id,
+    navigation_item: id,
+    parent_controller: id,
 }
 impl HostObject for UIViewControllerHostObject {}
 
@@ -73,11 +75,22 @@ pub const CLASSES: ClassExports = objc_classes! {
 
     () = msg![env; this setView:view];
 
+    let key = get_static_str(env, "UINavigationItem");
+    let item: id = msg![env; coder decodeObjectForKey:key];
+    retain(env, item);
+    env.objc.borrow_mut::<UIViewControllerHostObject>(this).navigation_item = item;
+    // The owning container assigns this weak relationship after decoding its
+    // children. Decoding the parent here would recurse through the same NIB UID.
+    let key = get_static_str(env, "UINibName");
+    let name: id = msg![env; coder decodeObjectForKey:key];
+    retain(env, name);
+    env.objc.borrow_mut::<UIViewControllerHostObject>(this).nib_name = name;
+
     this
 }
 
 - (())dealloc {
-    let &UIViewControllerHostObject { view, nib_name, bundle } = env.objc.borrow(this);
+    let &UIViewControllerHostObject { view, nib_name, bundle, navigation_item, .. } = env.objc.borrow(this);
 
     if view != nil {
         set_view_controller(env, view, nil);
@@ -85,6 +98,7 @@ pub const CLASSES: ClassExports = objc_classes! {
     release(env, view);
     release(env, nib_name);
     release(env, bundle);
+    release(env, navigation_item);
 
     env.objc.dealloc_object(this, &mut env.mem);
 }
@@ -176,7 +190,30 @@ pub const CLASSES: ClassExports = objc_classes! {
 }
 
 - (())setTitle:(id)title { // NSString *
-    todo_objc_setter!(this, to_rust_string(env, title));
+    let item: id = msg![env; this navigationItem];
+    () = msg![env; item setTitle:title];
+}
+- (id)navigationItem {
+    let item = env.objc.borrow::<UIViewControllerHostObject>(this).navigation_item;
+    if item != nil { return item; }
+    let item: id = msg_class![env; UINavigationItem new];
+    env.objc.borrow_mut::<UIViewControllerHostObject>(this).navigation_item = item;
+    item
+}
+- (id)title {
+    let item: id = msg![env; this navigationItem];
+    msg![env; item title]
+}
+- (id)parentViewController { env.objc.borrow::<UIViewControllerHostObject>(this).parent_controller }
+- (id)navigationController {
+    let class = env.objc.get_known_class("UINavigationController", &mut env.mem);
+    let mut parent = env.objc.borrow::<UIViewControllerHostObject>(this).parent_controller;
+    while parent != nil {
+        let parent_class: Class = msg![env; parent class];
+        if env.objc.class_is_subclass_of(parent_class, class) { return parent; }
+        parent = env.objc.borrow::<UIViewControllerHostObject>(parent).parent_controller;
+    }
+    nil
 }
 - (())setEditing:(bool)editing {
     todo_objc_setter!(this, editing);

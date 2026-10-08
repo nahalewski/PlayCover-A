@@ -10,8 +10,9 @@ use super::cf_string::CFStringRef;
 use super::CFTypeRef;
 use crate::dyld::{export_c_func, FunctionExports};
 use crate::frameworks::foundation::ns_string::from_rust_string;
+use crate::mem::SafeRead;
 use crate::objc::{objc_classes, ClassExports, HostObject};
-use crate::Environment;
+use crate::{impl_GuestRet_for_large_struct, Environment};
 use uuid::Uuid;
 
 pub const CLASSES: ClassExports = objc_classes! {
@@ -35,7 +36,7 @@ struct CFUUIDHostObject {
 impl HostObject for CFUUIDHostObject {}
 
 fn CFUUIDCreate(env: &mut Environment, allocator: CFAllocatorRef) -> CFUUIDRef {
-    assert!(allocator == kCFAllocatorDefault || env.mem.read(allocator).is_system_default()); // unimplemented
+    assert!(allocator.is_null() || allocator == kCFAllocatorDefault || env.mem.read(allocator).is_system_default()); // unimplemented
 
     let host_obj = Box::new(CFUUIDHostObject {
         uuid: Uuid::new_v4(),
@@ -44,12 +45,28 @@ fn CFUUIDCreate(env: &mut Environment, allocator: CFAllocatorRef) -> CFUUIDRef {
     env.objc.alloc_object(class, host_obj, &mut env.mem)
 }
 
+/// `CFUUIDBytes`: the 16 raw bytes of a UUID, returned by value.
+#[derive(Copy, Clone, Debug)]
+#[repr(C, packed)]
+struct CFUUIDBytes {
+    bytes: [u8; 16],
+}
+unsafe impl SafeRead for CFUUIDBytes {}
+impl_GuestRet_for_large_struct!(CFUUIDBytes);
+
+fn CFUUIDGetUUIDBytes(env: &mut Environment, uuid: CFUUIDRef) -> CFUUIDBytes {
+    let host_object = env.objc.borrow::<CFUUIDHostObject>(uuid);
+    CFUUIDBytes {
+        bytes: *host_object.uuid.as_bytes(),
+    }
+}
+
 fn CFUUIDCreateString(
     env: &mut Environment,
     allocator: CFAllocatorRef,
     uuid: CFUUIDRef,
 ) -> CFStringRef {
-    assert!(allocator == kCFAllocatorDefault || env.mem.read(allocator).is_system_default()); // unimplemented
+    assert!(allocator.is_null() || allocator == kCFAllocatorDefault || env.mem.read(allocator).is_system_default()); // unimplemented
 
     let host_object = env.objc.borrow::<CFUUIDHostObject>(uuid);
     let uuid_str = host_object.uuid.hyphenated().to_string().to_uppercase();
@@ -59,4 +76,5 @@ fn CFUUIDCreateString(
 pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(CFUUIDCreate(_)),
     export_c_func!(CFUUIDCreateString(_, _)),
+    export_c_func!(CFUUIDGetUUIDBytes(_)),
 ];

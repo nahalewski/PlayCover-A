@@ -217,3 +217,68 @@ pub const CLASSES: ClassExports = objc_classes! {
 @end
 
 };
+
+/// Encode a UIImage as PNG or JPEG and wrap the result in an NSData.
+fn encode_ui_image(env: &mut Environment, image: id, jpeg: bool, quality: i32) -> id {
+    if image == nil {
+        return nil;
+    }
+    let cg_image = env.objc.borrow::<UIImageHostObject>(image).cg_image;
+    if cg_image == nil {
+        return nil;
+    }
+    let (width, height, mut rgba) = {
+        let img = crate::frameworks::core_graphics::cg_image::borrow_image(&env.objc, cg_image);
+        let (w, h) = img.dimensions();
+        (w, h, img.pixels().to_vec())
+    };
+    // Pixels are stored premultiplied; the encoders want straight alpha.
+    for px in rgba.chunks_exact_mut(4) {
+        let alpha = u32::from(px[3]);
+        if alpha != 0 && alpha != 255 {
+            for channel in px.iter_mut().take(3) {
+                *channel = ((u32::from(*channel) * 255 + alpha / 2) / alpha).min(255) as u8;
+            }
+        }
+    }
+    let mut encoded_len: usize = 0;
+    let encoded = unsafe {
+        touchHLE_stb_image_wrapper::touchHLE_encode_image(
+            jpeg as _,
+            quality,
+            rgba.as_ptr(),
+            width as _,
+            height as _,
+            &mut encoded_len,
+        )
+    };
+    if encoded.is_null() {
+        log!("Warning: image encoding failed, returning nil");
+        return nil;
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(encoded, encoded_len) }.to_vec();
+    unsafe { touchHLE_stb_image_wrapper::touchHLE_free_encoded(encoded.cast()) };
+
+    let size: crate::mem::GuestUSize = bytes.len().try_into().unwrap();
+    let temp = env.mem.alloc(size);
+    env.mem
+        .bytes_at_mut(temp.cast::<u8>(), size)
+        .copy_from_slice(&bytes);
+    let data: id = msg_class![env; NSData dataWithBytes:(temp.cast_const()) length:size];
+    env.mem.free(temp);
+    data
+}
+
+fn UIImagePNGRepresentation(env: &mut Environment, image: id) -> id {
+    encode_ui_image(env, image, false, 0)
+}
+
+fn UIImageJPEGRepresentation(env: &mut Environment, image: id, quality: CGFloat) -> id {
+    let quality = (quality * 100.0).round().clamp(1.0, 100.0) as i32;
+    encode_ui_image(env, image, true, quality)
+}
+
+pub const FUNCTIONS: crate::dyld::FunctionExports = &[
+    crate::dyld::export_c_func!(UIImagePNGRepresentation(_)),
+    crate::dyld::export_c_func!(UIImageJPEGRepresentation(_, _)),
+];

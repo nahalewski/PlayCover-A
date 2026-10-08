@@ -139,6 +139,27 @@ fn unlink(env: &mut Environment, path: ConstPtr<u8>) -> i32 {
     }
 }
 
+fn rmdir(env: &mut Environment, path: ConstPtr<u8>) -> i32 {
+    // TODO: handle errno properly
+    set_errno(env, 0);
+
+    let path_str = env.mem.cstr_at_utf8(path).unwrap().to_string();
+    let guest_path = GuestPath::new(&path_str);
+    if !env.fs.is_dir(guest_path) {
+        log!("rmdir({:?} {:?}) failed: not a directory", path, path_str);
+        set_errno(env, ENOENT);
+        return -1;
+    }
+    // fs.remove() only removes directories that are empty, like rmdir().
+    match env.fs.remove(guest_path) {
+        Ok(()) => 0,
+        Err(err) => {
+            log!("rmdir({:?} {:?}) failed: {:?}", path, path_str, err);
+            -1
+        }
+    }
+}
+
 fn gethostname(env: &mut Environment, name: MutPtr<u8>, namelen: GuestUSize) -> i32 {
     // TODO: define unique hostname once networking is supported
     let hostname = "touchHLE";
@@ -197,6 +218,7 @@ pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(isatty(_)),
     export_c_func!(access(_, _)),
     export_c_func!(unlink(_)),
+    export_c_func!(rmdir(_)),
     export_c_func!(gethostname(_, _)),
     export_c_func!(getpagesize()),
     export_c_func!(getgid()),

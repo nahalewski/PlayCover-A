@@ -127,6 +127,8 @@ impl_HostIMP!(P1, P2);
 impl_HostIMP!(P1, P2, P3);
 impl_HostIMP!(P1, P2, P3, P4);
 impl_HostIMP!(P1, P2, P3, P4, P5);
+impl_HostIMP!(P1, P2, P3, P4, P5, P6);
+impl_HostIMP!(P1, P2, P3, P4, P5, P6, P7);
 
 /// Type for a guest function implementing a method. See [GuestFunction].
 pub type GuestIMP = GuestFunction;
@@ -323,5 +325,37 @@ impl ObjC {
             }
         }
         selector_strings
+    }
+}
+
+/// Objective-C++ classes whose instance variables are C++ objects get a
+/// compiler-generated `.cxx_construct` method that the runtime calls when an
+/// instance is created (and `.cxx_destruct` on release), once per class
+/// starting from the root of the hierarchy. Without this, such members (for
+/// example a settings struct with a non-trivial constructor) stay zeroed.
+pub fn call_cxx_construct(env: &mut Environment, obj: id) {
+    let Some(sel) = env.objc.lookup_selector(".cxx_construct") else {
+        return;
+    };
+    let class = ObjC::read_isa(obj, &env.mem);
+    // Collect the hierarchy leaf-first, then run it root-first.
+    let mut chain = Vec::new();
+    let mut c = class;
+    while c != nil {
+        chain.push(c);
+        c = env.objc.borrow::<ClassHostObject>(c).superclass;
+    }
+    for c in chain.into_iter().rev() {
+        let imp = {
+            let host = env.objc.borrow::<ClassHostObject>(c);
+            match host.methods.get(&sel) {
+                Some(IMP::Guest(g)) => Some(*g),
+                _ => None,
+            }
+        };
+        if let Some(imp) = imp {
+            use crate::abi::CallFromHost;
+            let _: id = imp.call_from_host(env, (obj, sel));
+        }
     }
 }

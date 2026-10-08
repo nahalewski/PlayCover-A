@@ -44,7 +44,7 @@ fn SCNetworkReachabilityCreateWithName(
     allocator: CFAllocatorRef,
     name: ConstPtr<u8>,
 ) -> SCNetworkReachabilityRef {
-    assert!(allocator == kCFAllocatorDefault || env.mem.read(allocator).is_system_default()); // unimplemented
+    assert!(allocator.is_null() || allocator == kCFAllocatorDefault || env.mem.read(allocator).is_system_default()); // unimplemented
     if env
         .bundle
         .bundle_identifier()
@@ -77,7 +77,7 @@ fn SCNetworkReachabilityCreateWithAddress(
     allocator: CFAllocatorRef,
     address: ConstPtr<sockaddr>,
 ) -> SCNetworkReachabilityRef {
-    assert!(allocator == kCFAllocatorDefault || env.mem.read(allocator).is_system_default()); // unimplemented
+    assert!(allocator.is_null() || allocator == kCFAllocatorDefault || env.mem.read(allocator).is_system_default()); // unimplemented
     let isa = env
         .objc
         .get_known_class("_touchHLE_SCNetworkReachability", &mut env.mem);
@@ -165,9 +165,31 @@ fn SCNetworkReachabilitySetCallback(
     false
 }
 
+/// The callback never fires (reachability never changes here), so scheduling
+/// is just remembered by the app, not by us.
+fn SCNetworkReachabilityScheduleWithRunLoop(
+    _env: &mut Environment,
+    _target: SCNetworkReachabilityRef,
+    _run_loop: MutVoidPtr,
+    _mode: MutVoidPtr,
+) -> bool {
+    log_once!("TODO: SCNetworkReachabilityScheduleWithRunLoop() does nothing");
+    true
+}
+fn SCNetworkReachabilityUnscheduleFromRunLoop(
+    _env: &mut Environment,
+    _target: SCNetworkReachabilityRef,
+    _run_loop: MutVoidPtr,
+    _mode: MutVoidPtr,
+) -> bool {
+    true
+}
+
 pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(SCNetworkReachabilityCreateWithName(_, _)),
     export_c_func!(SCNetworkReachabilityCreateWithAddress(_, _)),
     export_c_func!(SCNetworkReachabilityGetFlags(_, _)),
     export_c_func!(SCNetworkReachabilitySetCallback(_, _, _)),
+    export_c_func!(SCNetworkReachabilityScheduleWithRunLoop(_, _, _)),
+    export_c_func!(SCNetworkReachabilityUnscheduleFromRunLoop(_, _, _)),
 ];

@@ -30,12 +30,17 @@ fn build_type_windows() -> &'static str {
 }
 
 fn main() {
-    let package_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    // Resolve at build-script execution time: a shared target cache can reuse
+    // this script across checkouts, so env! would retain the old source path.
+    let package_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR was not set");
+    let package_root = Path::new(&package_dir);
     let workspace_root = package_root.join("../../..");
     let dynarmic_root = workspace_root.join("vendor/dynarmic");
 
     let mut build = cmake::Config::new(&dynarmic_root);
-    build.define("DYNARMIC_FRONTENDS", "A32"); // We don't need 64-bit
+    // The A64 frontend is only needed by the experimental `a64` feature.
+    let a64 = env::var_os("CARGO_FEATURE_A64").is_some();
+    build.define("DYNARMIC_FRONTENDS", if a64 { "A32;A64" } else { "A32" });
     build.define("DYNARMIC_WARNINGS_AS_ERRORS", "OFF");
     build.define("DYNARMIC_TESTS", "OFF");
     build.define("DYNARMIC_USE_BUNDLED_EXTERNALS", "ON");
@@ -125,11 +130,16 @@ fn main() {
     //rerun_if_changed(&dynarmic_root);
     rerun_if_changed(&workspace_root.join(".git/modules/dynarmic/HEAD"));
 
-    cc::Build::new()
-        .file(package_root.join("lib.cpp"))
+    let mut wrapper_build = cc::Build::new();
+    wrapper_build.file(package_root.join("lib.cpp"));
+    if a64 {
+        wrapper_build.file(package_root.join("a64.cpp"));
+    }
+    wrapper_build
         .cpp(true)
         .std("c++17")
         .include(dynarmic_out.join("include"))
         .compile("dynarmic_wrapper");
     rerun_if_changed(&package_root.join("lib.cpp"));
+    rerun_if_changed(&package_root.join("a64.cpp"));
 }

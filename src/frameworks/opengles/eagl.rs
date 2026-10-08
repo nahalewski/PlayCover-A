@@ -15,7 +15,7 @@ use crate::frameworks::foundation::NSUInteger;
 use crate::gles::gles11_raw as gles11; // constants only
 use crate::gles::gles11_raw::types::*;
 use crate::gles::present::{present_frame, FpsCounter};
-use crate::gles::{create_gles1_ctx, gles1_on_gl2, GLESContext, GLES};
+use crate::gles::{create_gles1_ctx, create_gles2_ctx, gles1_on_gl2, GLESContext, GLES};
 use crate::mem::MutPtr;
 use crate::objc::{id, msg, nil, objc_classes, release, retain, ClassExports, HostObject};
 use crate::options::Options;
@@ -54,7 +54,6 @@ pub const CONSTANTS: ConstantExports = &[
 
 type EAGLRenderingAPI = u32;
 const kEAGLRenderingAPIOpenGLES1: EAGLRenderingAPI = 1;
-#[allow(dead_code)]
 const kEAGLRenderingAPIOpenGLES2: EAGLRenderingAPI = 2;
 #[allow(dead_code)]
 const kEAGLRenderingAPIOpenGLES3: EAGLRenderingAPI = 3;
@@ -110,9 +109,15 @@ pub const CLASSES: ClassExports = objc_classes! {
 }
 
 - (id)initWithAPI:(EAGLRenderingAPI)api sharegroup:(id)group {
+    if api == kEAGLRenderingAPIOpenGLES2 {
+        if group != nil {
+            log!("TODO: sharegroups are not supported for OpenGL ES 2.0 contexts yet; creating an unshared context");
+        }
+        return msg![env; this initWithAPI:api];
+    }
     if api != kEAGLRenderingAPIOpenGLES1 {
         log!(
-            "TODO: App requested EAGL initWithAPI:{} sharegroup:{:?}, returning nil as we only support API 1 for now",
+            "TODO: App requested EAGL initWithAPI:{} sharegroup:{:?}, returning nil as we only support APIs 1 and 2 for now",
             api,
             group
         );
@@ -152,9 +157,26 @@ pub const CLASSES: ClassExports = objc_classes! {
 }
 
 - (id)initWithAPI:(EAGLRenderingAPI)api {
+    if api == kEAGLRenderingAPIOpenGLES2 {
+        let Some(mut gles2_ins) = create_gles2_ctx(env) else {
+            return nil;
+        };
+        // ES 2.0 frames are always copied back to the CPU and composited (the
+        // "fast path" that presents directly is fixed-function ES 1.1 only), so
+        // the compositor must not skip drawing on the assumption that the app's
+        // context presents directly.
+        env.options.force_composition = true;
+        let window = env.window.as_mut().expect("OpenGL ES is not supported in headless mode");
+        {
+            let gles2_ctx = gles2_ins.make_current(window);
+            log!("Driver info: {}", unsafe { gles2_ctx.driver_description() });
+        }
+        env.objc.borrow_mut::<EAGLContextHostObject>(this).gles_ctx = Some(gles2_ins);
+        return this;
+    }
     if api != kEAGLRenderingAPIOpenGLES1 {
         log!(
-            "TODO: App requested EAGL initWithAPI:{}, returning nil as we only support API 1 for now",
+            "TODO: App requested EAGL initWithAPI:{}, returning nil as we only support APIs 1 and 2 for now",
             api
         );
         return nil;
@@ -175,7 +197,8 @@ pub const CLASSES: ClassExports = objc_classes! {
 
 - (EAGLRenderingAPI)API {
     // TODO: support later API versions
-    kEAGLRenderingAPIOpenGLES1
+    let host_obj = env.objc.borrow::<EAGLContextHostObject>(this);
+    host_obj.gles_ctx.as_ref().map_or(kEAGLRenderingAPIOpenGLES1, |ctx| ctx.api_version())
 }
 
 - (id)sharegroup {
@@ -242,6 +265,11 @@ pub const CLASSES: ClassExports = objc_classes! {
         let mut gles = super::sync_context(&mut env.framework_state.opengles, &mut env.objc, window, env.current_thread);
         unsafe {
             gles.RenderbufferStorageOES(target, internalformat, width.try_into().unwrap(), height.try_into().unwrap());
+            let mut actual_width = 0;
+            let mut actual_height = 0;
+            gles.GetRenderbufferParameterivOES(target, gles11::RENDERBUFFER_WIDTH_OES, &mut actual_width);
+            gles.GetRenderbufferParameterivOES(target, gles11::RENDERBUFFER_HEIGHT_OES, &mut actual_height);
+            log!("EAGL drawable renderbuffer: requested {}x{}, allocated {}x{}, scale {}x", width, height, actual_width, actual_height, env.options.scale_hack.get());
             let mut renderbuffer = 0;
             gles.GetIntegerv(gles11::RENDERBUFFER_BINDING_OES, &mut renderbuffer);
             renderbuffer as _
@@ -302,9 +330,13 @@ pub const CLASSES: ClassExports = objc_classes! {
         return false;
     };
 
+    // The fast path draws with fixed-function OpenGL ES 1.1, so ES 2.0 contexts
+    // always take the slow path (which only reads the pixels back).
+    let is_gles1 = env.objc.borrow::<EAGLContextHostObject>(this).gles_ctx.as_ref().unwrap().api_version() == 1;
+
     // We're presenting to the opaque CAEAGLLayer that covers the screen.
     // We can use the fast path where we skip composition and present directly.
-    if drawable == fullscreen_layer {
+    if drawable == fullscreen_layer && is_gles1 {
         log_dbg!(
             "Layer {:?} is the fullscreen layer, presenting renderbuffer {:?} directly (fast path).",
             drawable,
@@ -315,7 +347,7 @@ pub const CLASSES: ClassExports = objc_classes! {
             present_renderbuffer(env);
         }
     } else {
-        if fullscreen_layer != nil {
+        if fullscreen_layer != nil && drawable != fullscreen_layer {
             // If there's a single layer that covers the screen, and this isn't
             // it, there's no point in presenting the output because it won't be
             // seen. Using a noisy log because it's a weird scenario and might
@@ -549,6 +581,17 @@ unsafe fn read_renderbuffer(gles: &mut dyn GLES, mut pixel_buffer: Vec<u8>) -> (
 unsafe fn present_renderbuffer(env: &mut Environment) {
     // Save these for when we need to draw the frame
     let viewport = env.window.as_mut().unwrap().viewport();
+    {
+        // Diagnostic: report the presentation geometry whenever it changes.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static LAST: AtomicU64 = AtomicU64::new(0);
+        let drawable = env.window.as_ref().unwrap().drawable_size_for_log();
+        let key = (viewport.0 as u64) ^ ((viewport.1 as u64) << 12) ^ ((viewport.2 as u64) << 24)
+            ^ ((viewport.3 as u64) << 36) ^ ((drawable.0 as u64) << 48);
+        if LAST.swap(key, Ordering::Relaxed) != key {
+            log!("present: viewport {:?}, drawable {:?}", viewport, drawable);
+        }
+    }
     let rotation_matrix = env.window.as_mut().unwrap().rotation_matrix();
     let virtual_cursor_visible_at = env.window.as_mut().unwrap().virtual_cursor_visible_at();
 

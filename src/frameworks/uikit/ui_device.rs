@@ -16,6 +16,67 @@ use crate::objc::{
 };
 use crate::window::{get_battery_status, BatteryState, DeviceFamily, DeviceOrientation};
 
+/// A bounded numeric iOS version, for reporting metadata rather than promising
+/// framework support. Reject suffixes and normalize leading zeroes.
+pub(crate) fn canonical_ios_version(value: &str) -> Option<String> {
+    if value.len() > 11 {
+        return None;
+    }
+    let parts: Vec<_> = value.split('.').collect();
+    if !(2..=3).contains(&parts.len()) {
+        return None;
+    }
+    let mut numbers = Vec::new();
+    for part in parts {
+        if part.is_empty() || part.len() > 3 || !part.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        let number: u16 = part.parse().ok()?;
+        if number > 255 {
+            return None;
+        }
+        numbers.push(number);
+    }
+    if numbers[0] == 0 {
+        return None;
+    }
+    Some(
+        numbers
+            .into_iter()
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join("."),
+    )
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::canonical_ios_version;
+
+    #[test]
+    fn canonicalizes_bounded_metadata_versions() {
+        assert_eq!(canonical_ios_version("3.2").as_deref(), Some("3.2"));
+        assert_eq!(
+            canonical_ios_version("013.00.007").as_deref(),
+            Some("13.0.7")
+        );
+        assert_eq!(
+            canonical_ios_version("255.255.255").as_deref(),
+            Some("255.255.255")
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_or_unbounded_versions() {
+        for version in [
+            "", "13", "13.0.0.1", "0.1", "256.0", "1.256", "1.0.256", "0001.2", "13..1",
+            "13.0beta", "13.-1", " 13.0", "13.0\n", "１３.0",
+        ] {
+            assert_eq!(canonical_ios_version(version), None, "{version:?}");
+        }
+    }
+}
+
 pub const UIDeviceOrientationDidChangeNotification: &str =
     "UIDeviceOrientationDidChangeNotification";
 
@@ -109,7 +170,11 @@ pub const CLASSES: ClassExports = objc_classes! {
 
 // NSString
 - (id)systemVersion {
-    ns_string::get_static_str(env, "2.0")
+    let version = env.options.reported_ios_version.clone()
+        .or_else(|| env.bundle.minimum_os_version().and_then(canonical_ios_version))
+        .unwrap_or_else(|| "2.0".into());
+    let string = ns_string::from_rust_string(env, version);
+    crate::objc::autorelease(env, string)
 }
 
 - (id)uniqueIdentifier {

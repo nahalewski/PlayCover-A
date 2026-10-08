@@ -11,6 +11,7 @@
 //! For the moment, only ARMv6 has been tested.
 
 use crate::abi::GuestFunction;
+use crate::log;
 use crate::mem::{ConstPtr, GuestUSize, Mem, MutPtr, Ptr, SafeRead, SafeWrite};
 
 // Import functions from C++
@@ -18,6 +19,55 @@ use touchHLE_dynarmic_wrapper::*;
 
 type VAddr = u32;
 pub type CpuContext = touchHLE_DynarmicContext;
+
+// The CPU executing callbacks on this thread. Never retained after execution.
+thread_local! {
+    static LAST_WRAPPER: std::cell::Cell<*mut touchHLE_DynarmicWrapper> =
+        const { std::cell::Cell::new(std::ptr::null_mut()) };
+}
+
+struct ActiveWrapper(*mut touchHLE_DynarmicWrapper);
+impl ActiveWrapper {
+    fn enter(wrapper: *mut touchHLE_DynarmicWrapper) -> Self {
+        Self(LAST_WRAPPER.with(|active| active.replace(wrapper)))
+    }
+}
+impl Drop for ActiveWrapper {
+    fn drop(&mut self) {
+        LAST_WRAPPER.with(|active| active.set(self.0));
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+    #[test]
+    fn diagnostic_wrapper_is_scoped_nested_and_thread_local() {
+        let first = std::ptr::NonNull::<touchHLE_DynarmicWrapper>::dangling().as_ptr();
+        assert!(LAST_WRAPPER.with(|active| active.get()).is_null());
+        {
+            let _outer = ActiveWrapper::enter(first);
+            std::thread::spawn(|| assert!(LAST_WRAPPER.with(|active| active.get()).is_null()))
+                .join()
+                .unwrap();
+            {
+                let _inner = ActiveWrapper::enter(std::ptr::null_mut());
+                assert!(LAST_WRAPPER.with(|active| active.get()).is_null());
+            }
+            assert_eq!(LAST_WRAPPER.with(|active| active.get()), first);
+        }
+        assert!(LAST_WRAPPER.with(|active| active.get()).is_null());
+    }
+}
+
+fn log_guest_regs_on_error(what: &str, addr: VAddr) {
+    let wrapper = LAST_WRAPPER.with(|active| active.get());
+    if wrapper.is_null() {
+        return;
+    }
+    let regs = unsafe { &*(touchHLE_DynarmicWrapper_regs_const(wrapper) as *const [u32; 16]) };
+    log!("Guest {} error at {:#x}: pc={:#x} lr={:#x} sp={:#x} r0-r3={:#x} {:#x} {:#x} {:#x} r4-r7={:#x} {:#x} {:#x} {:#x}", what, addr, regs[15], regs[14], regs[13], regs[0], regs[1], regs[2], regs[3], regs[4], regs[5], regs[6], regs[7]);
+}
 
 fn touchHLE_cpu_read_impl<T: SafeRead + Default>(
     mem: *mut touchHLE_Mem,
@@ -42,6 +92,9 @@ fn touchHLE_cpu_read_impl<T: SafeRead + Default>(
         let ptr: ConstPtr<T> = Ptr::from_bits(addr);
         mem.read(ptr)
     }));
+    if res.is_err() {
+        log_guest_regs_on_error("read", addr);
+    }
     unsafe {
         error.write(res.is_err());
     }
@@ -283,6 +336,7 @@ impl Cpu {
             assert!(self.direct_memory_access_ptr == unsafe { mem.direct_memory_access_ptr() });
         }
 
+        let _active_wrapper = ActiveWrapper::enter(self.dynarmic_wrapper);
         let res = unsafe {
             touchHLE_DynarmicWrapper_run_or_step(
                 self.dynarmic_wrapper,

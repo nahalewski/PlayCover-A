@@ -75,16 +75,34 @@ pub const CLASSES: ClassExports = objc_classes! {
 
 };
 
-/// For use by [super::ui_touch]: create a `UIEvent` with a set of `UITouch*`
+/// For use by [super::ui_touch]: get the `UIEvent` carrying a set of `UITouch*`.
+///
+/// On iOS the same event object is reused for all touch events and apps may
+/// hold on to it without retaining it, so a single instance is kept alive
+/// forever and updated in place. The returned reference is +1 (callers
+/// autorelease it, as with a freshly allocated object).
 pub(super) fn new_event(env: &mut Environment, touches: id) -> id {
-    let event: id = msg_class![env; UIEvent alloc];
+    let event: id = if let Some(event) = env.framework_state.uikit.ui_touch.shared_event {
+        retain(env, event)
+    } else {
+        let event: id = msg_class![env; UIEvent alloc];
+        // The extra reference is the one the state keeps forever.
+        retain(env, event);
+        env.framework_state.uikit.ui_touch.shared_event = Some(event);
+        event
+    };
     retain(env, touches);
     let timestamp: NSTimeInterval = {
         let process_info = msg_class![env; NSProcessInfo processInfo];
         msg![env; process_info systemUptime]
     };
-    let borrow = env.objc.borrow_mut::<UIEventHostObject>(event);
-    borrow.touches = touches;
-    borrow.timestamp = timestamp;
+    let old_touches = {
+        let borrow = env.objc.borrow_mut::<UIEventHostObject>(event);
+        let old = borrow.touches;
+        borrow.touches = touches;
+        borrow.timestamp = timestamp;
+        old
+    };
+    release(env, old_touches);
     event
 }

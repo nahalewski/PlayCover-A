@@ -8,7 +8,7 @@
 //! References:
 //! - Apple's [Preferences and Settings Programming Guide](https://developer.apple.com/library/archive/documentation/Cocoa/Conceptual/UserDefaults/AboutPreferenceDomains/AboutPreferenceDomains.html).
 
-use super::{ns_string, NSInteger};
+use super::{ns_string, NSInteger, NSUInteger};
 use crate::frameworks::foundation::ns_string::to_rust_string;
 use crate::objc::{
     autorelease, id, msg, msg_class, nil, objc_classes, release, Class, ClassExports, HostObject,
@@ -43,6 +43,16 @@ struct NSUserDefaultsHostObject {
     registration_domain_dict: id,
 }
 impl HostObject for NSUserDefaultsHostObject {}
+
+/// A domain is a preference-file name, never a guest-supplied path.
+fn persistent_domain_file_name(domain: &str) -> Option<String> {
+    if domain.is_empty() || domain.contains(['/', '\\', '\0'])
+        || domain == "NSRegistrationDomain" || domain == "NSArgumentDomain" {
+        return None;
+    }
+    let name = if domain == "NSGlobalDomain" { ".GlobalPreferences" } else { domain };
+    Some(format!("{name}.plist"))
+}
 
 pub const CLASSES: ClassExports = objc_classes! {
 
@@ -125,6 +135,29 @@ pub const CLASSES: ClassExports = objc_classes! {
     let app_domain_dict = env.objc.borrow::<NSUserDefaultsHostObject>(this).app_domain_dict;
     () = msg![env; dict addEntriesFromDictionary:app_domain_dict];
     autorelease(env, dict)
+}
+
+// Only this domain's persistent values, not the defaults search-list union.
+// https://developer.apple.com/documentation/foundation/userdefaults/persistentdomain(forname:)
+- (id)persistentDomainForName:(id)domain_name {
+    let name = to_rust_string(env, domain_name);
+    let Some(file_name) = persistent_domain_file_name(&name) else {
+        return nil;
+    };
+    let dict: id = if name == env.bundle.bundle_identifier() {
+        // Include unsynchronized changes in the current application's domain.
+        env.objc.borrow::<NSUserDefaultsHostObject>(this).app_domain_dict
+    } else {
+        let path = env.fs.home_directory().join("Library").join("Preferences").join(file_name);
+        let path = ns_string::from_rust_string(env, path.as_str().to_string());
+        msg_class![env; NSDictionary dictionaryWithContentsOfFile:path]
+    };
+    let count: NSUInteger = msg![env; dict count];
+    if count == 0 {
+        return nil;
+    }
+    let snapshot: id = msg![env; dict copy];
+    autorelease(env, snapshot)
 }
 
 - (id)valueForKey:(id)key { // NSString*
@@ -302,3 +335,19 @@ pub const CLASSES: ClassExports = objc_classes! {
 @end
 
 };
+
+#[cfg(test)]
+mod tests {
+    use super::persistent_domain_file_name;
+
+    #[test]
+    fn persistent_domain_paths_distinguish_disk_and_volatile_domains() {
+        assert_eq!(persistent_domain_file_name("com.chairentertainment.IB2"),
+            Some("com.chairentertainment.IB2.plist".into()));
+        assert_eq!(persistent_domain_file_name("NSGlobalDomain"),
+            Some(".GlobalPreferences.plist".into()));
+        for name in ["", "NSRegistrationDomain", "NSArgumentDomain", "../other", "a\\b", "a\0b"] {
+            assert_eq!(persistent_domain_file_name(name), None);
+        }
+    }
+}

@@ -559,7 +559,7 @@ fn snprintf(
     vsnprintf(env, dest, n, format, args.start())
 }
 
-fn vasprintf(
+pub(crate) fn vasprintf(
     env: &mut Environment,
     ret: MutPtr<MutPtr<u8>>,
     format: ConstPtr<u8>,
@@ -603,7 +603,7 @@ fn vprintf(env: &mut Environment, format: ConstPtr<u8>, arg: VaList) -> i32 {
     res.len().try_into().unwrap()
 }
 
-fn vsnprintf(
+pub(crate) fn vsnprintf(
     env: &mut Environment,
     dest: MutPtr<u8>,
     n: GuestUSize,
@@ -783,7 +783,7 @@ fn printf(env: &mut Environment, format: ConstPtr<u8>, args: DotDotDot) -> i32 {
 // TODO: more printf variants
 
 /// A simple wrapper around [sscanf_common_generic] for the case of C string.
-fn sscanf_common(
+pub(crate) fn sscanf_common(
     env: &mut Environment,
     src: ConstPtr<u8>,
     format: ConstPtr<u8>,

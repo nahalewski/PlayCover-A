@@ -9,8 +9,8 @@ use super::ns_notification::NSNotificationName;
 use super::ns_string;
 
 use crate::objc::{
-    id, msg, msg_class, msg_send, nil, objc_classes, release, retain, ClassExports, HostObject,
-    NSZonePtr, SEL,
+    autorelease, id, msg, msg_class, msg_send, nil, objc_classes, release, retain, ClassExports,
+    HostObject, NSZonePtr, SEL,
 };
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -75,6 +75,13 @@ pub const CLASSES: ClassExports = objc_classes! {
         None
     };
 
+    {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        if N.fetch_add(1, Ordering::Relaxed) < 80 {
+            log!("addObserver {:?} selector {} name {:?} object {:?}", observer, selector.as_str(&env.mem), name, object);
+        }
+    }
     log_dbg!(
         "[(NSNotificationCenter*){:?} addObserver:{:?} selector:{:?} name:{:?} object:{:?}",
         this,
@@ -109,6 +116,22 @@ pub const CLASSES: ClassExports = objc_classes! {
         selector,
         object,
     });
+}
+
+// Stub: block-based observers are accepted but never fired. Storing the block
+// safely needs Block_copy, which touchHLE does not have yet. Returns an opaque
+// token, as the real method does, so `removeObserver:` on it is harmless.
+- (id)addObserverForName:(NSNotificationName)name
+                  object:(id)_object
+                   queue:(id)_queue // NSOperationQueue *
+              usingBlock:(id)_block { // void (^)(NSNotification *)
+    log_dbg!(
+        "[(NSNotificationCenter*){:?} addObserverForName:{:?} ...] (stub, block never fired)",
+        this,
+        name,
+    );
+    let token: id = msg_class![env; NSObject new];
+    autorelease(env, token)
 }
 
 - (())removeObserver:(id)observer {
@@ -166,6 +189,8 @@ pub const CLASSES: ClassExports = objc_classes! {
     let name: id = msg![env; notification name];
     // Usually a static string, so no real copy will happen
     let name = ns_string::to_rust_string(env, name);
+    let is_movie_notification = name.starts_with("MPMovie");
+    let name_for_log = name.to_string();
 
     let notification_poster: id = msg![env; notification object];
 
@@ -176,10 +201,16 @@ pub const CLASSES: ClassExports = objc_classes! {
     if let Some(nameless_observers) = host_obj.observers.get(&None) {
         observers.extend(nameless_observers.iter().cloned());
     }
+    if is_movie_notification {
+        log!("Notification {:?} from {:?} has {} candidate observer(s)", name_for_log, notification_poster, observers.len());
+    }
     for Observer { observer, selector, object } in observers {
         // The object argument is a filter for which notification sources the
         // observer is interested in.
         if object != nil && notification_poster != object {
+            if is_movie_notification {
+                log!("Observer {:?} filtered out (wants object {:?})", observer, object);
+            }
             continue;
         }
 

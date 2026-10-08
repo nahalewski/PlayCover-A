@@ -41,13 +41,25 @@ pub const CLASSES: ClassExports = objc_classes! {
 + (id)dataFromPropertyList:(id)plist
                     format:(NSPropertyListFormat)format
                 errorDescription:(MutPtr<id>)error_string { // NSString **
-    assert_eq!(format, NSPropertyListBinaryFormat_v1_0); // TODO
-    assert!(error_string.is_null()); // TODO
+    // Only the XML and binary formats exist for what we can serialize.
+    assert!(
+        format == NSPropertyListBinaryFormat_v1_0 || format == NSPropertyListXMLFormat_v1_0,
+        "unsupported property list format {}",
+        format
+    );
+    // Success: the error description out-parameter is set to nil.
+    if !error_string.is_null() {
+        env.mem.write(error_string, nil);
+    }
 
     let value = serialize_plist(env, plist);
     log_dbg!("dataFromPropertyList value {:?}", value);
     let mut buf = Vec::new();
-    value.to_writer_binary(&mut buf).unwrap();
+    if format == NSPropertyListXMLFormat_v1_0 {
+        value.to_writer_xml(&mut buf).unwrap();
+    } else {
+        value.to_writer_binary(&mut buf).unwrap();
+    }
     let len: u32 = buf.len().try_into().unwrap();
     log_dbg!("dataFromPropertyList buf len {}", len);
     let ptr = env.mem.alloc(len);
@@ -301,6 +313,8 @@ fn serialize_plist(env: &mut Environment, plist: id) -> Value {
             NSNumberHostObject::LongLong(ll) => Value::from(*ll),
             NSNumberHostObject::Short(s) => Value::from(*s),
             NSNumberHostObject::Char(c) => Value::from(*c),
+            NSNumberHostObject::UnsignedLongLong(ull) => Value::from(*ull),
+            NSNumberHostObject::UnsignedShort(us) => Value::from(*us),
             _ => todo!("num {:?}", num),
         }
     } else if class == env.objc.get_known_class("NSData", &mut env.mem) {

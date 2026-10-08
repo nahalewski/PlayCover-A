@@ -66,8 +66,16 @@ fn inet_pton(env: &mut Environment, af: i32, src: ConstPtr<u8>, dst: MutVoidPtr)
     1 // address was valid, success
 }
 
+/// `inet_ntoa()`: dotted-quad text of an address in network byte order, in a
+/// buffer that is only valid until the next call (here: a new leaked one).
+fn inet_ntoa(env: &mut Environment, addr: in_addr_t) -> ConstPtr<u8> {
+    let text = Ipv4Addr::from_bits(u32::from_be(addr)).to_string();
+    env.mem.alloc_and_write_cstr(text.as_bytes()).cast_const()
+}
+
 pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(inet_addr(_)),
+    export_c_func!(inet_ntoa(_)),
     export_c_func!(inet_ntop(_, _, _, _)),
     export_c_func!(inet_pton(_, _, _)),
 ];

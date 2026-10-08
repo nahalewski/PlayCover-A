@@ -381,6 +381,31 @@ pub enum GuestFile {
     IpaBundleFile(IpaFile),
     ResourceFile(paths::ResourceFile),
     Socket,
+    /// `/dev/urandom` and `/dev/random`: endless pseudo-random bytes (libc++'s
+    /// `std::random_device` opens one of these when it is constructed).
+    RandomDevice,
+}
+
+/// Fill `buf` with pseudo-random bytes (xorshift64*, seeded from the clock).
+fn fill_random(buf: &mut [u8]) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static STATE: AtomicU64 = AtomicU64::new(0);
+    let mut x = STATE.load(Ordering::Relaxed);
+    if x == 0 {
+        x = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0x9E37_79B9_7F4A_7C15)
+            | 1;
+    }
+    for chunk in buf.chunks_mut(8) {
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        let bytes = x.wrapping_mul(0x2545_F491_4F6C_DD1D).to_le_bytes();
+        chunk.copy_from_slice(&bytes[..chunk.len()]);
+    }
+    STATE.store(x, Ordering::Relaxed);
 }
 
 impl GuestFile {
@@ -403,7 +428,7 @@ impl GuestFile {
     pub fn sync_all(&self) -> std::io::Result<()> {
         match self {
             GuestFile::File(file) => file.sync_all(),
-            GuestFile::IpaBundleFile(_) | GuestFile::ResourceFile(_) => Ok(()),
+            GuestFile::IpaBundleFile(_) | GuestFile::ResourceFile(_) | GuestFile::RandomDevice => Ok(()),
             GuestFile::Directory => {
                 log!("Warning: syncing directory as a guest file.");
                 Ok(())
@@ -449,6 +474,10 @@ impl Read for GuestFile {
             GuestFile::File(file) => file.read(buf),
             GuestFile::IpaBundleFile(file) => file.read(buf),
             GuestFile::ResourceFile(file) => file.get().read(buf),
+            GuestFile::RandomDevice => {
+                fill_random(buf);
+                Ok(buf.len())
+            }
             GuestFile::Directory => Err(std::io::Error::new(
                 std::io::ErrorKind::IsADirectory,
                 "Attempt to read from a directory as a guest file",
@@ -469,6 +498,7 @@ impl Write for GuestFile {
                 panic!("Attempt to write to a read-only file: {file:?}")
             }
             GuestFile::Directory => panic!("Attempt to write to a directory as a guest file"),
+            GuestFile::RandomDevice => Ok(buf.len()),
             _ => unimplemented!(),
         }
     }
@@ -484,6 +514,7 @@ impl Write for GuestFile {
                 panic!("Attempt to flush a read-only file: {file:?}")
             }
             GuestFile::Directory => panic!("Attempt to flush a directory as a guest file"),
+            GuestFile::RandomDevice => Ok(()),
             _ => unimplemented!(),
         }
     }
@@ -495,6 +526,7 @@ impl Seek for GuestFile {
             GuestFile::File(file) => file.seek(pos),
             GuestFile::IpaBundleFile(file) => file.seek(pos),
             GuestFile::ResourceFile(file) => file.get().seek(pos),
+            GuestFile::RandomDevice => Ok(0),
             GuestFile::Directory => {
                 // Note: directories as supposed to be seekable on iOS! https://stackoverflow.com/questions/65911066/what-does-lseek-mean-for-a-directory-file-descriptor
                 // As far as I can (f)tell, apps are really not using that
@@ -517,6 +549,7 @@ pub struct Fs {
     root: FsNode,
     working_directory: GuestPathBuf,
     home_directory: GuestPathBuf,
+    bundle_dir_name: String,
 }
 impl Fs {
     /// Construct a filesystem containing a home directory for the app, its
@@ -641,6 +674,15 @@ impl Fs {
                 FsNode::resource_file(format!("{DYLIBS_DIR}/libz.1.2.3.dylib")),
             )
             .with_child(
+                "libc++.1.dylib",
+                FsNode::resource_file(format!("{DYLIBS_DIR}/libc++.1.dylib")),
+            )
+            .with_child(
+                // symlink
+                "libc++.dylib",
+                FsNode::resource_file(format!("{DYLIBS_DIR}/libc++.1.dylib")),
+            )
+            .with_child(
                 "libsqlite3.dylib",
                 FsNode::resource_file(format!("{DYLIBS_DIR}/libsqlite3.dylib")),
             )
@@ -665,7 +707,7 @@ impl Fs {
             );
 
         let mut app_dir_children = HashMap::new();
-        app_dir_children.insert(bundle_dir_name, app_bundle.into_fs_node());
+        app_dir_children.insert(bundle_dir_name.clone(), app_bundle.into_fs_node());
         for (dir, host_path) in directories.iter().zip(host_path_directories.iter()) {
             if let Some(host_path) = host_path {
                 app_dir_children.insert(
@@ -700,6 +742,7 @@ impl Fs {
             root,
             working_directory,
             home_directory,
+            bundle_dir_name: bundle_dir_name.clone(),
         };
         assert!(fs.lookup_node(&bundle_guest_path).is_some());
         (fs, bundle_guest_path)
@@ -711,6 +754,7 @@ impl Fs {
             root: FsNode::dir(),
             working_directory: GuestPathBuf::from(String::new()),
             home_directory: GuestPathBuf::from(String::new()),
+            bundle_dir_name: String::new(),
         }
     }
 
@@ -766,7 +810,29 @@ impl Fs {
 
     /// Get the node at a given path, if it exists.
     fn lookup_node(&self, path: &GuestPath) -> Option<&FsNode> {
-        self.lookup_node_inner(&resolve_path(path, Some(&self.working_directory)))
+        let components = resolve_path(path, Some(&self.working_directory));
+        if let Some(node) = self.lookup_node_inner(&components) {
+            return Some(node);
+        }
+        // Some apps build resource paths from the home directory instead of
+        // the bundle directory (the bundle is a child of the home directory
+        // here). If a path directly under home does not exist, look for it in
+        // the bundle.
+        if self.bundle_dir_name.is_empty() {
+            return None;
+        }
+        let home = resolve_path(&self.home_directory, None);
+        if components.len() > home.len()
+            && components[..home.len()] == home[..]
+            && !matches!(components[home.len()], "Documents" | "Library" | "tmp")
+            && components[home.len()] != self.bundle_dir_name
+        {
+            let mut alt = home.clone();
+            alt.push(&self.bundle_dir_name);
+            alt.extend_from_slice(&components[home.len()..]);
+            return self.lookup_node_inner(&alt);
+        }
+        None
     }
 
     /// Get the parent of the node at a given path, if it exists, and return it
@@ -855,9 +921,11 @@ impl Fs {
                         })
                         .map_err(|_| ())
                 }
-                _ => unimplemented!(),
+                // TODO: real timestamps for other kinds of file
+                _ => Ok(0),
             },
-            _ => unimplemented!(),
+            // TODO: real timestamps for directories
+            _ => Ok(0),
         }
     }
 
@@ -870,9 +938,11 @@ impl Fs {
                 FileLocation::Path(path) => {
                     fs::metadata(path).map(|meta| meta.len()).map_err(|_| ())
                 }
-                _ => unimplemented!(),
+                // TODO: real sizes for other kinds of file
+                _ => Ok(0),
             },
-            _ => unimplemented!(),
+            // Directories report a nominal size
+            _ => Ok(4096),
         }
     }
 
@@ -1048,6 +1118,10 @@ impl Fs {
         assert!((!truncate && !create) || write || append);
 
         let path = path.as_ref();
+
+        if matches!(path.as_str(), "/dev/urandom" | "/dev/random") && !create && !truncate {
+            return Ok(GuestFile::RandomDevice);
+        }
 
         let (parent_node, new_filename) =
             self.lookup_parent_node(path).ok_or(FsError::DoesNotExist)?;

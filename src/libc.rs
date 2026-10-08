@@ -13,10 +13,12 @@ mod generic_char;
 
 pub mod arpa;
 pub mod clocale;
+pub mod compiler_rt;
 pub mod crypto;
 pub mod ctype;
 pub mod cxxabi;
 pub mod dirent;
+pub mod dispatch;
 pub mod dlfcn;
 pub mod dns_sd;
 pub mod errno;
@@ -44,18 +46,29 @@ pub mod sys;
 pub mod sysctl;
 pub mod time;
 pub mod unistd;
+pub mod uuid;
 pub mod wchar;
+pub mod xlocale;
 
 pub const DYLIB: crate::dyld::HostDylib = crate::dyld::HostDylib {
     path: "/usr/lib/libSystem.B.dylib",
     aliases: &["/usr/lib/libSystem.dylib"],
     class_exports: &[],
-    constant_exports: &[ctype::CONSTANTS, stdio::CONSTANTS, mach::init::CONSTANTS],
+    constant_exports: &[
+        ctype::CONSTANTS,
+        cxxabi::CONSTANTS,
+        dispatch::CONSTANTS,
+        stdio::CONSTANTS,
+        mach::init::CONSTANTS,
+    ],
     function_exports: &[
         arpa::inet::FUNCTIONS,
         clocale::FUNCTIONS,
+        xlocale::FUNCTIONS,
         ctype::FUNCTIONS,
+        compiler_rt::FUNCTIONS,
         cxxabi::FUNCTIONS,
+        dispatch::FUNCTIONS,
         crypto::FUNCTIONS,
         dirent::FUNCTIONS,
         dlfcn::FUNCTIONS,
@@ -110,6 +123,7 @@ pub const DYLIB: crate::dyld::HostDylib = crate::dyld::HostDylib {
         sysctl::FUNCTIONS,
         time::FUNCTIONS,
         unistd::FUNCTIONS,
+        uuid::FUNCTIONS,
         wchar::FUNCTIONS,
     ],
 };
@@ -131,6 +145,7 @@ pub struct State {
     time: time::State,
     errno: errno::State,
     clocale: clocale::State,
+    xlocale: xlocale::State,
     mach_vm: mach::vm_map::State,
     malloc: malloc::State,
     mman: sys::mman::State,

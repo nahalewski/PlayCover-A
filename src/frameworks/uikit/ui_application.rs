@@ -47,6 +47,75 @@ type UIRemoteNotificationType = NSUInteger;
 type UIStatusBarAnimation = NSInteger;
 type UIStatusBarStyle = NSInteger;
 
+/// Old apps that never declare an orientation in Info.plist but call
+/// `-[UIApplication setStatusBarOrientation:]` (e.g. Secret of Mana) expect the
+/// window to turn with the status bar, so their full-screen views end up
+/// landscape-sized (480x320) and their `layoutSubviews` rebuilds the GL
+/// renderbuffer. Emulate that for the window's top-level views by giving them
+/// landscape bounds plus the rotation transform (the same trick touchHLE uses
+/// for view-controller autorotation), and resize their full-screen subviews.
+fn adapt_root_views_to_landscape(env: &mut Environment, rotation: DeviceOrientation) {
+    use crate::frameworks::core_graphics::cg_affine_transform::CGAffineTransform;
+    use crate::frameworks::core_graphics::{CGPoint, CGRect, CGSize};
+    let angle = match rotation {
+        DeviceOrientation::LandscapeLeft => std::f32::consts::FRAC_PI_2,
+        DeviceOrientation::LandscapeRight => -std::f32::consts::FRAC_PI_2,
+        _ => return,
+    };
+
+    fn resize_children(env: &mut Environment, view: id, old: CGSize, new: CGSize) {
+        let subviews: id = msg![env; view subviews];
+        let count: NSUInteger = msg![env; subviews count];
+        for i in 0..count {
+            let child: id = msg![env; subviews objectAtIndex:i];
+            let frame: CGRect = msg![env; child frame];
+            if frame.size.width == old.width && frame.size.height == old.height {
+                let new_frame = CGRect {
+                    origin: CGPoint { x: 0.0, y: 0.0 },
+                    size: new,
+                };
+                () = msg![env; child setFrame:new_frame];
+                resize_children(env, child, old, new);
+                () = msg![env; child layoutSubviews];
+            }
+        }
+    }
+
+    let windows = env.framework_state.uikit.ui_view.ui_window.windows.clone();
+    for window in windows {
+        let window_frame: CGRect = msg![env; window frame];
+        let old = window_frame.size;
+        let new = CGSize {
+            width: old.height,
+            height: old.width,
+        };
+        let subviews: id = msg![env; window subviews];
+        let count: NSUInteger = msg![env; subviews count];
+        for i in 0..count {
+            let view: id = msg![env; subviews objectAtIndex:i];
+            let frame: CGRect = msg![env; view frame];
+            if frame.size.width != old.width || frame.size.height != old.height {
+                continue;
+            }
+            log!("Rotating root view {:?} to landscape bounds {:?}", view, new);
+            let bounds = CGRect {
+                origin: CGPoint { x: 0.0, y: 0.0 },
+                size: new,
+            };
+            let center = CGPoint {
+                x: old.width / 2.0,
+                y: old.height / 2.0,
+            };
+            let transform = CGAffineTransform::make_rotation(angle);
+            () = msg![env; view setTransform:transform];
+            () = msg![env; view setBounds:bounds];
+            () = msg![env; view setCenter:center];
+            resize_children(env, view, old, new);
+            () = msg![env; view layoutSubviews];
+        }
+    }
+}
+
 pub const CLASSES: ClassExports = objc_classes! {
 
 (env, this, _cmd);
@@ -129,6 +198,15 @@ pub const CLASSES: ClassExports = objc_classes! {
 }
 - (())setStatusBarOrientation:(UIInterfaceOrientation)orientation {
     let prev_orientation = env.window().current_rotation();
+    if let Some(requested) = match orientation {
+        UIDeviceOrientationPortrait => Some(DeviceOrientation::Portrait),
+        UIDeviceOrientationPortraitUpsideDown => Some(DeviceOrientation::PortraitUpsideDown),
+        UIDeviceOrientationLandscapeLeft => Some(DeviceOrientation::LandscapeLeft),
+        UIDeviceOrientationLandscapeRight => Some(DeviceOrientation::LandscapeRight),
+        _ => None,
+    } {
+        crate::window::note_app_requested_orientation(requested);
+    }
     env.on_parent_stack_in_coroutine(|window, _| {window.rotate_device(match orientation {
         UIDeviceOrientationPortrait => DeviceOrientation::Portrait,
         UIDeviceOrientationPortraitUpsideDown => DeviceOrientation::PortraitUpsideDown,
@@ -136,7 +214,11 @@ pub const CLASSES: ClassExports = objc_classes! {
         UIDeviceOrientationLandscapeRight => DeviceOrientation::LandscapeRight,
         _ => unimplemented!("Orientation {} not handled yet", orientation),
     })});
-    if prev_orientation != env.window().current_rotation() {
+    let new_orientation = env.window().current_rotation();
+    if prev_orientation != new_orientation {
+        if !env.bundle.declares_interface_orientation() {
+            adapt_root_views_to_landscape(env, new_orientation);
+        }
         generate_device_orientation_notification(env);
     }
 }
@@ -378,8 +460,14 @@ pub(super) fn UIApplicationMain(
     // Call layoutSubviews on all views in the view hierarchy.
     // See https://medium.com/geekculture/uiview-lifecycle-part-5-faa2d44511c9
     let views = env.framework_state.uikit.ui_view.views.clone();
+    // Layout can replace subviews and release views later in this snapshot.
+    // Keep each receiver alive until its layout callback has completed.
+    for view in &views {
+        retain(env, *view);
+    }
     for view in views {
         () = msg![env; view layoutSubviews];
+        release(env, view);
     }
 
     // Send applicationDidBecomeActive now that the application is ready to
@@ -504,6 +592,27 @@ const UIApplicationDidReceiveMemoryWarningNotification: &str =
 /// `UIApplicationLaunchOptionsKey` and `NSNotificationName` values.
 /// (Both types are strings)
 pub const CONSTANTS: ConstantExports = &[
+    // Struct constants: the app reads the fields straight from the symbol.
+    (
+        "_UIEdgeInsetsZero",
+        HostConstant::Custom(|env| {
+            let zero = env.mem.alloc(16);
+            env.mem.bytes_at_mut(zero.cast::<u8>(), 16).fill(0);
+            zero.cast().cast_const()
+        }),
+    ),
+    (
+        "_UIOffsetZero",
+        HostConstant::Custom(|env| {
+            let zero = env.mem.alloc(8);
+            env.mem.bytes_at_mut(zero.cast::<u8>(), 8).fill(0);
+            zero.cast().cast_const()
+        }),
+    ),
+    (
+        "_UIBackgroundTaskInvalid",
+        HostConstant::Custom(|env| env.mem.alloc_and_write(u32::MAX).cast().cast_const()),
+    ),
     (
         "_UIApplicationDidFinishLaunchingNotification",
         HostConstant::NSString(UIApplicationDidFinishLaunchingNotification),

@@ -111,7 +111,7 @@ impl Bundle {
     pub fn minimum_os_version(&self) -> Option<&str> {
         self.plist
             .get("MinimumOSVersion")
-            .map(|v| v.as_string().unwrap())
+            .and_then(|v| v.as_string())
     }
 
     pub fn required_device_capabilities(&self) -> Vec<&str> {
@@ -247,6 +247,12 @@ impl Bundle {
         self.plist
             .get("NSMainNibFile")
             .map(|v| v.as_string().unwrap())
+    }
+
+    /// Whether Info.plist says anything about interface orientation at all.
+    pub fn declares_interface_orientation(&self) -> bool {
+        self.plist.get("UISupportedInterfaceOrientations").is_some()
+            || self.plist.get("UIInterfaceOrientation").is_some()
     }
 
     pub fn supported_interface_orientations(&self) -> Vec<&str> {

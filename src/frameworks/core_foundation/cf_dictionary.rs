@@ -34,8 +34,12 @@ fn CFDictionaryCreateMutable(
     key_callbacks: ConstPtr<CFDictionaryKeyCallBacks>,
     value_callbacks: ConstPtr<CFDictionaryValueCallBacks>,
 ) -> CFMutableDictionaryRef {
-    assert!(allocator == kCFAllocatorDefault || env.mem.read(allocator).is_system_default()); // unimplemented
-    assert_eq!(capacity, 0); // TODO: fixed capacity support
+    assert!(allocator.is_null() || allocator == kCFAllocatorDefault || env.mem.read(allocator).is_system_default()); // unimplemented
+    if capacity != 0 {
+        // TODO: fixed capacity support. The limit is not enforced; a
+        // well-behaved app never exceeds it, so this is only a warning.
+        log_once!("TODO: CFDictionaryCreateMutable() capacity limit is not enforced");
+    }
 
     let new = msg_class![env; _touchHLE_NSMutableDictionary_non_retaining alloc];
     msg![env; new initWithKeyCallbacks:key_callbacks andValueCallbacks:value_callbacks]
@@ -152,7 +156,7 @@ fn _touchHLE_CFDictionary_retain(
     allocator: CFAllocatorRef,
     value: ConstVoidPtr,
 ) -> ConstVoidPtr {
-    assert!(allocator == kCFAllocatorDefault || env.mem.read(allocator).is_system_default()); // unimplemented
+    assert!(allocator.is_null() || allocator == kCFAllocatorDefault || env.mem.read(allocator).is_system_default()); // unimplemented
     CFRetain(env, value.cast_mut().cast()).cast_const().cast()
 }
 fn _touchHLE_CFDictionary_release(
@@ -160,7 +164,7 @@ fn _touchHLE_CFDictionary_release(
     allocator: CFAllocatorRef,
     value: ConstVoidPtr,
 ) {
-    assert!(allocator == kCFAllocatorDefault || env.mem.read(allocator).is_system_default()); // unimplemented
+    assert!(allocator.is_null() || allocator == kCFAllocatorDefault || env.mem.read(allocator).is_system_default()); // unimplemented
     CFRelease(env, value.cast_mut().cast());
 }
 fn _touchHLE_CFDictionary_copyDescription(

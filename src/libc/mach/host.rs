@@ -82,7 +82,12 @@ fn host_statistics(
     assert_eq!(flavor, HOST_VM_INFO);
     let out_size_available = env.mem.read(host_info_out_count);
     let out_size_expected = guest_size_of::<vm_statistics>() / guest_size_of::<natural_t>();
-    assert_eq!(out_size_expected, out_size_available);
+    // This is an input capacity, not an exact-size requirement. Newer callers
+    // may reserve more words than the supported VM statistics revision.
+    // XNU host_statistics returns KERN_FAILURE for an undersized buffer.
+    if out_size_available < out_size_expected {
+        return 5; // KERN_FAILURE; leave both output arguments untouched.
+    }
     // Below values corresponds to a run of an iPod Touch 4 running iOS 6.1.
     // As touchHLE doesn't have a paging system (yet? never?),
     // those numbers are (mostly) meaningless.
@@ -112,6 +117,7 @@ fn host_statistics(
             speculative_count: 0,
         },
     );
+    env.mem.write(host_info_out_count, out_size_expected);
     KERN_SUCCESS
 }
 

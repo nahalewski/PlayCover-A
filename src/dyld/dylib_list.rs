@@ -24,12 +24,14 @@ pub const DYLIB_LIST: &[&super::HostDylib] = &[
     &frameworks::core_location::DYLIB,
     &frameworks::core_motion::DYLIB,
     &frameworks::core_telephony::DYLIB,
+    &frameworks::security::DYLIB,
     &frameworks::foundation::DYLIB,
     &frameworks::game_kit::DYLIB,
     &frameworks::media_player::DYLIB,
     &frameworks::message_ui::DYLIB,
     &frameworks::openal::DYLIB,
     &frameworks::opengles::DYLIB,
+    &frameworks::social::DYLIB,
     &frameworks::store_kit::DYLIB,
     &frameworks::system_configuration::DYLIB,
     &frameworks::uikit::DYLIB,
@@ -109,5 +111,54 @@ mod tests {
                 panic!("Found duplicate constant export {constant_name}");
             }
         }
+    }
+}
+
+/// Everything the host implements, as text, for the Android launcher's
+/// compatibility check (one `F|C|K name` entry per line: functions,
+/// constants, classes). Needs no emulator state.
+pub fn exported_symbol_list() -> String {
+    let mut out = String::new();
+    for dylib in DYLIB_LIST {
+        for table in dylib.function_exports {
+            for (name, _) in table.iter() {
+                out.push_str("F|");
+                out.push_str(name);
+                out.push('\n');
+            }
+        }
+        for table in dylib.constant_exports {
+            for (name, _) in table.iter() {
+                out.push_str("C|");
+                out.push_str(name);
+                out.push('\n');
+            }
+        }
+        for table in dylib.class_exports {
+            for (name, _) in table.iter() {
+                out.push_str("K|");
+                out.push_str(name);
+                out.push('\n');
+            }
+        }
+    }
+    out
+}
+
+/// JNI entry point for `org.touchhle.android.SymbolIndex.exportedSymbols()`.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_org_touchhle_android_SymbolIndex_exportedSymbols(
+    env: *mut *const *const std::ffi::c_void,
+    _this: *mut std::ffi::c_void,
+) -> *mut std::ffi::c_void {
+    type NewStringUtf =
+        unsafe extern "system" fn(*mut *const *const std::ffi::c_void, *const std::ffi::c_char) -> *mut std::ffi::c_void;
+    let text = std::ffi::CString::new(exported_symbol_list().replace('\0', "")).unwrap();
+    unsafe {
+        // NewStringUTF is entry 167 of the JNI function table.
+        let table = *env as *const *const std::ffi::c_void;
+        let new_string_utf: NewStringUtf = std::mem::transmute(table.add(167).read());
+        new_string_utf(env, text.as_ptr())
     }
 }

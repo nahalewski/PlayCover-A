@@ -17,7 +17,8 @@ use crate::frameworks::core_graphics::cg_bitmap_context::{
 use crate::frameworks::core_graphics::cg_color::{CGColorHostObject, CGColorRef};
 use crate::frameworks::core_graphics::cg_color_space::CGColorSpaceCreateDeviceRGB;
 use crate::frameworks::core_graphics::cg_context::{
-    CGContextClearRect, CGContextRef, CGContextRelease, CGContextTranslateCTM,
+    CGContextClearRect, CGContextConcatCTM, CGContextFillRect, CGContextRef, CGContextRelease,
+    CGContextRestoreGState, CGContextSaveGState, CGContextSetRGBFillColor, CGContextTranslateCTM,
 };
 use crate::frameworks::core_graphics::cg_image::{
     kCGImageAlphaPremultipliedLast, kCGImageByteOrder32Big,
@@ -53,6 +54,8 @@ pub(super) struct CALayerHostObject {
     pub(super) needs_display_on_bounds_change: bool,
     /// `CGImageRef*`
     pub(super) contents: id,
+    pub(super) contents_gravity: String,
+    pub(super) contents_source_rect: CGRect,
     /// For CAEAGLLayer only
     pub(super) drawable_properties: id,
     /// For CAEAGLLayer only (internal state for compositor)
@@ -88,11 +91,170 @@ impl CALayerHostObject {
     }
 }
 
+/// Implementation of `-[CALayer renderInContext:]`: draw a layer's own content
+/// (background colour, then whatever its delegate draws) and then its
+/// sublayers into a `CGContext`, in the layer's own co-ordinate space.
+fn render_layer_in_context(env: &mut Environment, layer: id, context: CGContextRef, is_root: bool) {
+    let (hidden, delegate, bounds, background, sublayers, to_super) = {
+        let host = env.objc.borrow::<CALayerHostObject>(layer);
+        (
+            host.hidden,
+            host.delegate,
+            host.bounds,
+            host.background_color,
+            host.sublayers.clone(),
+            host.superlayer_to_layer_transform(),
+        )
+    };
+    if hidden {
+        return;
+    }
+    CGContextSaveGState(env, context);
+    if !is_root {
+        CGContextConcatCTM(env, context, to_super);
+    }
+    if let Some(CGColorHostObject { r, g, b, a, .. }) = background {
+        CGContextSetRGBFillColor(env, context, r, g, b, a);
+        CGContextFillRect(
+            env,
+            context,
+            CGRect {
+                origin: CGPoint { x: 0.0, y: 0.0 },
+                size: bounds.size,
+            },
+        );
+    }
+    if delegate != nil {
+        let delegate_class = ObjC::read_isa(delegate, &env.mem);
+        if env
+            .objc
+            .class_has_method_named(delegate_class, "drawLayer:inContext:")
+        {
+            () = msg![env; delegate drawLayer:layer inContext:context];
+        }
+    }
+    for sublayer in sublayers {
+        render_layer_in_context(env, sublayer, context, false);
+    }
+    CGContextRestoreGState(env, context);
+}
+
 pub const kCAFilterLinear: &str = "kCAFilterLinear";
 pub const kCAFilterNearest: &str = "kCAFilterNearest";
 pub const kCAFilterTrilinear: &str = "kCAFilterTrilinear";
+pub const kCAGravityCenter: &str = "center";
+pub const kCAGravityResize: &str = "resize";
+
+/// Destination of a content bitmap in the layer's local coordinate space.
+pub(super) fn contents_rect(bounds: CGRect, image: CGSize, gravity: &str) -> CGRect {
+    if gravity == kCAGravityResize || image.width <= 0.0 || image.height <= 0.0 {
+        return bounds;
+    }
+    let mut size = image;
+    if gravity == "resizeAspect" || gravity == "resizeAspectFill" {
+        let x = bounds.size.width / image.width;
+        let y = bounds.size.height / image.height;
+        let scale = if gravity == "resizeAspect" {
+            x.min(y)
+        } else {
+            x.max(y)
+        };
+        size = CGSize {
+            width: image.width * scale,
+            height: image.height * scale,
+        };
+    } else if !matches!(
+        gravity,
+        "center"
+            | "top"
+            | "bottom"
+            | "left"
+            | "right"
+            | "topLeft"
+            | "topRight"
+            | "bottomLeft"
+            | "bottomRight"
+    ) {
+        return bounds;
+    }
+    let x = match gravity {
+        "left" | "topLeft" | "bottomLeft" => 0.0,
+        "right" | "topRight" | "bottomRight" => bounds.size.width - size.width,
+        _ => (bounds.size.width - size.width) / 2.0,
+    };
+    let y = match gravity {
+        "top" | "topLeft" | "topRight" => 0.0,
+        "bottom" | "bottomLeft" | "bottomRight" => bounds.size.height - size.height,
+        _ => (bounds.size.height - size.height) / 2.0,
+    };
+    CGRect {
+        origin: CGPoint {
+            x: bounds.origin.x + x,
+            y: bounds.origin.y + y,
+        },
+        size,
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn content_alignment_preserves_background_bounds() {
+    let bounds = CGRect {
+        origin: CGPoint { x: 10.0, y: 20.0 },
+        size: CGSize {
+            width: 200.0,
+            height: 100.0,
+        },
+    };
+    let image = CGSize {
+        width: 40.0,
+        height: 20.0,
+    };
+    let center = contents_rect(bounds, image, "center");
+    assert_eq!(
+        (
+            center.origin.x,
+            center.origin.y,
+            center.size.width,
+            center.size.height
+        ),
+        (90.0, 60.0, 40.0, 20.0)
+    );
+    let bottom = contents_rect(bounds, image, "bottomRight");
+    assert_eq!((bottom.origin.x, bottom.origin.y), (170.0, 100.0));
+    let fit = contents_rect(
+        bounds,
+        CGSize {
+            width: 100.0,
+            height: 100.0,
+        },
+        "resizeAspect",
+    );
+    assert_eq!(
+        (fit.origin.x, fit.origin.y, fit.size.width, fit.size.height),
+        (60.0, 20.0, 100.0, 100.0)
+    );
+    let stretch = contents_rect(bounds, image, "resize");
+    assert_eq!(
+        (
+            stretch.origin.x,
+            stretch.origin.y,
+            stretch.size.width,
+            stretch.size.height
+        ),
+        (10.0, 20.0, 200.0, 100.0)
+    );
+}
 
 pub const CONSTANTS: ConstantExports = &[
+    (
+        "_kCAGravityCenter",
+        HostConstant::NSString(kCAGravityCenter),
+    ),
+    (
+        "_kCAGravityResize",
+        HostConstant::NSString(kCAGravityResize),
+    ),
     ("_kCAFilterLinear", HostConstant::NSString(kCAFilterLinear)),
     (
         "_kCAFilterNearest",
@@ -130,6 +292,8 @@ pub const CLASSES: ClassExports = objc_classes! {
         needs_display: false,
         needs_display_on_bounds_change: false,
         contents: nil,
+        contents_gravity: kCAGravityResize.to_string(),
+        contents_source_rect: CGRect { origin: CGPoint { x: 0.0, y: 0.0 }, size: CGSize { width: 1.0, height: 1.0 } },
         drawable_properties: nil,
         presented_pixels: None,
         cg_context: None,
@@ -350,6 +514,12 @@ pub const CLASSES: ClassExports = objc_classes! {
     env.objc.borrow_mut::<CALayerHostObject>(this).opaque = opaque;
 }
 
+// iOS 4+. touchHLE has no Retina scaling, so layers are always at scale 1.
+- (CGFloat)contentsScale {
+    1.0
+}
+- (())setContentsScale:(CGFloat)_scale {}
+
 - (f32)opacity {
     env.objc.borrow::<CALayerHostObject>(this).opacity
 }
@@ -488,9 +658,29 @@ pub const CLASSES: ClassExports = objc_classes! {
     CGContextTranslateCTM(env, cg_context, origin.x, origin.y);
 }
 
+- (())renderInContext:(CGContextRef)context {
+    render_layer_in_context(env, this, context, true);
+}
+
 // CGImageRef*
 - (id)contents {
     env.objc.borrow::<CALayerHostObject>(this).contents
+}
+- (CGRect)contentsRect {
+    env.objc.borrow::<CALayerHostObject>(this).contents_source_rect
+}
+- (())setContentsRect:(CGRect)rect {
+    env.objc.borrow_mut::<CALayerHostObject>(this).contents_source_rect = rect;
+}
+- (id)contentsGravity {
+    let value = env.objc.borrow::<CALayerHostObject>(this).contents_gravity.clone();
+    let string = ns_string::from_rust_string(env, value);
+    autorelease(env, string)
+}
+- (())setContentsGravity:(id)gravity {
+    let value = if gravity == nil { kCAGravityResize.to_string() }
+        else { to_rust_string(env, gravity).into_owned() };
+    env.objc.borrow_mut::<CALayerHostObject>(this).contents_gravity = value;
 }
 - (())setContents:(id)new_contents {
     let host_obj = env.objc.borrow_mut::<CALayerHostObject>(this);
@@ -671,7 +861,13 @@ fn transform_for_conversion(env: &mut Environment, this: id, other: id) -> CGAff
 
         if this_superlayer == nil && other_superlayer == nil {
             if need_common_ancestor {
-                panic!("Layers {this:?} and {other:?} have no common ancestor!");
+                // Real Core Animation does not abort here; apps may convert
+                // between layers that are (temporarily) in different trees,
+                // e.g. a view detached while a movie player is on screen.
+                log!(
+                    "Warning: layers {this:?} and {other:?} have no common ancestor, treating them as sharing a co-ordinate space"
+                );
+                return CGAffineTransformIdentity;
             } else {
                 break (nil, this_transform, other_transform);
             }

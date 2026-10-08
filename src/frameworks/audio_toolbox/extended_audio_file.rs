@@ -10,9 +10,9 @@
 // TODO: Audio format conversion
 
 use super::audio_file::{
-    kAudioFileBadPropertySizeError, kAudioFilePropertyDataFormat, kAudioFileReadPermission,
-    property_size, AudioFileClose, AudioFileGetProperty, AudioFileID, AudioFileOpenURL,
-    AudioFileReadBytes,
+    kAudioFileBadPropertySizeError, kAudioFilePropertyAudioDataPacketCount,
+    kAudioFilePropertyDataFormat, kAudioFileReadPermission, property_size, AudioFileClose,
+    AudioFileGetProperty, AudioFileID, AudioFileOpenURL, AudioFileReadBytes,
 };
 use super::audio_queue::is_supported_audio_format;
 use super::audio_unit::AudioBufferList;
@@ -54,6 +54,7 @@ type ExtAudioFileRef = MutPtr<OpaqueExtAudioFile>;
 /// Usually a FourCC.
 type ExtAudioFilePropertyID = u32;
 const kExtAudioFileProperty_FileDataFormat: ExtAudioFilePropertyID = fourcc(b"ffmt");
+const kExtAudioFileProperty_FileLengthFrames: ExtAudioFilePropertyID = fourcc(b"#frm");
 const kExtAudioFileProperty_ClientDataFormat: ExtAudioFilePropertyID = fourcc(b"cfmt");
 
 fn ExtAudioFileOpenURL(
@@ -110,6 +111,65 @@ fn ExtAudioFileGetProperty(
     out_property_data: MutVoidPtr,
 ) -> OSStatus {
     return_if_null!(in_ext_audio_file);
+
+    if in_property_id == kExtAudioFileProperty_FileLengthFrames {
+        // SInt64: derived from the packet count and the format's frames per
+        // packet (1 for linear PCM).
+        if env.mem.read(io_property_data_size) != guest_size_of::<i64>() {
+            log!("Warning: ExtAudioFileGetProperty() failed");
+            return kAudioFileBadPropertySizeError;
+        }
+        let guest_audio_file = env
+            .framework_state
+            .audio_toolbox
+            .extended_audio_file
+            .extended_audio_files
+            .get(&in_ext_audio_file)
+            .unwrap()
+            .guest_audio_file;
+
+        let packets_size_ptr: MutPtr<u32> = env.mem.alloc_and_write(guest_size_of::<u64>());
+        let packets_ptr: MutPtr<u64> = env.mem.alloc(guest_size_of::<u64>()).cast();
+        let res = AudioFileGetProperty(
+            env,
+            guest_audio_file,
+            kAudioFilePropertyAudioDataPacketCount,
+            packets_size_ptr,
+            packets_ptr.cast(),
+        );
+        let packets: u64 = env.mem.read(packets_ptr);
+        env.mem.free(packets_size_ptr.cast());
+        env.mem.free(packets_ptr.cast());
+        if res != 0 {
+            return res;
+        }
+
+        let format_size_ptr: MutPtr<u32> = env
+            .mem
+            .alloc_and_write(guest_size_of::<AudioStreamBasicDescription>());
+        let format_ptr: MutPtr<AudioStreamBasicDescription> = env
+            .mem
+            .alloc(guest_size_of::<AudioStreamBasicDescription>())
+            .cast();
+        let res = AudioFileGetProperty(
+            env,
+            guest_audio_file,
+            kAudioFilePropertyDataFormat,
+            format_size_ptr,
+            format_ptr.cast(),
+        );
+        let format = env.mem.read(format_ptr);
+        env.mem.free(format_size_ptr.cast());
+        env.mem.free(format_ptr.cast());
+        if res != 0 {
+            return res;
+        }
+
+        let frames = packets * u64::from(format.frames_per_packet.max(1));
+        env.mem
+            .write(out_property_data.cast::<i64>(), frames as i64);
+        return 0; // success
+    }
 
     let audio_file_property_id = match in_property_id {
         kExtAudioFileProperty_FileDataFormat => kAudioFilePropertyDataFormat,
@@ -268,6 +328,29 @@ fn ExtAudioFileRead(
     0 // success
 }
 
+fn ExtAudioFileSeek(
+    env: &mut Environment,
+    in_ext_audio_file: ExtAudioFileRef,
+    in_frame_offset: i64,
+) -> OSStatus {
+    return_if_null!(in_ext_audio_file);
+
+    let host_object = env
+        .framework_state
+        .audio_toolbox
+        .extended_audio_file
+        .extended_audio_files
+        .get_mut(&in_ext_audio_file)
+        .unwrap();
+    // Reads are done in bytes in the client format, so seek the same way.
+    let Some(client_format) = host_object.client_data_format else {
+        log!("Warning: ExtAudioFileSeek() before the client data format was set");
+        return -50; // paramErr
+    };
+    host_object.current_bytes_read = in_frame_offset * i64::from(client_format.bytes_per_frame);
+    0 // success
+}
+
 fn ExtAudioFileDispose(env: &mut Environment, in_ext_audio_file: ExtAudioFileRef) -> OSStatus {
     return_if_null!(in_ext_audio_file);
 
@@ -299,5 +382,6 @@ pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(ExtAudioFileGetProperty(_, _, _, _)),
     export_c_func!(ExtAudioFileSetProperty(_, _, _, _)),
     export_c_func!(ExtAudioFileRead(_, _, _)),
+    export_c_func!(ExtAudioFileSeek(_, _)),
     export_c_func!(ExtAudioFileDispose(_)),
 ];

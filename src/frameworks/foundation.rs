@@ -12,13 +12,15 @@
 //! `NSString` easier to understand.
 
 use crate::dyld::{export_c_func, FunctionExports};
-use crate::objc::id;
+use crate::mem::MutVoidPtr;
+use crate::objc::{id, Class, TrivialHostObject};
 use crate::Environment;
 
 pub mod _nib_archive_decoder;
 pub mod ns_array;
 pub mod ns_autorelease_pool;
 pub mod ns_bundle;
+pub mod ns_calendar;
 pub mod ns_character_set;
 pub mod ns_coder;
 pub mod ns_data;
@@ -44,6 +46,7 @@ pub mod ns_notification_center;
 pub mod ns_null;
 pub mod ns_objc_runtime;
 pub mod ns_object;
+pub mod ns_operation_queue;
 pub mod ns_process_info;
 pub mod ns_property_list_serialization;
 pub mod ns_run_loop;
@@ -55,6 +58,7 @@ pub mod ns_time_zone;
 pub mod ns_timer;
 pub mod ns_url;
 pub mod ns_url_connection;
+pub mod ns_url_protocol;
 pub mod ns_url_request;
 pub mod ns_user_defaults;
 pub mod ns_value;
@@ -68,6 +72,7 @@ pub const DYLIB: crate::dyld::HostDylib = crate::dyld::HostDylib {
         ns_array::CLASSES,
         ns_autorelease_pool::CLASSES,
         ns_bundle::CLASSES,
+        ns_calendar::CLASSES,
         ns_character_set::CLASSES,
         ns_coder::CLASSES,
         ns_data::CLASSES,
@@ -90,6 +95,7 @@ pub const DYLIB: crate::dyld::HostDylib = crate::dyld::HostDylib {
         ns_null::CLASSES,
         ns_method_signature::CLASSES,
         ns_object::CLASSES,
+        ns_operation_queue::CLASSES,
         ns_process_info::CLASSES,
         ns_property_list_serialization::CLASSES,
         ns_run_loop::CLASSES,
@@ -101,6 +107,7 @@ pub const DYLIB: crate::dyld::HostDylib = crate::dyld::HostDylib {
         ns_time_zone::CLASSES,
         ns_url::CLASSES,
         ns_url_connection::CLASSES,
+        ns_url_protocol::CLASSES,
         ns_url_request::CLASSES,
         ns_user_defaults::CLASSES,
         ns_value::CLASSES,
@@ -130,6 +137,7 @@ pub struct State {
     ns_locale: ns_locale::State,
     ns_notification_center: ns_notification_center::State,
     ns_null: ns_null::State,
+    ns_operation_queue: ns_operation_queue::State,
     ns_process_info: ns_process_info::State,
     ns_string: ns_string::State,
     ns_thread: ns_thread::State,
@@ -204,4 +212,33 @@ fn hash_helper<T: std::hash::Hash>(hashable: &T) -> NSUInteger {
     (hash_u64 as u32) ^ ((hash_u64 >> 32) as u32)
 }
 
-const FUNCTIONS: FunctionExports = &[export_c_func!(NSStringFromRange(_))];
+/// Allocate an instance of `class` (with a retain count of 1) without calling
+/// `init`. Classes that override `+allocWithZone:` call this.
+///
+/// This only supports classes whose host object is a plain [TrivialHostObject],
+/// i.e. direct or indirect subclasses of `NSObject` itself, and no extra bytes.
+fn NSAllocateObject(
+    env: &mut Environment,
+    class: Class,
+    extra_bytes: NSUInteger,
+    _zone: MutVoidPtr,
+) -> id {
+    if extra_bytes != 0 {
+        log!(
+            "TODO: NSAllocateObject() extra bytes ({}) are ignored",
+            extra_bytes
+        );
+    }
+    env.objc
+        .alloc_object(class, Box::new(TrivialHostObject), &mut env.mem)
+}
+
+fn NSDeallocateObject(env: &mut Environment, object: id) {
+    env.objc.dealloc_object(object, &mut env.mem)
+}
+
+const FUNCTIONS: FunctionExports = &[
+    export_c_func!(NSStringFromRange(_)),
+    export_c_func!(NSAllocateObject(_, _, _)),
+    export_c_func!(NSDeallocateObject(_)),
+];

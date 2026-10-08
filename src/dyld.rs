@@ -29,6 +29,7 @@ use crate::mem::{ConstVoidPtr, GuestUSize, Mem, MutPtr, MutVoidPtr, Ptr};
 use crate::objc::{nil, ClassExports, ObjC};
 use crate::Environment;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub use dylib_list::DYLIB_LIST;
 
@@ -222,6 +223,21 @@ fn write_return_to_host_routine(mem: &mut Mem, svc: u32) -> GuestFunction {
     assert!(!ptr.is_thumb());
     ptr
 }
+/// Debugging aid, set from `--ignore-unknown-selectors`: when true, calling a C
+/// function touchHLE doesn't implement logs a warning and returns 0 instead of
+/// crashing. Like that option, this hides real bugs.
+pub static IGNORE_UNIMPLEMENTED_FUNCTIONS: AtomicBool = AtomicBool::new(false);
+
+/// Set by `--trace-messages`: also log every call to an already-linked host
+/// (C) function, not just ObjC messages.
+pub static TRACE_HOST_CALLS: AtomicBool = AtomicBool::new(false);
+
+/// Stand-in for unimplemented functions while [IGNORE_UNIMPLEMENTED_FUNCTIONS]
+/// is set: does nothing and returns 0.
+fn ignored_unimplemented_function(_env: &mut Environment) -> i32 {
+    0
+}
+
 pub struct Dyld {
     /// List of host functions that have been "linked" and had SVCs assigned.
     ///
@@ -231,7 +247,13 @@ pub struct Dyld {
     return_to_host_routine: Option<GuestFunction>,
     thread_exit_routine: Option<GuestFunction>,
     constants_to_link_later: Vec<(MutPtr<ConstVoidPtr>, &'static HostConstant)>,
+    /// Unknown data symbols that look like NSString constants (notification
+    /// names, dictionary keys...): linked to a string holding the symbol name.
+    guessed_string_constants: Vec<(MutPtr<ConstVoidPtr>, String)>,
     non_lazy_host_functions: HashMap<&'static str, GuestFunction>,
+    /// Unimplemented functions already warned about (see
+    /// [IGNORE_UNIMPLEMENTED_FUNCTIONS]), so each is only logged once.
+    warned_unimplemented: std::collections::HashSet<String>,
 }
 
 impl Dyld {
@@ -259,7 +281,9 @@ impl Dyld {
             linked_host_functions: Vec::new(),
             return_to_host_routine: None,
             thread_exit_routine: None,
+            warned_unimplemented: Default::default(),
             constants_to_link_later: Vec::new(),
+            guessed_string_constants: Vec::new(),
             non_lazy_host_functions: HashMap::new(),
         }
     }
@@ -593,6 +617,17 @@ impl Dyld {
                 continue;
             }
 
+            if looks_like_string_constant(symbol) {
+                log!(
+                    "Warning: non-lazy symbol {:?} at {:?} in \"{}\" is not implemented, guessing it is an NSString constant",
+                    symbol,
+                    ptr_ptr,
+                    bin.name
+                );
+                self.guessed_string_constants
+                    .push((ptr_ptr, symbol.trim_start_matches('_').to_string()));
+                continue;
+            }
             log!(
                 "Warning: unhandled non-lazy symbol {:?} at {:?} in \"{}\"",
                 symbol,
@@ -626,6 +661,13 @@ impl Dyld {
             };
             env.mem.write(symbol_ptr_ptr, symbol_ptr.cast());
         }
+        let guessed = std::mem::take(&mut env.dyld.guessed_string_constants);
+        for (symbol_ptr_ptr, name) in guessed {
+            // Leaked on purpose: a handful of short strings for the app's lifetime.
+            let string_ptr = ns_string::get_static_str(env, Box::leak(name.into_boxed_str()));
+            let string_ptr_ptr = env.mem.alloc_and_write(string_ptr);
+            env.mem.write(symbol_ptr_ptr, string_ptr_ptr.cast().cast_const());
+        }
     }
 
     /// Return a host function that can be called to handle an SVC instruction
@@ -652,6 +694,9 @@ impl Dyld {
                 let Some(&(symbol, f)) = f else {
                     panic!("Unexpected SVC #{svc} at {svc_pc:#x}");
                 };
+                if TRACE_HOST_CALLS.load(Ordering::Relaxed) {
+                    log!("[C] {}", symbol);
+                }
                 log_dbg!("Call to host function, already linked: {}", symbol);
                 Some(f)
             }
@@ -780,6 +825,9 @@ impl Dyld {
 
             cpu.invalidate_cache_range(stub_function_ptr.to_bits(), 4);
 
+            if TRACE_HOST_CALLS.load(Ordering::Relaxed) {
+                log!("[C] {} (first call)", symbol);
+            }
             log_dbg!(
                 "Linked {} at {:?} to host implementation",
                 symbol,
@@ -806,6 +854,16 @@ impl Dyld {
                 // Tell the caller it needs to restart execution at svc_pc.
                 return None;
             }
+        }
+
+        if IGNORE_UNIMPLEMENTED_FUNCTIONS.load(Ordering::Relaxed) {
+            if self.warned_unimplemented.insert(symbol.to_string()) {
+                log!(
+                    "Ignoring call to unimplemented function {} (returning 0)",
+                    symbol
+                );
+            }
+            return Some(&(ignored_unimplemented_function as fn(&mut Environment) -> i32));
         }
 
         panic!("Call to unimplemented function {symbol}");
@@ -879,4 +937,27 @@ impl Dyld {
         let address = self.create_proc_address(mem, cpu, &symbol)?;
         Ok(Ptr::from_bits(address.addr_with_thumb_bit()))
     }
+}
+
+/// Heuristic for data symbols that hold an `NSString *` in real frameworks
+/// (`UIApplicationDidChangeStatusBarFrameNotification`, `NSURLIsExcludedFromBackupKey`...).
+/// An app that uses one we don't implement would otherwise read address 0.
+fn looks_like_string_constant(symbol: &str) -> bool {
+    let name = symbol.trim_start_matches('_');
+    const PREFIXES: &[&str] = &[
+        "NS", "UI", "CF", "CL", "AV", "MP", "SK", "GK", "AD", "EA", "CA", "CG", "kCF", "kCA", "kSec", "kUTType", "kAudio", "kCV",
+    ];
+    const SUFFIXES: &[&str] = &[
+        "Notification", "Key", "Keys", "Name", "Names", "Mode", "Domain", "Identifier", "Option", "Options",
+        "Type", "Status", "Attribute", "Attributes", "SoundName", "Method", "Host", "User", "Scheme", "Gravity", "Proxy", "Application",
+    ];
+    // Keychain constants (kSecAttrAccessible, kSecAttrLabel...) are all CFStrings.
+    if name.starts_with("kSec") {
+        return true;
+    }
+    // Keychain constants (kSecAttrAccessible, kSecAttrLabel...) are all CFStrings.
+    if name.starts_with("kSec") {
+        return true;
+    }
+    PREFIXES.iter().any(|p| name.starts_with(p)) && SUFFIXES.iter().any(|s| name.ends_with(s))
 }

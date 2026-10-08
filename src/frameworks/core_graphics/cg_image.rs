@@ -57,8 +57,24 @@ pub const CLASSES: ClassExports = objc_classes! {
 
 };
 
+/// Where an image's pixels came from, when that is memory the app may keep
+/// changing (a `CGDataProvider` over a buffer). Real Quartz reads such memory
+/// when the image is drawn, so apps (e.g. Sonic 1's emulator) create the image
+/// once and then rewrite the buffer every frame.
+#[derive(Copy, Clone)]
+struct LiveSource {
+    provider: CGDataProviderRef,
+    width: GuestUSize,
+    height: GuestUSize,
+    bits_per_component: GuestUSize,
+    bits_per_pixel: GuestUSize,
+    bytes_per_row: GuestUSize,
+    bitmap_info: CGBitmapInfo,
+}
+
 struct CGImageHostObject {
     image: Image,
+    live: Option<LiveSource>,
 }
 impl HostObject for CGImageHostObject {}
 
@@ -76,10 +92,42 @@ pub fn CGImageRetain(env: &mut Environment, c: CGImageRef) -> CGImageRef {
     }
 }
 
+/// CGImages are immutable, so a copy can share the original, retained.
+pub fn CGImageCreateCopy(env: &mut Environment, c: CGImageRef) -> CGImageRef {
+    if c.is_null() {
+        return c;
+    }
+    let live = env.objc.borrow::<CGImageHostObject>(c).live;
+    let Some(source) = live else {
+        // Immutable pixels: a copy can share the original.
+        return CGImageRetain(env, c);
+    };
+    // Re-read the app's buffer so the copy shows what it holds now.
+    let pixels = live_pixels(env, &source);
+    let image = Image::from_pixel_vec(pixels, (source.width, source.height));
+    let host_obj = Box::new(CGImageHostObject { image, live: Some(source) });
+    let class = env.objc.get_known_class("_touchHLE_CGImage", &mut env.mem);
+    CFRetain(env, source.provider);
+    env.objc.alloc_object(class, host_obj, &mut env.mem)
+}
+
+fn live_pixels(env: &mut Environment, source: &LiveSource) -> Vec<u8> {
+    let bytes = cg_data_provider::borrow_bytes(env, source.provider);
+    match (source.bits_per_component, source.bits_per_pixel) {
+        (5, 16) => rgb555_pixels_to_rgba(bytes, source.width, source.height, source.bytes_per_row, source.bitmap_info),
+        (8, 32) => rgb_pixels_to_rgba(bytes, source.width, source.height, source.bytes_per_row, source.bitmap_info),
+        _ => unimplemented!(
+            "CGImageCreate component depth {}, pixel depth {}",
+            source.bits_per_component,
+            source.bits_per_pixel
+        ),
+    }
+}
+
 /// Shortcut for use by `UIImage`: directly construct a `CGImage` instance from
 /// an [Image] instance.
 pub fn from_image(env: &mut Environment, image: Image) -> CGImageRef {
-    let host_obj = Box::new(CGImageHostObject { image });
+    let host_obj = Box::new(CGImageHostObject { image, live: None });
     let class = env.objc.get_known_class("_touchHLE_CGImage", &mut env.mem);
     env.objc.alloc_object(class, host_obj, &mut env.mem)
 }
@@ -97,6 +145,173 @@ pub fn borrow_image_mut(objc: &mut ObjC, image: CGImageRef) -> &mut Image {
 }
 
 // TODO: More create methods.
+
+/// Component locations in the guest's byte stream. Little-endian reverses
+/// the four bytes of the logical ARGB/RGBA word, not just its RGB channels.
+pub(super) fn rgb_pixel_offsets(info: CGBitmapInfo) -> (usize, usize, usize, Option<usize>) {
+    let alpha = info & kCGBitmapAlphaInfoMask;
+    let order = info & kCGBitmapByteOrderMask;
+    assert_eq!(info, alpha | order);
+    assert!(matches!(
+        order,
+        kCGImageByteOrderDefault | kCGImageByteOrder32Big | kCGImageByteOrder32Little
+    ));
+    let offsets = match alpha {
+        kCGImageAlphaNone | kCGImageAlphaNoneSkipLast => (0, 1, 2, None),
+        kCGImageAlphaPremultipliedLast | kCGImageAlphaLast => (0, 1, 2, Some(3)),
+        kCGImageAlphaPremultipliedFirst | kCGImageAlphaFirst => (1, 2, 3, Some(0)),
+        kCGImageAlphaNoneSkipFirst => (1, 2, 3, None),
+        kCGImageAlphaOnly => (0, 0, 0, Some(0)),
+        _ => panic!("unsupported RGB alpha info {alpha}"),
+    };
+    if order == kCGImageByteOrder32Little {
+        assert!(!matches!(alpha, kCGImageAlphaNone | kCGImageAlphaOnly));
+        (
+            3 - offsets.0,
+            3 - offsets.1,
+            3 - offsets.2,
+            offsets.3.map(|a| 3 - a),
+        )
+    } else {
+        offsets
+    }
+}
+
+pub(super) fn rgb_pixels_to_rgba(
+    bytes: &[u8],
+    width: u32,
+    height: u32,
+    stride: u32,
+    info: CGBitmapInfo,
+) -> Vec<u8> {
+    let alpha = info & kCGBitmapAlphaInfoMask;
+    let bpp = match alpha {
+        kCGImageAlphaNone => 3,
+        kCGImageAlphaOnly => 1,
+        _ => 4,
+    };
+    let offsets = rgb_pixel_offsets(info);
+    assert!(u64::from(stride) >= u64::from(width) * bpp);
+    assert!(bytes.len() as u64 >= u64::from(stride) * u64::from(height));
+    let mut out =
+        Vec::with_capacity(usize::try_from(u64::from(width) * u64::from(height) * 4).unwrap());
+    for y in 0..height {
+        for x in 0..width {
+            let start =
+                usize::try_from(u64::from(y) * u64::from(stride) + u64::from(x) * bpp).unwrap();
+            let p = &bytes[start..];
+            let a = offsets.3.map_or(255, |i| p[i]);
+            let channel = |i| {
+                if matches!(alpha, kCGImageAlphaFirst | kCGImageAlphaLast) {
+                    ((u16::from(p[i]) * u16::from(a) + 127) / 255) as u8
+                } else if alpha == kCGImageAlphaOnly {
+                    0
+                } else {
+                    p[i]
+                }
+            };
+            out.extend_from_slice(&[
+                channel(offsets.0),
+                channel(offsets.1),
+                channel(offsets.2),
+                a,
+            ]);
+        }
+    }
+    out
+}
+
+#[test]
+fn little_endian_bitmap_conversion_preserves_alpha_and_row_padding() {
+    let bgra = kCGImageByteOrder32Little | kCGImageAlphaPremultipliedFirst;
+    assert_eq!(rgb_pixel_offsets(bgra), (2, 1, 0, Some(3)));
+    assert_eq!(
+        rgb_pixels_to_rgba(
+            &[10, 20, 40, 80, 99, 99, 99, 99, 30, 60, 90, 120, 99, 99, 99, 99],
+            1,
+            2,
+            8,
+            bgra
+        ),
+        [40, 20, 10, 80, 90, 60, 30, 120]
+    );
+    let bgrx = kCGImageByteOrder32Little | kCGImageAlphaNoneSkipFirst;
+    assert_eq!(
+        rgb_pixels_to_rgba(&[10, 20, 40, 0], 1, 1, 4, bgrx),
+        [40, 20, 10, 255]
+    );
+    let abgr = kCGImageByteOrder32Little | kCGImageAlphaLast;
+    assert_eq!(
+        rgb_pixels_to_rgba(&[128, 20, 40, 80], 1, 1, 4, abgr),
+        [40, 20, 10, 128]
+    );
+}
+
+/// Quartz's 5-bit RGB format is XRGB1555, with the high bit skipped.
+/// It is distinct from RGB565: the green channel also has five bits.
+fn rgb555_pixels_to_rgba(
+    bytes: &[u8],
+    width: u32,
+    height: u32,
+    stride: u32,
+    info: CGBitmapInfo,
+) -> Vec<u8> {
+    let order = info & kCGBitmapByteOrderMask;
+    assert_eq!(info & !kCGBitmapByteOrderMask, kCGImageAlphaNoneSkipFirst);
+    assert!(matches!(
+        order,
+        kCGImageByteOrder16Little | kCGImageByteOrder16Big | kCGImageByteOrderDefault
+    ));
+    assert!(u64::from(stride) >= u64::from(width) * 2);
+    assert!(bytes.len() as u64 >= u64::from(stride) * u64::from(height));
+    let mut out =
+        Vec::with_capacity(usize::try_from(u64::from(width) * u64::from(height) * 4).unwrap());
+    let expand = |v: u16| ((v << 3) | (v >> 2)) as u8;
+    for y in 0..height {
+        for x in 0..width {
+            let offset =
+                usize::try_from(u64::from(y) * u64::from(stride) + u64::from(x) * 2).unwrap();
+            let pair = [bytes[offset], bytes[offset + 1]];
+            let pixel = if order == kCGImageByteOrder16Little {
+                u16::from_le_bytes(pair)
+            } else {
+                u16::from_be_bytes(pair)
+            };
+            out.extend_from_slice(&[
+                expand((pixel >> 10) & 31),
+                expand((pixel >> 5) & 31),
+                expand(pixel & 31),
+                255,
+            ]);
+        }
+    }
+    out
+}
+
+#[test]
+fn rgb555_framebuffer_decodes_colour_skip_bit_and_stride() {
+    let info = kCGImageByteOrder16Little | kCGImageAlphaNoneSkipFirst;
+    assert_eq!(
+        rgb555_pixels_to_rgba(
+            &[0, 0x7c, 0xe0, 3, 0xaa, 0xaa, 0x1f, 0x80, 0xff, 0xff, 0xbb, 0xbb],
+            2,
+            2,
+            6,
+            info
+        ),
+        [255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255]
+    );
+    assert_eq!(
+        rgb555_pixels_to_rgba(
+            &[0x42, 0x10],
+            1,
+            1,
+            2,
+            kCGImageByteOrder16Big | kCGImageAlphaNoneSkipFirst
+        ),
+        [132, 132, 132, 255]
+    );
+}
 
 fn CGImageCreate(
     env: &mut Environment,
@@ -123,35 +338,27 @@ fn CGImageCreate(
     );
     assert!(decode.is_null()); // TODO
     assert_eq!(CGColorSpaceGetModel(env, colorspace), kCGColorSpaceModelRGB);
-    assert_eq!(bits_per_component, 8);
-    assert_eq!(bits_per_pixel, 32);
-    assert_eq!(width as u64 * 4, bytes_per_row as u64);
-
-    let mut pixels = cg_data_provider::borrow_bytes(env, provider).to_vec();
-    assert_eq!(pixels.len() as u64, width as u64 * height as u64 * 4);
-
-    let byte_order = bitmap_info & kCGBitmapByteOrderMask;
-    let alpha_info = bitmap_info & kCGBitmapAlphaInfoMask;
-    assert_eq!(alpha_info | byte_order, bitmap_info); // TODO
-    match byte_order {
-        kCGImageByteOrderDefault | kCGImageByteOrder32Big => {
-            assert_eq!(alpha_info, kCGImageAlphaPremultipliedLast); // TODO
-        }
-        kCGImageByteOrder32Little => {
-            // TODO: fix CGImageGetAlphaInfo()
-            assert_eq!(alpha_info, kCGImageAlphaNoneSkipFirst); // TODO
-            for chunk in pixels.as_chunks_mut::<4>().0 {
-                // XRGB in 32 little endian -> RGBX in 32 big endian
-                chunk.swap(0, 2);
-                // Assume opaque, even though it is undefined
-                chunk[3] = 0xFF;
-            }
-        }
-        _ => unimplemented!("{byte_order}"),
-    }
-
+    let source = LiveSource {
+        provider,
+        width,
+        height,
+        bits_per_component,
+        bits_per_pixel,
+        bytes_per_row,
+        bitmap_info,
+    };
+    let pixels = live_pixels(env, &source);
     let image = Image::from_pixel_vec(pixels, (width, height));
-    from_image(env, image)
+    let live = if cg_data_provider::is_guest_memory(env, provider) {
+        // Keep the provider alive: the app may release it right after this call.
+        CFRetain(env, provider);
+        Some(source)
+    } else {
+        None
+    };
+    let host_obj = Box::new(CGImageHostObject { image, live });
+    let class = env.objc.get_known_class("_touchHLE_CGImage", &mut env.mem);
+    env.objc.alloc_object(class, host_obj, &mut env.mem)
 }
 
 fn CGImageCreateCopyWithColorSpace(
@@ -311,6 +518,7 @@ fn CGImageCreateWithImageInRect(
 pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(CGImageRelease(_)),
     export_c_func!(CGImageRetain(_)),
+    export_c_func!(CGImageCreateCopy(_)),
     export_c_func!(CGImageCreate(_, _, _, _, _, _, _, _, _, _, _)),
     export_c_func!(CGImageCreateCopyWithColorSpace(_, _)),
     export_c_func!(CGImageCreateWithPNGDataProvider(_, _, _, _)),

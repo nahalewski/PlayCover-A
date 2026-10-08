@@ -57,6 +57,15 @@ fn valloc(env: &mut Environment, size: GuestUSize) -> MutVoidPtr {
     env.mem.valloc(size)
 }
 
+/// `reallocf()`: `realloc()` that frees the original block when it fails.
+fn reallocf(env: &mut Environment, ptr: MutVoidPtr, size: GuestUSize) -> MutVoidPtr {
+    let result = realloc(env, ptr, size);
+    if result.is_null() && !ptr.is_null() && size != 0 {
+        env.mem.free(ptr);
+    }
+    result
+}
+
 fn realloc(env: &mut Environment, ptr: MutVoidPtr, size: GuestUSize) -> MutVoidPtr {
     // TODO: handle errno properly
     set_errno(env, 0);
@@ -167,7 +176,7 @@ fn atof(env: &mut Environment, s: ConstPtr<u8>) -> f64 {
     strtod(env, s, Ptr::null())
 }
 
-fn strtod(env: &mut Environment, nptr: ConstPtr<u8>, endptr: MutPtr<MutPtr<u8>>) -> f64 {
+pub fn strtod(env: &mut Environment, nptr: ConstPtr<u8>, endptr: MutPtr<MutPtr<u8>>) -> f64 {
     // TODO: handle errno properly
     set_errno(env, 0);
 
@@ -320,6 +329,34 @@ fn exit(env: &mut Environment, exit_code: i32) {
 
     echo!("App called exit(), exiting.");
     std::process::exit(exit_code);
+}
+
+fn abort(_env: &mut Environment) {
+    panic!("App called abort()");
+}
+
+/// Backs the `assert()` macro on Darwin: a failed assertion in the app.
+fn __assert_rtn(
+    env: &mut Environment,
+    func: ConstPtr<u8>,
+    file: ConstPtr<u8>,
+    line: i32,
+    expr: ConstPtr<u8>,
+) {
+    let s = |env: &Environment, p: ConstPtr<u8>| {
+        if p.is_null() {
+            String::new()
+        } else {
+            String::from_utf8_lossy(env.mem.cstr_at(p)).to_string()
+        }
+    };
+    panic!(
+        "App assertion failed: ({}), function {}, file {}, line {}",
+        s(env, expr),
+        s(env, func),
+        s(env, file),
+        line
+    );
 }
 
 fn bsearch(
@@ -661,6 +698,7 @@ pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(calloc(_, _)),
     export_c_func!(valloc(_)),
     export_c_func!(realloc(_, _)),
+    export_c_func!(reallocf(_, _)),
     export_c_func!(free(_)),
     export_c_func!(atexit(_)),
     export_c_func!(atoi(_)),
@@ -679,6 +717,8 @@ pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(setenv(_, _, _)),
     export_c_func!(unsetenv(_)),
     export_c_func!(exit(_)),
+    export_c_func!(abort()),
+    export_c_func!(__assert_rtn(_, _, _, _)),
     export_c_func!(bsearch(_, _, _, _, _)),
     export_c_func!(strtof(_, _)),
     export_c_func!(strtoul(_, _, _)),

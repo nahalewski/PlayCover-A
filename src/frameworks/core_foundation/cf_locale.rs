@@ -53,7 +53,7 @@ fn CFLocaleCreate(
     allocator: CFAllocatorRef,
     locale_identifier: CFLocaleIdentifier,
 ) -> CFLocaleRef {
-    assert!(allocator == kCFAllocatorDefault || env.mem.read(allocator).is_system_default()); // unimplemented
+    assert!(allocator.is_null() || allocator == kCFAllocatorDefault || env.mem.read(allocator).is_system_default()); // unimplemented
     let new: id = msg_class![env; NSLocale alloc];
     msg![env; new initWithLocaleIdentifier:locale_identifier]
 }
@@ -63,7 +63,7 @@ fn CFLocaleCreateCanonicalLocaleIdentifierFromString(
     allocator: CFAllocatorRef,
     locale_identifier: CFStringRef,
 ) -> CFLocaleIdentifier {
-    assert!(allocator == kCFAllocatorDefault || env.mem.read(allocator).is_system_default()); // unimplemented
+    assert!(allocator.is_null() || allocator == kCFAllocatorDefault || env.mem.read(allocator).is_system_default()); // unimplemented
     let len: NSUInteger = msg![env; locale_identifier length];
     // TODO: support arbitrary locale identification strings
     assert_eq!(len, 2);

@@ -32,6 +32,8 @@ pub const kCFStringEncodingUTF16: CFStringEncoding = kCFStringEncodingUnicode;
 pub const kCFStringEncodingUTF16BE: CFStringEncoding = 0x10000100;
 pub const kCFStringEncodingUTF16LE: CFStringEncoding = 0x14000100;
 pub const kCFStringEncodingISOLatin1: CFStringEncoding = 0x0201;
+pub const kCFStringEncodingDOSKorean: CFStringEncoding = 0x0422;
+pub const kCFStringEncodingEUC_KR: CFStringEncoding = 0x0940;
 
 fn CFStringAppend(
     env: &mut Environment,
@@ -66,6 +68,23 @@ fn CFStringAppendFormat(
     msg![env; string appendString:to_append]
 }
 
+pub fn CFStringAppendCharacters(
+    env: &mut Environment,
+    string: CFMutableStringRef,
+    chars: ConstPtr<unichar>,
+    num_chars: CFIndex,
+) {
+    let count: GuestUSize = num_chars.try_into().unwrap();
+    let units: Vec<u16> = env
+        .mem
+        .bytes_at(chars.cast::<u8>(), count * 2)
+        .chunks_exact(2)
+        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .collect();
+    let to_append = ns_string::from_rust_string(env, String::from_utf16_lossy(&units));
+    msg![env; string appendString:to_append]
+}
+
 pub fn CFStringConvertEncodingToNSStringEncoding(
     _env: &mut Environment,
     encoding: CFStringEncoding,
@@ -78,6 +97,7 @@ pub fn CFStringConvertEncodingToNSStringEncoding(
         kCFStringEncodingUTF16BE => ns_string::NSUTF16BigEndianStringEncoding,
         kCFStringEncodingUTF16LE => ns_string::NSUTF16LittleEndianStringEncoding,
         kCFStringEncodingISOLatin1 => ns_string::NSISOLatin1StringEncoding,
+        kCFStringEncodingDOSKorean | kCFStringEncodingEUC_KR => ns_string::NSKoreanStringEncoding,
         _ => unimplemented!("Unhandled: CFStringEncoding {:#x}", encoding),
     }
 }
@@ -93,6 +113,7 @@ fn CFStringConvertNSStringEncodingToEncoding(
         ns_string::NSUTF16BigEndianStringEncoding => kCFStringEncodingUTF16BE,
         ns_string::NSUTF16LittleEndianStringEncoding => kCFStringEncodingUTF16LE,
         ns_string::NSISOLatin1StringEncoding => kCFStringEncodingISOLatin1,
+        ns_string::NSKoreanStringEncoding => kCFStringEncodingEUC_KR,
         _ => unimplemented!("Unhandled: NSStringEncoding {:#x}", encoding),
     }
 }
@@ -102,7 +123,7 @@ fn CFStringCreateCopy(
     allocator: CFAllocatorRef,
     the_string: CFStringRef,
 ) -> CFStringRef {
-    assert!(allocator == kCFAllocatorDefault || env.mem.read(allocator).is_system_default()); // unimplemented
+    assert!(allocator.is_null() || allocator == kCFAllocatorDefault || env.mem.read(allocator).is_system_default()); // unimplemented
     msg![env; the_string copy]
 }
 
@@ -111,8 +132,9 @@ fn CFStringCreateMutable(
     allocator: CFAllocatorRef,
     max_length: CFIndex,
 ) -> CFMutableStringRef {
-    assert!(allocator == kCFAllocatorDefault || env.mem.read(allocator).is_system_default()); // unimplemented
-    assert_eq!(max_length, 0);
+    assert!(allocator.is_null() || allocator == kCFAllocatorDefault || env.mem.read(allocator).is_system_default()); // unimplemented
+    // A non-zero maximum length is only a hint here.
+    let _ = max_length;
     msg_class![env; NSMutableString new]
 }
 
@@ -122,7 +144,7 @@ fn CFStringCreateMutableCopy(
     max_length: CFIndex,
     the_string: CFStringRef,
 ) -> CFMutableStringRef {
-    assert!(allocator == kCFAllocatorDefault || env.mem.read(allocator).is_system_default()); // unimplemented
+    assert!(allocator.is_null() || allocator == kCFAllocatorDefault || env.mem.read(allocator).is_system_default()); // unimplemented
     assert_eq!(max_length, 0);
     msg![env; the_string mutableCopy]
 }
@@ -135,7 +157,7 @@ fn CFStringCreateWithBytes(
     encoding: CFStringEncoding,
     is_external: bool,
 ) -> CFStringRef {
-    assert!(allocator == kCFAllocatorDefault || env.mem.read(allocator).is_system_default()); // unimplemented
+    assert!(allocator.is_null() || allocator == kCFAllocatorDefault || env.mem.read(allocator).is_system_default()); // unimplemented
     assert!(!is_external); // TODO
     let encoding = CFStringConvertEncodingToNSStringEncoding(env, encoding);
     let length: NSUInteger = num_bytes.try_into().unwrap();
@@ -149,7 +171,7 @@ fn CFStringCreateWithCString(
     c_string: ConstPtr<u8>,
     encoding: CFStringEncoding,
 ) -> CFStringRef {
-    assert!(allocator == kCFAllocatorDefault || env.mem.read(allocator).is_system_default()); // unimplemented
+    assert!(allocator.is_null() || allocator == kCFAllocatorDefault || env.mem.read(allocator).is_system_default()); // unimplemented
     let encoding = CFStringConvertEncodingToNSStringEncoding(env, encoding);
     let ns_string: id = msg_class![env; NSString alloc];
     msg![env; ns_string initWithCString:c_string encoding:encoding]
@@ -162,7 +184,7 @@ fn CFStringCreateWithCStringNoCopy(
     encoding: CFStringEncoding,
     deallocator: CFAllocatorRef,
 ) -> CFStringRef {
-    assert!(allocator == kCFAllocatorDefault || env.mem.read(allocator).is_system_default()); // unimplemented
+    assert!(allocator.is_null() || allocator == kCFAllocatorDefault || env.mem.read(allocator).is_system_default()); // unimplemented
     assert!(env.mem.read(deallocator).is_null()); // unimplemented
     let encoding = CFStringConvertEncodingToNSStringEncoding(env, encoding);
     let c_len: GuestUSize = strlen(env, c_string);
@@ -191,7 +213,7 @@ fn CFStringCreateWithFormatAndArguments(
     format: CFStringRef,
     args: VaList,
 ) -> CFStringRef {
-    assert!(allocator == kCFAllocatorDefault || env.mem.read(allocator).is_system_default()); // unimplemented
+    assert!(allocator.is_null() || allocator == kCFAllocatorDefault || env.mem.read(allocator).is_system_default()); // unimplemented
     let res = ns_string::with_format(env, format, args);
     ns_string::from_rust_string(env, res)
 }
@@ -202,7 +224,7 @@ fn CFStringCreateWithSubstring(
     the_string: CFStringRef,
     range: CFRange,
 ) -> CFStringRef {
-    assert!(allocator == kCFAllocatorDefault || env.mem.read(allocator).is_system_default()); // unimplemented
+    assert!(allocator.is_null() || allocator == kCFAllocatorDefault || env.mem.read(allocator).is_system_default()); // unimplemented
     let range = NSRange {
         location: range.location.try_into().unwrap(),
         length: range.length.try_into().unwrap(),
@@ -448,6 +470,7 @@ pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(CFStringAppend(_, _)),
     export_c_func!(CFStringAppendCString(_, _, _)),
     export_c_func!(CFStringAppendFormat(_, _, _, _)),
+    export_c_func!(CFStringAppendCharacters(_, _, _)),
     export_c_func!(CFStringConvertEncodingToNSStringEncoding(_)),
     export_c_func!(CFStringConvertNSStringEncodingToEncoding(_)),
     export_c_func!(CFStringCreateCopy(_, _)),

@@ -80,6 +80,18 @@ const CLASSES: ClassExports = objc_classes! {
 
 const CONSTANTS: ConstantExports = &[
     (
+        "_kCLLocationAccuracyHundredMeters",
+        HostConstant::Custom(|env| env.mem.alloc_and_write(100f64).cast().cast_const()),
+    ),
+    (
+        "_kCLLocationAccuracyNearestTenMeters",
+        HostConstant::Custom(|env| env.mem.alloc_and_write(10f64).cast().cast_const()),
+    ),
+    (
+        "_kCLLocationAccuracyThreeKilometers",
+        HostConstant::Custom(|env| env.mem.alloc_and_write(3000f64).cast().cast_const()),
+    ),
+    (
         "_kCLHeadingFilterNone",
         HostConstant::Custom(|env| env.mem.alloc_and_write(-1f64).cast().cast_const()),
     ),

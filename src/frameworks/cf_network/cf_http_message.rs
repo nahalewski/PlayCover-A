@@ -28,7 +28,7 @@ fn CFHTTPMessageCreateRequest(
     url: CFURLRef,
     http_version: CFStringRef,
 ) -> CFHTTPMessageRef {
-    assert!(allocator == kCFAllocatorDefault || env.mem.read(allocator).is_system_default()); // unimplemented
+    assert!(allocator.is_null() || allocator == kCFAllocatorDefault || env.mem.read(allocator).is_system_default()); // unimplemented
     let url_desc = msg![env; url description];
     log!(
         "TODO: CFHTTPMessageCreateRequest({}, '{}', {}) -> NULL",
@@ -66,7 +66,7 @@ fn CFReadStreamCreateForHTTPRequest(
     allocator: CFAllocatorRef,
     message: CFHTTPMessageRef,
 ) -> CFReadStreamRef {
-    assert!(allocator == kCFAllocatorDefault || env.mem.read(allocator).is_system_default()); // unimplemented
+    assert!(allocator.is_null() || allocator == kCFAllocatorDefault || env.mem.read(allocator).is_system_default()); // unimplemented
     if !message.is_null() {
         todo!(
             "CFReadStreamCreateForHTTPRequest({:?}, {:?})",

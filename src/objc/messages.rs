@@ -35,7 +35,11 @@ pub(super) struct ThreadInitializer {
 }
 
 fn maybe_initialize_class(env: &mut Environment, receiver: id) {
-    let class_host_object = env.objc.get_host_object(receiver).unwrap();
+    // Objects the runtime does not track (such as blocks, which live in guest
+    // memory and are never registered) are not classes and need no +initialize.
+    let Some(class_host_object) = env.objc.get_host_object(receiver) else {
+        return;
+    };
     let Some(&super::ClassHostObject {
         superclass,
         is_metaclass,
@@ -192,7 +196,41 @@ fn objc_msgSend_inner(
     }
 
     let orig_class = super2.unwrap_or_else(|| ObjC::read_isa(receiver, &env.mem));
-    assert!(orig_class != nil);
+    if orig_class == nil {
+        // The receiver has no class: it is a deallocated (or otherwise bogus)
+        // object.
+        if env.options.ignore_unknown_selectors {
+            // Debugging aid (--ignore-unknown-selectors): pretend the message
+            // returned nil/0. Needed for ad SDKs that release things twice.
+            log!(
+                "Ignoring message \"{}\" sent to deallocated object {:?}",
+                selector.as_str(&env.mem),
+                receiver
+            );
+            env.cpu.regs_mut()[0..2].fill(0);
+            return;
+        }
+        panic!(
+            "Message \"{}\" sent to object {:?} that has no class (deallocated?)",
+            selector.as_str(&env.mem),
+            receiver
+        );
+    }
+
+    if env.options.trace_messages {
+        // Debugging aid (--trace-messages): log every message the app sends.
+        let class_name = env
+            .objc
+            .get_host_object(orig_class)
+            .and_then(|h| h.as_any().downcast_ref::<super::ClassHostObject>())
+            .map_or("?".to_string(), |c| c.name.clone());
+        log!(
+            "[{} {:?} {}]",
+            class_name,
+            receiver,
+            selector.as_str(&env.mem)
+        );
+    }
     if !skip_initialize {
         maybe_initialize_class(env, receiver);
     }
@@ -203,6 +241,31 @@ fn objc_msgSend_inner(
     loop {
         if class == nil {
             assert!(class != orig_class);
+
+            if env.options.ignore_unknown_selectors {
+                // Debugging aid (--ignore-unknown-selectors): behave as if the
+                // method returned nil/0, so that dead code paths (ad SDKs,
+                // analytics, …) don't stop the app. Likely to hide real bugs.
+                if let Some(host_object) = env.objc.get_host_object(orig_class) {
+                    if let Some(class_host_object) = host_object
+                        .as_any()
+                        .downcast_ref::<super::ClassHostObject>()
+                    {
+                        log!(
+                            "Ignoring unknown selector \"{}\" sent to {} ({})",
+                            selector.as_str(&env.mem),
+                            class_host_object.name,
+                            if class_host_object.is_metaclass {
+                                "class"
+                            } else {
+                                "instance"
+                            },
+                        );
+                    }
+                }
+                env.cpu.regs_mut()[0..2].fill(0);
+                return;
+            }
 
             let class_host_object = env.objc.get_host_object(orig_class).unwrap();
             let &super::ClassHostObject {
@@ -289,6 +352,18 @@ Type mismatch when sending message {} to {:?}!
             is_metaclass,
         }) = host_object.as_any().downcast_ref()
         {
+            if env.options.ignore_unknown_selectors {
+                // Debugging aid (--ignore-unknown-selectors): treat it like the
+                // "fake class" case below and behave as if sent to nil.
+                log!(
+                    "Ignoring call to unimplemented class \"{}\" {} method \"{}\"",
+                    name,
+                    if is_metaclass { "class" } else { "instance" },
+                    selector.as_str(&env.mem),
+                );
+                env.cpu.regs_mut()[0..2].fill(0);
+                return;
+            }
             panic!(
                 "Class \"{}\" ({:?}) is unimplemented. Call to {} method \"{}\".",
                 name,
@@ -423,6 +498,21 @@ pub(super) fn objc_msgSendSuper2(
     )
 }
 
+/// Super dispatch with a hidden struct-return pointer in r0. The receiver
+/// occupies r1; leave the result pointer and the remaining method arguments
+/// untouched so both guest and host implementations see the normal stret ABI.
+#[allow(non_snake_case)]
+pub(super) fn objc_msgSendSuper2_stret(
+    env: &mut Environment,
+    _stret: MutVoidPtr,
+    super_ptr: ConstPtr<objc_super>,
+    selector: SEL,
+) {
+    let objc_super { receiver, class } = env.mem.read(super_ptr);
+    crate::abi::write_next_arg(&mut 1, env.cpu.regs_mut(), &mut env.mem, receiver);
+    objc_msgSend_inner(env, receiver, selector, Some(class), false, false)
+}
+
 /// Trait that assists with type-checking of [msg_send]'s arguments.
 ///
 /// - Statically constrains the types of [msg_send]'s arguments so that the
@@ -517,7 +607,8 @@ where
     // Provide type info for dynamic type checking.
     env.objc.message_type_info = Some(<(R, P) as MsgSendSuperSignature>::WithoutSuper::type_info());
     if R::SIZE_IN_MEM.is_some() {
-        todo!() // no stret yet
+        (objc_msgSendSuper2_stret as fn(&mut Environment, MutVoidPtr, ConstPtr<objc_super>, SEL))
+            .call_from_host(env, args)
     } else {
         (objc_msgSendSuper2 as fn(&mut Environment, ConstPtr<objc_super>, SEL))
             .call_from_host(env, args)

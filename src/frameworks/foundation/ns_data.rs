@@ -149,6 +149,7 @@ pub const CLASSES: ClassExports = objc_classes! {
     let path = to_rust_string(env, path);
     log_dbg!("[(NSData*){:?} initWithContentsOfFile:{:?}]", this, path);
     let Ok(bytes) = env.fs.read(GuestPath::new(&path)) else {
+        log!("NSData initWithContentsOfFile: failed to read {:?}", path);
         release(env, this);
         return nil;
     };

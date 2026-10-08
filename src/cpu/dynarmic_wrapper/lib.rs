@@ -10,6 +10,9 @@
 // This also allows items in the crate to have non-snake-case names.
 #![allow(non_snake_case)]
 
+#[cfg(feature = "a64")]
+pub mod a64;
+
 /// Opaque type from C
 #[allow(non_camel_case_types)]
 pub type touchHLE_DynarmicWrapper = std::ffi::c_void;

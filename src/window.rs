@@ -76,6 +76,102 @@ pub enum DeviceOrientation {
     LandscapeLeft,
     LandscapeRight,
 }
+
+#[cfg(target_os = "android")]
+static ANDROID_FORCED_ORIENTATION: std::sync::atomic::AtomicI32 =
+    std::sync::atomic::AtomicI32::new(-1);
+
+// UI thread only writes the request. SDL/window changes stay on the emulation
+// main stack when events are polled, and use its existing touch transform.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_org_touchhle_android_MainActivity_nativeForceOrientation(
+    _env: *mut std::ffi::c_void,
+    _class: *mut std::ffi::c_void,
+    orientation: i32,
+) {
+    ANDROID_FORCED_ORIENTATION.store(orientation, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg(any(target_os = "android", test))]
+fn orientation_from_override(value: i32) -> Option<DeviceOrientation> {
+    match value {
+        0 => Some(DeviceOrientation::Portrait),
+        1 => Some(DeviceOrientation::LandscapeRight),
+        2 => Some(DeviceOrientation::PortraitUpsideDown),
+        3 => Some(DeviceOrientation::LandscapeLeft),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn android_rotation_override_maps_all_four_directions_and_disable() {
+    assert_eq!(
+        orientation_from_override(0),
+        Some(DeviceOrientation::Portrait)
+    );
+    assert_eq!(
+        orientation_from_override(1),
+        Some(DeviceOrientation::LandscapeRight)
+    );
+    assert_eq!(
+        orientation_from_override(2),
+        Some(DeviceOrientation::PortraitUpsideDown)
+    );
+    assert_eq!(
+        orientation_from_override(3),
+        Some(DeviceOrientation::LandscapeLeft)
+    );
+    assert_eq!(orientation_from_override(-1), None);
+    assert_eq!(orientation_from_override(4), None);
+}
+
+/// Orientations (as override values 0-3) the running app declares it supports.
+/// Device rotation is only followed into one of these, as on iOS.
+#[cfg(target_os = "android")]
+static ANDROID_SUPPORTED_ORIENTATIONS: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0b1111);
+
+#[cfg(target_os = "android")]
+pub fn set_android_supported_orientations(mask: u32) {
+    ANDROID_SUPPORTED_ORIENTATIONS.store(mask, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Called when the app itself asks for an orientation (e.g. with
+/// `-[UIApplication setStatusBarOrientation:]`). Apps that declare nothing in
+/// Info.plist but request landscape in code must not have device rotation
+/// following override that request, so only the requested orientation's axis
+/// (portrait or landscape) stays eligible for following.
+pub fn note_app_requested_orientation(orientation: DeviceOrientation) {
+    #[cfg(target_os = "android")]
+    {
+        let mask = match orientation {
+            DeviceOrientation::Portrait | DeviceOrientation::PortraitUpsideDown => 0b0101,
+            DeviceOrientation::LandscapeLeft | DeviceOrientation::LandscapeRight => 0b1010,
+        };
+        log!("App requested {:?}: orientation mask now {:#06b}", orientation, mask);
+        ANDROID_SUPPORTED_ORIENTATIONS.store(mask, std::sync::atomic::Ordering::Relaxed);
+    }
+    #[cfg(not(target_os = "android"))]
+    let _ = orientation;
+}
+
+#[cfg(target_os = "android")]
+fn android_forced_orientation() -> Option<DeviceOrientation> {
+    let value = ANDROID_FORCED_ORIENTATION.load(std::sync::atomic::Ordering::Relaxed);
+    // 10..=13: chosen by hand in the overlay menu; ignores the app's declared
+    // supported orientations, for games that never rotate on their own.
+    if (10..14).contains(&value) {
+        return orientation_from_override(value - 10);
+    }
+    if !(0..4).contains(&value)
+        || ANDROID_SUPPORTED_ORIENTATIONS.load(std::sync::atomic::Ordering::Relaxed) & (1 << value) == 0
+    {
+        return None;
+    }
+    orientation_from_override(value)
+}
 fn size_for_orientation(
     family: DeviceFamily,
     orientation: DeviceOrientation,
@@ -107,6 +203,17 @@ fn rotate_fullscreen_size(orientation: DeviceOrientation, screen_size: (u32, u32
 }
 /// Tell SDL2 what orientation we want. Only useful on Android.
 fn set_sdl2_orientation(orientation: DeviceOrientation) {
+    // While device rotation is being followed, Android turns the window itself
+    // (see MainActivity.updateForcedOrientation), so do not lock the activity
+    // to a single orientation: that left the system UI stuck.
+    #[cfg(target_os = "android")]
+    if android_forced_orientation().is_some() {
+        sdl2::hint::set(
+            "SDL_IOS_ORIENTATIONS",
+            "LandscapeLeft LandscapeRight Portrait PortraitUpsideDown",
+        );
+        return;
+    }
     // Despite the name, this hint works on Android too.
     sdl2::hint::set(
         "SDL_IOS_ORIENTATIONS",
@@ -177,6 +284,8 @@ pub enum BatteryState {
 pub enum GLVersion {
     /// OpenGL ES 1.1
     GLES11,
+    /// OpenGL ES 2.0
+    GLES20,
     /// OpenGL 2.1 compatibility profile
     GL21Compat,
 }
@@ -433,6 +542,11 @@ impl Window {
             return;
         }
         self.last_polled = now;
+
+        #[cfg(target_os = "android")]
+        if let Some(orientation) = android_forced_orientation() {
+            self.rotate_device(orientation);
+        }
 
         fn transform_input_coords(
             window: &Window,
@@ -720,7 +834,14 @@ impl Window {
                     // never finish handling the event.
                     // TODO: Add a mechanism for re-enabling polling, if at some
                     // point we support returning touchHLE to the foreground.
-                    self.enable_event_polling = false;
+                    // Local fork change: on Android the app is resumed rather
+                    // than shut down, so event polling must keep running: SDL
+                    // processes the return to the foreground (re-creating the
+                    // window surface) while events are pumped. Disabling it
+                    // left the screen black after switching back.
+                    if env::consts::OS != "android" {
+                        self.enable_event_polling = false;
+                    }
                     continue;
                 }
                 E::AppTerminating { .. } => {
@@ -1152,6 +1273,10 @@ impl Window {
                 attr.set_context_version(1, 1);
                 attr.set_context_profile(sdl2::video::GLProfile::GLES);
             }
+            GLVersion::GLES20 => {
+                attr.set_context_version(2, 0);
+                attr.set_context_profile(sdl2::video::GLProfile::GLES);
+            }
             GLVersion::GL21Compat => {
                 attr.set_context_version(2, 1);
                 attr.set_context_profile(sdl2::video::GLProfile::Compatibility);
@@ -1276,9 +1401,16 @@ impl Window {
     /// else, because the user can physically rotate the screen.
     pub fn rotate_device(&mut self, new_orientation: DeviceOrientation) {
         assert!(self.on_main_stack);
+        #[cfg(target_os = "android")]
+        let new_orientation = android_forced_orientation().unwrap_or(new_orientation);
         if new_orientation == self.device_orientation {
             return;
         }
+        log!(
+            "Rotating device {:?} -> {:?}",
+            self.device_orientation,
+            new_orientation
+        );
 
         if !self.fullscreen && !Self::rotatable_fullscreen() {
             let (width, height) = if Self::rotatable_fullscreen() {
@@ -1384,6 +1516,11 @@ impl Window {
         let x = (screen_width - scaled_width) / 2;
         let y = (screen_height - scaled_height) / 2;
         (x, y, scaled_width, scaled_height)
+    }
+
+    /// Drawable size, for diagnostics.
+    pub fn drawable_size_for_log(&self) -> (u32, u32) {
+        self.window.drawable_size()
     }
 
     /// Special offset to add to y co-ordinates, only when drawing to screen.

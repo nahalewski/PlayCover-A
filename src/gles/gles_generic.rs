@@ -19,6 +19,11 @@ use super::gles11_raw::types::*;
 /// from this trait. It can be made active from [GLESContext::make_current].
 #[allow(clippy::upper_case_acronyms)]
 pub trait GLESContext {
+    /// Which OpenGL ES major version this implementation provides (1 or 2).
+    fn api_version(&self) -> u32 {
+        1
+    }
+
     /// Get a human-friendly description of this implementation.
     fn description() -> &'static str
     where
@@ -70,116 +75,278 @@ pub trait GLESContext {
 /// of the correct size as documented in the OpenGL ES spec.
 #[allow(clippy::upper_case_acronyms)]
 #[allow(clippy::too_many_arguments)] // not our fault :(
+#[allow(unused_variables)]
 pub trait GLES {
+    /// Which OpenGL ES major version this implementation provides: 1 for
+    /// OpenGL ES 1.1, 2 for OpenGL ES 2.0. Only the methods for the matching
+    /// version are implemented; the rest panic if called.
+    fn api_version(&self) -> u32 {
+        1
+    }
+
     /// Get some string describing the underlying driver. For OpenGL this is
     /// `GL_VENDOR`, `GL_RENDERER` and `GL_VERSION`.
-    unsafe fn driver_description(&self) -> String;
+    unsafe fn driver_description(&self) -> String {
+        unimplemented!()
+    }
     // Generic state manipulation
-    unsafe fn GetError(&mut self) -> GLenum;
-    unsafe fn Enable(&mut self, cap: GLenum);
-    unsafe fn IsEnabled(&mut self, cap: GLenum) -> GLboolean;
-    unsafe fn Disable(&mut self, cap: GLenum);
-    unsafe fn ClientActiveTexture(&mut self, texture: GLenum);
-    unsafe fn EnableClientState(&mut self, array: GLenum);
-    unsafe fn DisableClientState(&mut self, array: GLenum);
-    unsafe fn GetBooleanv(&mut self, pname: GLenum, params: *mut GLboolean);
-    unsafe fn GetFloatv(&mut self, pname: GLenum, params: *mut GLfloat);
-    unsafe fn GetIntegerv(&mut self, pname: GLenum, params: *mut GLint);
-    unsafe fn GetTexEnviv(&mut self, target: GLenum, pname: GLenum, params: *mut GLint);
-    unsafe fn GetTexEnvfv(&mut self, target: GLenum, pname: GLenum, params: *mut GLfloat);
-    unsafe fn GetPointerv(&mut self, pname: GLenum, params: *mut *const GLvoid);
-    unsafe fn Hint(&mut self, target: GLenum, mode: GLenum);
-    unsafe fn Finish(&mut self);
-    unsafe fn Flush(&mut self);
+    unsafe fn GetError(&mut self) -> GLenum {
+        unimplemented!()
+    }
+    unsafe fn Enable(&mut self, cap: GLenum) {
+        unimplemented!()
+    }
+    unsafe fn IsEnabled(&mut self, cap: GLenum) -> GLboolean {
+        unimplemented!()
+    }
+    unsafe fn Disable(&mut self, cap: GLenum) {
+        unimplemented!()
+    }
+    unsafe fn ClientActiveTexture(&mut self, texture: GLenum) {
+        unimplemented!()
+    }
+    unsafe fn EnableClientState(&mut self, array: GLenum) {
+        unimplemented!()
+    }
+    unsafe fn DisableClientState(&mut self, array: GLenum) {
+        unimplemented!()
+    }
+    unsafe fn GetBooleanv(&mut self, pname: GLenum, params: *mut GLboolean) {
+        unimplemented!()
+    }
+    unsafe fn GetFloatv(&mut self, pname: GLenum, params: *mut GLfloat) {
+        unimplemented!()
+    }
+    unsafe fn GetIntegerv(&mut self, pname: GLenum, params: *mut GLint) {
+        unimplemented!()
+    }
+    unsafe fn GetTexEnviv(&mut self, target: GLenum, pname: GLenum, params: *mut GLint) {
+        unimplemented!()
+    }
+    unsafe fn GetTexEnvfv(&mut self, target: GLenum, pname: GLenum, params: *mut GLfloat) {
+        unimplemented!()
+    }
+    unsafe fn GetPointerv(&mut self, pname: GLenum, params: *mut *const GLvoid) {
+        unimplemented!()
+    }
+    unsafe fn Hint(&mut self, target: GLenum, mode: GLenum) {
+        unimplemented!()
+    }
+    unsafe fn Finish(&mut self) {
+        unimplemented!()
+    }
+    unsafe fn Flush(&mut self) {
+        unimplemented!()
+    }
     #[allow(dead_code)]
-    unsafe fn GetString(&mut self, name: GLenum) -> *const GLubyte;
+    unsafe fn GetString(&mut self, name: GLenum) -> *const GLubyte {
+        unimplemented!()
+    }
 
     // Other state manipulation
-    unsafe fn AlphaFunc(&mut self, func: GLenum, ref_: GLclampf);
-    unsafe fn AlphaFuncx(&mut self, func: GLenum, ref_: GLclampx);
-    unsafe fn BlendFunc(&mut self, sfactor: GLenum, dfactor: GLenum);
-    unsafe fn BlendEquationOES(&mut self, mode: GLenum);
+    unsafe fn AlphaFunc(&mut self, func: GLenum, ref_: GLclampf) {
+        unimplemented!()
+    }
+    unsafe fn AlphaFuncx(&mut self, func: GLenum, ref_: GLclampx) {
+        unimplemented!()
+    }
+    unsafe fn BlendFunc(&mut self, sfactor: GLenum, dfactor: GLenum) {
+        unimplemented!()
+    }
+    unsafe fn BlendEquationOES(&mut self, mode: GLenum) {
+        unimplemented!()
+    }
     unsafe fn ColorMask(
         &mut self,
         red: GLboolean,
         green: GLboolean,
         blue: GLboolean,
         alpha: GLboolean,
-    );
-    unsafe fn ClipPlanef(&mut self, plane: GLenum, equation: *const GLfloat);
-    unsafe fn ClipPlanex(&mut self, plane: GLenum, equation: *const GLfixed);
-    unsafe fn CullFace(&mut self, mode: GLenum);
-    unsafe fn DepthFunc(&mut self, func: GLenum);
-    unsafe fn DepthMask(&mut self, flag: GLboolean);
-    unsafe fn DepthRangef(&mut self, near: GLclampf, far: GLclampf);
-    unsafe fn DepthRangex(&mut self, near: GLclampx, far: GLclampx);
-    unsafe fn FrontFace(&mut self, mode: GLenum);
-    unsafe fn PolygonOffset(&mut self, factor: GLfloat, units: GLfloat);
-    unsafe fn PolygonOffsetx(&mut self, factor: GLfixed, units: GLfixed);
-    unsafe fn SampleCoverage(&mut self, value: GLclampf, invert: GLboolean);
-    unsafe fn SampleCoveragex(&mut self, value: GLclampx, invert: GLboolean);
-    unsafe fn ShadeModel(&mut self, mode: GLenum);
-    unsafe fn Scissor(&mut self, x: GLint, y: GLint, width: GLsizei, height: GLsizei);
-    unsafe fn Viewport(&mut self, x: GLint, y: GLint, width: GLsizei, height: GLsizei);
-    unsafe fn LineWidth(&mut self, val: GLfloat);
-    unsafe fn LineWidthx(&mut self, val: GLfixed);
-    unsafe fn StencilFunc(&mut self, func: GLenum, ref_: GLint, mask: GLuint);
-    unsafe fn StencilOp(&mut self, sfail: GLenum, dpfail: GLenum, dppass: GLenum);
-    unsafe fn StencilMask(&mut self, mask: GLuint);
-    unsafe fn LogicOp(&mut self, opcode: GLenum);
+    ) {
+        unimplemented!()
+    }
+    unsafe fn ClipPlanef(&mut self, plane: GLenum, equation: *const GLfloat) {
+        unimplemented!()
+    }
+    unsafe fn ClipPlanex(&mut self, plane: GLenum, equation: *const GLfixed) {
+        unimplemented!()
+    }
+    unsafe fn CullFace(&mut self, mode: GLenum) {
+        unimplemented!()
+    }
+    unsafe fn DepthFunc(&mut self, func: GLenum) {
+        unimplemented!()
+    }
+    unsafe fn DepthMask(&mut self, flag: GLboolean) {
+        unimplemented!()
+    }
+    unsafe fn DepthRangef(&mut self, near: GLclampf, far: GLclampf) {
+        unimplemented!()
+    }
+    unsafe fn DepthRangex(&mut self, near: GLclampx, far: GLclampx) {
+        unimplemented!()
+    }
+    unsafe fn FrontFace(&mut self, mode: GLenum) {
+        unimplemented!()
+    }
+    unsafe fn PolygonOffset(&mut self, factor: GLfloat, units: GLfloat) {
+        unimplemented!()
+    }
+    unsafe fn PolygonOffsetx(&mut self, factor: GLfixed, units: GLfixed) {
+        unimplemented!()
+    }
+    unsafe fn SampleCoverage(&mut self, value: GLclampf, invert: GLboolean) {
+        unimplemented!()
+    }
+    unsafe fn SampleCoveragex(&mut self, value: GLclampx, invert: GLboolean) {
+        unimplemented!()
+    }
+    unsafe fn ShadeModel(&mut self, mode: GLenum) {
+        unimplemented!()
+    }
+    unsafe fn Scissor(&mut self, x: GLint, y: GLint, width: GLsizei, height: GLsizei) {
+        unimplemented!()
+    }
+    unsafe fn Viewport(&mut self, x: GLint, y: GLint, width: GLsizei, height: GLsizei) {
+        unimplemented!()
+    }
+    unsafe fn LineWidth(&mut self, val: GLfloat) {
+        unimplemented!()
+    }
+    unsafe fn LineWidthx(&mut self, val: GLfixed) {
+        unimplemented!()
+    }
+    unsafe fn StencilFunc(&mut self, func: GLenum, ref_: GLint, mask: GLuint) {
+        unimplemented!()
+    }
+    unsafe fn StencilOp(&mut self, sfail: GLenum, dpfail: GLenum, dppass: GLenum) {
+        unimplemented!()
+    }
+    unsafe fn StencilMask(&mut self, mask: GLuint) {
+        unimplemented!()
+    }
+    unsafe fn LogicOp(&mut self, opcode: GLenum) {
+        unimplemented!()
+    }
 
     // Points
-    unsafe fn PointSize(&mut self, size: GLfloat);
-    unsafe fn PointSizex(&mut self, size: GLfixed);
-    unsafe fn PointParameterf(&mut self, pname: GLenum, param: GLfloat);
-    unsafe fn PointParameterx(&mut self, pname: GLenum, param: GLfixed);
-    unsafe fn PointParameterfv(&mut self, pname: GLenum, params: *const GLfloat);
-    unsafe fn PointParameterxv(&mut self, pname: GLenum, params: *const GLfixed);
+    unsafe fn PointSize(&mut self, size: GLfloat) {
+        unimplemented!()
+    }
+    unsafe fn PointSizex(&mut self, size: GLfixed) {
+        unimplemented!()
+    }
+    unsafe fn PointParameterf(&mut self, pname: GLenum, param: GLfloat) {
+        unimplemented!()
+    }
+    unsafe fn PointParameterx(&mut self, pname: GLenum, param: GLfixed) {
+        unimplemented!()
+    }
+    unsafe fn PointParameterfv(&mut self, pname: GLenum, params: *const GLfloat) {
+        unimplemented!()
+    }
+    unsafe fn PointParameterxv(&mut self, pname: GLenum, params: *const GLfixed) {
+        unimplemented!()
+    }
 
     // Lighting and materials
-    unsafe fn Fogf(&mut self, pname: GLenum, param: GLfloat);
-    unsafe fn Fogx(&mut self, pname: GLenum, param: GLfixed);
-    unsafe fn Fogfv(&mut self, pname: GLenum, params: *const GLfloat);
-    unsafe fn Fogxv(&mut self, pname: GLenum, params: *const GLfixed);
-    unsafe fn Lightf(&mut self, light: GLenum, pname: GLenum, param: GLfloat);
-    unsafe fn Lightx(&mut self, light: GLenum, pname: GLenum, param: GLfixed);
-    unsafe fn Lightfv(&mut self, light: GLenum, pname: GLenum, params: *const GLfloat);
-    unsafe fn Lightxv(&mut self, light: GLenum, pname: GLenum, params: *const GLfixed);
-    unsafe fn LightModelf(&mut self, pname: GLenum, param: GLfloat);
-    unsafe fn LightModelx(&mut self, pname: GLenum, param: GLfixed);
-    unsafe fn LightModelfv(&mut self, pname: GLenum, params: *const GLfloat);
-    unsafe fn LightModelxv(&mut self, pname: GLenum, params: *const GLfixed);
-    unsafe fn Materialf(&mut self, face: GLenum, pname: GLenum, param: GLfloat);
-    unsafe fn Materialx(&mut self, face: GLenum, pname: GLenum, param: GLfixed);
-    unsafe fn Materialfv(&mut self, face: GLenum, pname: GLenum, params: *const GLfloat);
-    unsafe fn Materialxv(&mut self, face: GLenum, pname: GLenum, params: *const GLfixed);
+    unsafe fn Fogf(&mut self, pname: GLenum, param: GLfloat) {
+        unimplemented!()
+    }
+    unsafe fn Fogx(&mut self, pname: GLenum, param: GLfixed) {
+        unimplemented!()
+    }
+    unsafe fn Fogfv(&mut self, pname: GLenum, params: *const GLfloat) {
+        unimplemented!()
+    }
+    unsafe fn Fogxv(&mut self, pname: GLenum, params: *const GLfixed) {
+        unimplemented!()
+    }
+    unsafe fn Lightf(&mut self, light: GLenum, pname: GLenum, param: GLfloat) {
+        unimplemented!()
+    }
+    unsafe fn Lightx(&mut self, light: GLenum, pname: GLenum, param: GLfixed) {
+        unimplemented!()
+    }
+    unsafe fn Lightfv(&mut self, light: GLenum, pname: GLenum, params: *const GLfloat) {
+        unimplemented!()
+    }
+    unsafe fn Lightxv(&mut self, light: GLenum, pname: GLenum, params: *const GLfixed) {
+        unimplemented!()
+    }
+    unsafe fn LightModelf(&mut self, pname: GLenum, param: GLfloat) {
+        unimplemented!()
+    }
+    unsafe fn LightModelx(&mut self, pname: GLenum, param: GLfixed) {
+        unimplemented!()
+    }
+    unsafe fn LightModelfv(&mut self, pname: GLenum, params: *const GLfloat) {
+        unimplemented!()
+    }
+    unsafe fn LightModelxv(&mut self, pname: GLenum, params: *const GLfixed) {
+        unimplemented!()
+    }
+    unsafe fn Materialf(&mut self, face: GLenum, pname: GLenum, param: GLfloat) {
+        unimplemented!()
+    }
+    unsafe fn Materialx(&mut self, face: GLenum, pname: GLenum, param: GLfixed) {
+        unimplemented!()
+    }
+    unsafe fn Materialfv(&mut self, face: GLenum, pname: GLenum, params: *const GLfloat) {
+        unimplemented!()
+    }
+    unsafe fn Materialxv(&mut self, face: GLenum, pname: GLenum, params: *const GLfixed) {
+        unimplemented!()
+    }
 
     // Buffers
-    unsafe fn IsBuffer(&mut self, buffer: GLuint) -> GLboolean;
-    unsafe fn GenBuffers(&mut self, n: GLsizei, buffers: *mut GLuint);
-    unsafe fn DeleteBuffers(&mut self, n: GLsizei, buffers: *const GLuint);
-    unsafe fn BindBuffer(&mut self, target: GLenum, buffer: GLuint);
+    unsafe fn IsBuffer(&mut self, buffer: GLuint) -> GLboolean {
+        unimplemented!()
+    }
+    unsafe fn GenBuffers(&mut self, n: GLsizei, buffers: *mut GLuint) {
+        unimplemented!()
+    }
+    unsafe fn DeleteBuffers(&mut self, n: GLsizei, buffers: *const GLuint) {
+        unimplemented!()
+    }
+    unsafe fn BindBuffer(&mut self, target: GLenum, buffer: GLuint) {
+        unimplemented!()
+    }
     unsafe fn BufferData(
         &mut self,
         target: GLenum,
         size: GLsizeiptr,
         data: *const GLvoid,
         usage: GLenum,
-    );
+    ) {
+        unimplemented!()
+    }
     unsafe fn BufferSubData(
         &mut self,
         target: GLenum,
         offset: GLintptr,
         size: GLsizeiptr,
         data: *const GLvoid,
-    );
+    ) {
+        unimplemented!()
+    }
 
     // Non-pointers
-    unsafe fn Color4f(&mut self, red: GLfloat, green: GLfloat, blue: GLfloat, alpha: GLfloat);
-    unsafe fn Color4x(&mut self, red: GLfixed, green: GLfixed, blue: GLfixed, alpha: GLfixed);
-    unsafe fn Color4ub(&mut self, red: GLubyte, green: GLubyte, blue: GLubyte, alpha: GLubyte);
-    unsafe fn Normal3f(&mut self, nx: GLfloat, ny: GLfloat, nz: GLfloat);
-    unsafe fn Normal3x(&mut self, nx: GLfixed, ny: GLfixed, nz: GLfixed);
+    unsafe fn Color4f(&mut self, red: GLfloat, green: GLfloat, blue: GLfloat, alpha: GLfloat) {
+        unimplemented!()
+    }
+    unsafe fn Color4x(&mut self, red: GLfixed, green: GLfixed, blue: GLfixed, alpha: GLfixed) {
+        unimplemented!()
+    }
+    unsafe fn Color4ub(&mut self, red: GLubyte, green: GLubyte, blue: GLubyte, alpha: GLubyte) {
+        unimplemented!()
+    }
+    unsafe fn Normal3f(&mut self, nx: GLfloat, ny: GLfloat, nz: GLfloat) {
+        unimplemented!()
+    }
+    unsafe fn Normal3x(&mut self, nx: GLfixed, ny: GLfixed, nz: GLfixed) {
+        unimplemented!()
+    }
 
     // Pointers
     unsafe fn ColorPointer(
@@ -188,55 +355,81 @@ pub trait GLES {
         type_: GLenum,
         stride: GLsizei,
         pointer: *const GLvoid,
-    );
-    unsafe fn NormalPointer(&mut self, type_: GLenum, stride: GLsizei, pointer: *const GLvoid);
+    ) {
+        unimplemented!()
+    }
+    unsafe fn NormalPointer(&mut self, type_: GLenum, stride: GLsizei, pointer: *const GLvoid) {
+        unimplemented!()
+    }
     unsafe fn TexCoordPointer(
         &mut self,
         size: GLint,
         type_: GLenum,
         stride: GLsizei,
         pointer: *const GLvoid,
-    );
+    ) {
+        unimplemented!()
+    }
     unsafe fn VertexPointer(
         &mut self,
         size: GLint,
         type_: GLenum,
         stride: GLsizei,
         pointer: *const GLvoid,
-    );
+    ) {
+        unimplemented!()
+    }
 
     // Drawing
-    unsafe fn DrawArrays(&mut self, mode: GLenum, first: GLint, count: GLsizei);
+    unsafe fn DrawArrays(&mut self, mode: GLenum, first: GLint, count: GLsizei) {
+        unimplemented!()
+    }
     unsafe fn DrawElements(
         &mut self,
         mode: GLenum,
         count: GLsizei,
         type_: GLenum,
         indices: *const GLvoid,
-    );
+    ) {
+        unimplemented!()
+    }
 
     // Clearing
-    unsafe fn Clear(&mut self, mask: GLbitfield);
+    unsafe fn Clear(&mut self, mask: GLbitfield) {
+        unimplemented!()
+    }
     unsafe fn ClearColor(
         &mut self,
         red: GLclampf,
         green: GLclampf,
         blue: GLclampf,
         alpha: GLclampf,
-    );
+    ) {
+        unimplemented!()
+    }
     unsafe fn ClearColorx(
         &mut self,
         red: GLclampx,
         green: GLclampx,
         blue: GLclampx,
         alpha: GLclampx,
-    );
-    unsafe fn ClearDepthf(&mut self, depth: GLclampf);
-    unsafe fn ClearDepthx(&mut self, depth: GLclampx);
-    unsafe fn ClearStencil(&mut self, s: GLint);
+    ) {
+        unimplemented!()
+    }
+    unsafe fn ClearDepthf(&mut self, depth: GLclampf) {
+        unimplemented!()
+    }
+    unsafe fn ClearDepthx(&mut self, depth: GLclampx) {
+        unimplemented!()
+    }
+    unsafe fn ClearStencil(&mut self, s: GLint) {
+        unimplemented!()
+    }
 
     // Textures
-    unsafe fn PixelStorei(&mut self, pname: GLenum, param: GLint);
+    unsafe fn PixelStorei(&mut self, pname: GLenum, param: GLint) {
+        unimplemented!()
+    }
     unsafe fn ReadPixels(
         &mut self,
         x: GLint,
@@ -246,18 +439,42 @@ pub trait GLES {
         format: GLenum,
         type_: GLenum,
         pixels: *mut GLvoid,
-    );
-    unsafe fn GenTextures(&mut self, n: GLsizei, textures: *mut GLuint);
-    unsafe fn DeleteTextures(&mut self, n: GLsizei, textures: *const GLuint);
-    unsafe fn ActiveTexture(&mut self, texture: GLenum);
-    unsafe fn IsTexture(&mut self, texture: GLuint) -> GLboolean;
-    unsafe fn BindTexture(&mut self, target: GLenum, texture: GLuint);
-    unsafe fn TexParameteri(&mut self, target: GLenum, pname: GLenum, param: GLint);
-    unsafe fn TexParameterf(&mut self, target: GLenum, pname: GLenum, param: GLfloat);
-    unsafe fn TexParameterx(&mut self, target: GLenum, pname: GLenum, param: GLfixed);
-    unsafe fn TexParameteriv(&mut self, target: GLenum, pname: GLenum, params: *const GLint);
-    unsafe fn TexParameterfv(&mut self, target: GLenum, pname: GLenum, params: *const GLfloat);
-    unsafe fn TexParameterxv(&mut self, target: GLenum, pname: GLenum, params: *const GLfixed);
+    ) {
+        unimplemented!()
+    }
+    unsafe fn GenTextures(&mut self, n: GLsizei, textures: *mut GLuint) {
+        unimplemented!()
+    }
+    unsafe fn DeleteTextures(&mut self, n: GLsizei, textures: *const GLuint) {
+        unimplemented!()
+    }
+    unsafe fn ActiveTexture(&mut self, texture: GLenum) {
+        unimplemented!()
+    }
+    unsafe fn IsTexture(&mut self, texture: GLuint) -> GLboolean {
+        unimplemented!()
+    }
+    unsafe fn BindTexture(&mut self, target: GLenum, texture: GLuint) {
+        unimplemented!()
+    }
+    unsafe fn TexParameteri(&mut self, target: GLenum, pname: GLenum, param: GLint) {
+        unimplemented!()
+    }
+    unsafe fn TexParameterf(&mut self, target: GLenum, pname: GLenum, param: GLfloat) {
+        unimplemented!()
+    }
+    unsafe fn TexParameterx(&mut self, target: GLenum, pname: GLenum, param: GLfixed) {
+        unimplemented!()
+    }
+    unsafe fn TexParameteriv(&mut self, target: GLenum, pname: GLenum, params: *const GLint) {
+        unimplemented!()
+    }
+    unsafe fn TexParameterfv(&mut self, target: GLenum, pname: GLenum, params: *const GLfloat) {
+        unimplemented!()
+    }
+    unsafe fn TexParameterxv(&mut self, target: GLenum, pname: GLenum, params: *const GLfixed) {
+        unimplemented!()
+    }
     unsafe fn TexImage2D(
         &mut self,
         target: GLenum,
@@ -269,7 +486,9 @@ pub trait GLES {
         format: GLenum,
         type_: GLenum,
         pixels: *const GLvoid,
-    );
+    ) {
+        unimplemented!()
+    }
     unsafe fn TexSubImage2D(
         &mut self,
         target: GLenum,
@@ -281,7 +500,9 @@ pub trait GLES {
         format: GLenum,
         type_: GLenum,
         pixels: *const GLvoid,
-    );
+    ) {
+        unimplemented!()
+    }
     unsafe fn CompressedTexImage2D(
         &mut self,
         target: GLenum,
@@ -292,7 +513,9 @@ pub trait GLES {
         border: GLint,
         image_size: GLsizei,
         data: *const GLvoid,
-    );
+    ) {
+        unimplemented!()
+    }
     unsafe fn CopyTexImage2D(
         &mut self,
         target: GLenum,
@@ -303,7 +526,9 @@ pub trait GLES {
         width: GLsizei,
         height: GLsizei,
         border: GLint,
-    );
+    ) {
+        unimplemented!()
+    }
     unsafe fn CopyTexSubImage2D(
         &mut self,
         target: GLenum,
@@ -314,13 +539,27 @@ pub trait GLES {
         y: GLint,
         width: GLsizei,
         height: GLsizei,
-    );
-    unsafe fn TexEnvf(&mut self, target: GLenum, pname: GLenum, param: GLfloat);
-    unsafe fn TexEnvx(&mut self, target: GLenum, pname: GLenum, param: GLfixed);
-    unsafe fn TexEnvi(&mut self, target: GLenum, pname: GLenum, param: GLint);
-    unsafe fn TexEnvfv(&mut self, target: GLenum, pname: GLenum, params: *const GLfloat);
-    unsafe fn TexEnvxv(&mut self, target: GLenum, pname: GLenum, params: *const GLfixed);
-    unsafe fn TexEnviv(&mut self, target: GLenum, pname: GLenum, params: *const GLint);
+    ) {
+        unimplemented!()
+    }
+    unsafe fn TexEnvf(&mut self, target: GLenum, pname: GLenum, param: GLfloat) {
+        unimplemented!()
+    }
+    unsafe fn TexEnvx(&mut self, target: GLenum, pname: GLenum, param: GLfixed) {
+        unimplemented!()
+    }
+    unsafe fn TexEnvi(&mut self, target: GLenum, pname: GLenum, param: GLint) {
+        unimplemented!()
+    }
+    unsafe fn TexEnvfv(&mut self, target: GLenum, pname: GLenum, params: *const GLfloat) {
+        unimplemented!()
+    }
+    unsafe fn TexEnvxv(&mut self, target: GLenum, pname: GLenum, params: *const GLfixed) {
+        unimplemented!()
+    }
+    unsafe fn TexEnviv(&mut self, target: GLenum, pname: GLenum, params: *const GLint) {
+        unimplemented!()
+    }
 
     unsafe fn MultiTexCoord4f(
         &mut self,
@@ -329,7 +568,9 @@ pub trait GLES {
         t: GLfloat,
         r: GLfloat,
         q: GLfloat,
-    );
+    ) {
+        unimplemented!()
+    }
     unsafe fn MultiTexCoord4x(
         &mut self,
         target: GLenum,
@@ -337,17 +578,35 @@ pub trait GLES {
         t: GLfixed,
         r: GLfixed,
         q: GLfixed,
-    );
+    ) {
+        unimplemented!()
+    }
 
     // Matrix stack operations
-    unsafe fn MatrixMode(&mut self, mode: GLenum);
-    unsafe fn LoadIdentity(&mut self);
-    unsafe fn LoadMatrixf(&mut self, m: *const GLfloat);
-    unsafe fn LoadMatrixx(&mut self, m: *const GLfixed);
-    unsafe fn MultMatrixf(&mut self, m: *const GLfloat);
-    unsafe fn MultMatrixx(&mut self, m: *const GLfixed);
-    unsafe fn PushMatrix(&mut self);
-    unsafe fn PopMatrix(&mut self);
+    unsafe fn MatrixMode(&mut self, mode: GLenum) {
+        unimplemented!()
+    }
+    unsafe fn LoadIdentity(&mut self) {
+        unimplemented!()
+    }
+    unsafe fn LoadMatrixf(&mut self, m: *const GLfloat) {
+        unimplemented!()
+    }
+    unsafe fn LoadMatrixx(&mut self, m: *const GLfixed) {
+        unimplemented!()
+    }
+    unsafe fn MultMatrixf(&mut self, m: *const GLfloat) {
+        unimplemented!()
+    }
+    unsafe fn MultMatrixx(&mut self, m: *const GLfixed) {
+        unimplemented!()
+    }
+    unsafe fn PushMatrix(&mut self) {
+        unimplemented!()
+    }
+    unsafe fn PopMatrix(&mut self) {
+        unimplemented!()
+    }
     unsafe fn Orthof(
         &mut self,
         left: GLfloat,
@@ -356,7 +615,9 @@ pub trait GLES {
         top: GLfloat,
         near: GLfloat,
         far: GLfloat,
-    );
+    ) {
+        unimplemented!()
+    }
     unsafe fn Orthox(
         &mut self,
         left: GLfixed,
@@ -365,7 +626,9 @@ pub trait GLES {
         top: GLfixed,
         near: GLfixed,
         far: GLfixed,
-    );
+    ) {
+        unimplemented!()
+    }
     unsafe fn Frustumf(
         &mut self,
         left: GLfloat,
@@ -374,7 +637,9 @@ pub trait GLES {
         top: GLfloat,
         near: GLfloat,
         far: GLfloat,
-    );
+    ) {
+        unimplemented!()
+    }
     unsafe fn Frustumx(
         &mut self,
         left: GLfixed,
@@ -383,35 +648,65 @@ pub trait GLES {
         top: GLfixed,
         near: GLfixed,
         far: GLfixed,
-    );
-    unsafe fn Rotatef(&mut self, angle: GLfloat, x: GLfloat, y: GLfloat, z: GLfloat);
-    unsafe fn Rotatex(&mut self, angle: GLfixed, x: GLfixed, y: GLfixed, z: GLfixed);
-    unsafe fn Scalef(&mut self, x: GLfloat, y: GLfloat, z: GLfloat);
-    unsafe fn Scalex(&mut self, x: GLfixed, y: GLfixed, z: GLfixed);
-    unsafe fn Translatef(&mut self, x: GLfloat, y: GLfloat, z: GLfloat);
-    unsafe fn Translatex(&mut self, x: GLfixed, y: GLfixed, z: GLfixed);
+    ) {
+        unimplemented!()
+    }
+    unsafe fn Rotatef(&mut self, angle: GLfloat, x: GLfloat, y: GLfloat, z: GLfloat) {
+        unimplemented!()
+    }
+    unsafe fn Rotatex(&mut self, angle: GLfixed, x: GLfixed, y: GLfixed, z: GLfixed) {
+        unimplemented!()
+    }
+    unsafe fn Scalef(&mut self, x: GLfloat, y: GLfloat, z: GLfloat) {
+        unimplemented!()
+    }
+    unsafe fn Scalex(&mut self, x: GLfixed, y: GLfixed, z: GLfixed) {
+        unimplemented!()
+    }
+    unsafe fn Translatef(&mut self, x: GLfloat, y: GLfloat, z: GLfloat) {
+        unimplemented!()
+    }
+    unsafe fn Translatex(&mut self, x: GLfixed, y: GLfixed, z: GLfixed) {
+        unimplemented!()
+    }
 
     // OES_framebuffer_object (incomplete)
-    unsafe fn GenFramebuffersOES(&mut self, n: GLsizei, framebuffers: *mut GLuint);
-    unsafe fn GenRenderbuffersOES(&mut self, n: GLsizei, renderbuffers: *mut GLuint);
-    unsafe fn IsFramebufferOES(&mut self, framebuffer: GLuint) -> GLboolean;
-    unsafe fn IsRenderbufferOES(&mut self, renderbuffer: GLuint) -> GLboolean;
-    unsafe fn BindFramebufferOES(&mut self, target: GLenum, framebuffer: GLuint);
-    unsafe fn BindRenderbufferOES(&mut self, target: GLenum, renderbuffer: GLuint);
+    unsafe fn GenFramebuffersOES(&mut self, n: GLsizei, framebuffers: *mut GLuint) {
+        unimplemented!()
+    }
+    unsafe fn GenRenderbuffersOES(&mut self, n: GLsizei, renderbuffers: *mut GLuint) {
+        unimplemented!()
+    }
+    unsafe fn IsFramebufferOES(&mut self, framebuffer: GLuint) -> GLboolean {
+        unimplemented!()
+    }
+    unsafe fn IsRenderbufferOES(&mut self, renderbuffer: GLuint) -> GLboolean {
+        unimplemented!()
+    }
+    unsafe fn BindFramebufferOES(&mut self, target: GLenum, framebuffer: GLuint) {
+        unimplemented!()
+    }
+    unsafe fn BindRenderbufferOES(&mut self, target: GLenum, renderbuffer: GLuint) {
+        unimplemented!()
+    }
     unsafe fn RenderbufferStorageOES(
         &mut self,
         target: GLenum,
         internalformat: GLenum,
         width: GLsizei,
         height: GLsizei,
-    );
+    ) {
+        unimplemented!()
+    }
     unsafe fn FramebufferRenderbufferOES(
         &mut self,
         target: GLenum,
         attachment: GLenum,
         renderbuffertarget: GLenum,
         renderbuffer: GLuint,
-    );
+    ) {
+        unimplemented!()
+    }
     unsafe fn FramebufferTexture2DOES(
         &mut self,
         target: GLenum,
@@ -419,25 +714,219 @@ pub trait GLES {
         textarget: GLenum,
         texture: GLuint,
         level: i32,
-    );
+    ) {
+        unimplemented!()
+    }
     unsafe fn GetFramebufferAttachmentParameterivOES(
         &mut self,
         target: GLenum,
         attachment: GLenum,
         pname: GLenum,
         params: *mut GLint,
-    );
+    ) {
+        unimplemented!()
+    }
     unsafe fn GetRenderbufferParameterivOES(
         &mut self,
         target: GLenum,
         pname: GLenum,
         params: *mut GLint,
-    );
-    unsafe fn CheckFramebufferStatusOES(&mut self, target: GLenum) -> GLenum;
-    unsafe fn DeleteFramebuffersOES(&mut self, n: GLsizei, framebuffers: *const GLuint);
-    unsafe fn DeleteRenderbuffersOES(&mut self, n: GLsizei, renderbuffers: *const GLuint);
-    unsafe fn GenerateMipmapOES(&mut self, target: GLenum);
-    unsafe fn GetBufferParameteriv(&mut self, target: GLenum, pname: GLenum, params: *mut GLint);
-    unsafe fn MapBufferOES(&mut self, target: GLenum, access: GLenum) -> *mut GLvoid;
-    unsafe fn UnmapBufferOES(&mut self, target: GLenum) -> GLboolean;
+    ) {
+        unimplemented!()
+    }
+    unsafe fn CheckFramebufferStatusOES(&mut self, target: GLenum) -> GLenum {
+        unimplemented!()
+    }
+    unsafe fn DeleteFramebuffersOES(&mut self, n: GLsizei, framebuffers: *const GLuint) {
+        unimplemented!()
+    }
+    unsafe fn DeleteRenderbuffersOES(&mut self, n: GLsizei, renderbuffers: *const GLuint) {
+        unimplemented!()
+    }
+    unsafe fn GenerateMipmapOES(&mut self, target: GLenum) {
+        unimplemented!()
+    }
+    unsafe fn GetBufferParameteriv(&mut self, target: GLenum, pname: GLenum, params: *mut GLint) {
+        unimplemented!()
+    }
+    unsafe fn MapBufferOES(&mut self, target: GLenum, access: GLenum) -> *mut GLvoid {
+        unimplemented!()
+    }
+    unsafe fn UnmapBufferOES(&mut self, target: GLenum) -> GLboolean {
+        unimplemented!()
+    }
+
+    // === OpenGL ES 2.0 ===
+    //
+    // Only the ES 2.0 functions that don't also exist in ES 1.1 are here:
+    // shared ones (`glBindTexture`, `glDrawElements`, …) reuse the methods
+    // above, and ES 2.0's core framebuffer/renderbuffer functions reuse the
+    // `…OES` methods (the enums and semantics are identical).
+
+    // Shaders and programs
+    unsafe fn CreateShader(&mut self, type_: GLenum) -> GLuint {
+        unimplemented!()
+    }
+    unsafe fn DeleteShader(&mut self, shader: GLuint) {
+        unimplemented!()
+    }
+    unsafe fn ShaderSource(
+        &mut self,
+        shader: GLuint,
+        count: GLsizei,
+        string: *const *const GLchar,
+        length: *const GLint,
+    ) {
+        unimplemented!()
+    }
+    unsafe fn CompileShader(&mut self, shader: GLuint) {
+        unimplemented!()
+    }
+    unsafe fn GetShaderiv(&mut self, shader: GLuint, pname: GLenum, params: *mut GLint) {
+        unimplemented!()
+    }
+    unsafe fn GetShaderInfoLog(
+        &mut self,
+        shader: GLuint,
+        buf_size: GLsizei,
+        length: *mut GLsizei,
+        info_log: *mut GLchar,
+    ) {
+        unimplemented!()
+    }
+    unsafe fn CreateProgram(&mut self) -> GLuint {
+        unimplemented!()
+    }
+    unsafe fn DeleteProgram(&mut self, program: GLuint) {
+        unimplemented!()
+    }
+    unsafe fn AttachShader(&mut self, program: GLuint, shader: GLuint) {
+        unimplemented!()
+    }
+    unsafe fn DetachShader(&mut self, program: GLuint, shader: GLuint) {
+        unimplemented!()
+    }
+    unsafe fn LinkProgram(&mut self, program: GLuint) {
+        unimplemented!()
+    }
+    unsafe fn ValidateProgram(&mut self, program: GLuint) {
+        unimplemented!()
+    }
+    unsafe fn UseProgram(&mut self, program: GLuint) {
+        unimplemented!()
+    }
+    unsafe fn GetProgramiv(&mut self, program: GLuint, pname: GLenum, params: *mut GLint) {
+        unimplemented!()
+    }
+    unsafe fn GetProgramInfoLog(
+        &mut self,
+        program: GLuint,
+        buf_size: GLsizei,
+        length: *mut GLsizei,
+        info_log: *mut GLchar,
+    ) {
+        unimplemented!()
+    }
+    unsafe fn BindAttribLocation(&mut self, program: GLuint, index: GLuint, name: *const GLchar) {
+        unimplemented!()
+    }
+    unsafe fn GetAttribLocation(&mut self, program: GLuint, name: *const GLchar) -> GLint {
+        unimplemented!()
+    }
+    unsafe fn GetUniformLocation(&mut self, program: GLuint, name: *const GLchar) -> GLint {
+        unimplemented!()
+    }
+
+    // Uniforms
+    unsafe fn Uniform1i(&mut self, location: GLint, v0: GLint) {
+        unimplemented!()
+    }
+    unsafe fn Uniform1f(&mut self, location: GLint, v0: GLfloat) {
+        unimplemented!()
+    }
+    unsafe fn Uniform2f(&mut self, location: GLint, v0: GLfloat, v1: GLfloat) {
+        unimplemented!()
+    }
+    unsafe fn Uniform3f(&mut self, location: GLint, v0: GLfloat, v1: GLfloat, v2: GLfloat) {
+        unimplemented!()
+    }
+    unsafe fn Uniform4f(
+        &mut self,
+        location: GLint,
+        v0: GLfloat,
+        v1: GLfloat,
+        v2: GLfloat,
+        v3: GLfloat,
+    ) {
+        unimplemented!()
+    }
+    unsafe fn Uniform1fv(&mut self, location: GLint, count: GLsizei, value: *const GLfloat) {
+        unimplemented!()
+    }
+    unsafe fn Uniform2fv(&mut self, location: GLint, count: GLsizei, value: *const GLfloat) {
+        unimplemented!()
+    }
+    unsafe fn Uniform3fv(&mut self, location: GLint, count: GLsizei, value: *const GLfloat) {
+        unimplemented!()
+    }
+    unsafe fn Uniform4fv(&mut self, location: GLint, count: GLsizei, value: *const GLfloat) {
+        unimplemented!()
+    }
+    unsafe fn UniformMatrix2fv(
+        &mut self,
+        location: GLint,
+        count: GLsizei,
+        transpose: GLboolean,
+        value: *const GLfloat,
+    ) {
+        unimplemented!()
+    }
+    unsafe fn UniformMatrix3fv(
+        &mut self,
+        location: GLint,
+        count: GLsizei,
+        transpose: GLboolean,
+        value: *const GLfloat,
+    ) {
+        unimplemented!()
+    }
+    unsafe fn UniformMatrix4fv(
+        &mut self,
+        location: GLint,
+        count: GLsizei,
+        transpose: GLboolean,
+        value: *const GLfloat,
+    ) {
+        unimplemented!()
+    }
+
+    // Vertex attributes
+    unsafe fn EnableVertexAttribArray(&mut self, index: GLuint) {
+        unimplemented!()
+    }
+    unsafe fn DisableVertexAttribArray(&mut self, index: GLuint) {
+        unimplemented!()
+    }
+    unsafe fn VertexAttribPointer(
+        &mut self,
+        index: GLuint,
+        size: GLint,
+        type_: GLenum,
+        normalized: GLboolean,
+        stride: GLsizei,
+        pointer: *const GLvoid,
+    ) {
+        unimplemented!()
+    }
+
+    // Blending
+    unsafe fn BlendFuncSeparate(
+        &mut self,
+        src_rgb: GLenum,
+        dst_rgb: GLenum,
+        src_alpha: GLenum,
+        dst_alpha: GLenum,
+    ) {
+        unimplemented!()
+    }
 }

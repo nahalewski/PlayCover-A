@@ -48,6 +48,75 @@ pub struct AudioDescription {
     pub bits_per_channel: u32,
 }
 
+/// Convert plain (non-AIFC-compressed) big-endian PCM AIFF to a 8/16-bit WAV
+/// file in memory. Returns `None` for anything else.
+fn aiff_pcm_to_wav(bytes: &[u8]) -> Option<Vec<u8>> {
+    if bytes.len() < 12 || &bytes[0..4] != b"FORM" || &bytes[8..12] != b"AIFF" {
+        return None;
+    }
+    let mut pos = 12;
+    let (mut channels, mut bits, mut rate) = (0u16, 0u16, 0u32);
+    let mut data: Option<&[u8]> = None;
+    while pos + 8 <= bytes.len() {
+        let id = &bytes[pos..pos + 4];
+        let size = u32::from_be_bytes(bytes[pos + 4..pos + 8].try_into().ok()?) as usize;
+        let body = bytes.get(pos + 8..(pos + 8 + size).min(bytes.len()))?;
+        if id == b"COMM" && body.len() >= 18 {
+            channels = u16::from_be_bytes([body[0], body[1]]);
+            bits = u16::from_be_bytes([body[6], body[7]]);
+            // 80-bit IEEE extended sample rate
+            let exponent = (u16::from_be_bytes([body[8], body[9]]) & 0x7fff) as i32;
+            let mantissa = u64::from_be_bytes(body[10..18].try_into().ok()?);
+            rate = (mantissa as f64 * 2f64.powi(exponent - 16383 - 63)).round() as u32;
+        } else if id == b"SSND" && body.len() >= 8 {
+            let offset = u32::from_be_bytes(body[0..4].try_into().ok()?) as usize;
+            data = body.get(8 + offset..);
+        }
+        pos += 8 + size + (size & 1);
+    }
+    let data = data?;
+    if channels == 0 || rate == 0 || !matches!(bits, 8 | 16 | 24 | 32) {
+        return None;
+    }
+    // Output 16-bit signed little-endian (8-bit stays 8-bit unsigned).
+    let mut pcm: Vec<u8> = Vec::new();
+    let out_bits: u16 = if bits == 8 { 8 } else { 16 };
+    match bits {
+        8 => pcm.extend(data.iter().map(|&b| (b as i8 as i16 + 128) as u8)),
+        16 => {
+            for s in data.chunks_exact(2) {
+                pcm.extend_from_slice(&[s[1], s[0]]);
+            }
+        }
+        24 => {
+            for s in data.chunks_exact(3) {
+                pcm.extend_from_slice(&[s[1], s[0]]);
+            }
+        }
+        _ => {
+            for s in data.chunks_exact(4) {
+                pcm.extend_from_slice(&[s[1], s[0]]);
+            }
+        }
+    }
+    let mut wav = Vec::with_capacity(44 + pcm.len());
+    let block_align = channels * out_bits / 8;
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + pcm.len() as u32).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&channels.to_le_bytes());
+    wav.extend_from_slice(&rate.to_le_bytes());
+    wav.extend_from_slice(&(rate * u32::from(block_align)).to_le_bytes());
+    wav.extend_from_slice(&block_align.to_le_bytes());
+    wav.extend_from_slice(&out_bits.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&(pcm.len() as u32).to_le_bytes());
+    wav.extend_from_slice(&pcm);
+    Some(wav)
+}
+
 pub struct AudioFile(AudioFileInner);
 enum AudioFileInner {
     Wave(hound::WavReader<Cursor<Vec<u8>>>),
@@ -82,6 +151,12 @@ impl AudioFile {
         // which is appropriate for the file. This is worked around here by
         // using temporary readers for checking if the file is the supported
         // format, then recreating the reader if that works.
+        // Uncompressed AIFF (e.g. Flappy Bird's sfx_point.aif, which has a
+        // COMT chunk the generic decoder trips over) is rewrapped as WAV.
+        let bytes = match aiff_pcm_to_wav(&bytes) {
+            Some(wav) => wav,
+            None => bytes,
+        };
         if hound::WavReader::new(Cursor::new(&bytes)).is_ok() {
             let reader = hound::WavReader::new(Cursor::new(bytes)).unwrap();
             Ok(AudioFile(AudioFileInner::Wave(reader)))

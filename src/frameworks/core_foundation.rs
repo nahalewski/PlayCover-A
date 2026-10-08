@@ -43,6 +43,7 @@ pub const DYLIB: crate::dyld::HostDylib = crate::dyld::HostDylib {
     constant_exports: &[
         CONSTANTS,
         cf_allocator::CONSTANTS,
+        cf_array::CONSTANTS,
         cf_bundle::CONSTANTS,
         cf_dictionary::CONSTANTS,
         cf_locale::CONSTANTS,
@@ -121,15 +122,40 @@ fn CFShow(env: &mut Environment, obj: CFTypeRef) {
     log!("{}", to_rust_string(env, description));
 }
 
-const CONSTANTS: ConstantExports = &[(
-    "_kCFCoreFoundationVersionNumber",
-    HostConstant::Custom(|env| {
-        let version_number_ptr = env.mem.alloc_and_write(478.26f64); // iPhoneOS 2.1
-        env.mem
-            .alloc_and_write(version_number_ptr)
-            .cast()
-            .cast_const()
-    }),
-)];
+const CONSTANTS: ConstantExports = &[
+    (
+        "_kCFCoreFoundationVersionNumber",
+        HostConstant::Custom(|env| {
+            let version_number_ptr = env.mem.alloc_and_write(478.26f64); // iPhoneOS 2.1
+            env.mem
+                .alloc_and_write(version_number_ptr)
+                .cast()
+                .cast_const()
+        }),
+    ),
+    // `double NSFoundationVersionNumber`: iOS 4.0-era value (NSFoundationVersionNumber_iPhoneOS_4_0 = 751.32).
+    (
+        "_NSFoundationVersionNumber",
+        HostConstant::Custom(|env| env.mem.alloc_and_write(751.32f64).cast().cast_const()),
+    ),
+    (
+        "_kCLDistanceFilterNone",
+        HostConstant::Custom(|env| env.mem.alloc_and_write(-1.0f64).cast().cast_const()),
+    ),
+    // `CFNullRef const kCFNull`: a cell holding the NSNull singleton (CFNull is
+    // toll-free bridged to NSNull).
+    (
+        "_kCFNull",
+        HostConstant::Custom(|env| {
+            let null: crate::objc::id = crate::objc::msg_class![env; NSNull null];
+            env.mem.alloc_and_write(null).cast().cast_const()
+        }),
+    ),
+    // Ivar offset of `isa` in NSObject, read by code that accesses `isa` directly.
+    (
+        "_OBJC_IVAR_$_NSObject.isa",
+        HostConstant::Custom(|env| env.mem.alloc_and_write(0u32).cast().cast_const()),
+    ),
+];
 
 const FUNCTIONS: FunctionExports = &[export_c_func!(CFShow(_))];

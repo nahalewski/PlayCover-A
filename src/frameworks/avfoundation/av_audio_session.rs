@@ -115,4 +115,78 @@ pub const CONSTANTS: ConstantExports = &[
         "_AVAudioSessionCategoryAudioProcessing",
         HostConstant::NSString(AVAudioSessionCategoryAudioProcessing),
     ),
+    // Notification keys / port names that apps (e.g. Flappy Bird's audio
+    // helper) dereference unconditionally. Their values never matter, but a
+    // NULL symbol makes the guest read address 0.
+    (
+        "_AVLayerVideoGravityResizeAspect",
+        HostConstant::NSString("AVLayerVideoGravityResizeAspect"),
+    ),
+    (
+        "_AVLayerVideoGravityResizeAspectFill",
+        HostConstant::NSString("AVLayerVideoGravityResizeAspectFill"),
+    ),
+    (
+        "_AVLayerVideoGravityResize",
+        HostConstant::NSString("AVLayerVideoGravityResize"),
+    ),
+    (
+        "_kCFStreamPropertyAppendToFile",
+        HostConstant::NSString("kCFStreamPropertyAppendToFile"),
+    ),
+    // CMTime { value: i64, timescale: i32, flags: u32 (valid = 1), epoch: i64 }
+    (
+        "_kCMTimeZero",
+        HostConstant::Custom(|env| {
+            let time = env.mem.alloc(24);
+            env.mem.bytes_at_mut(time.cast::<u8>(), 24).fill(0);
+            env.mem.write(time.cast::<i32>() + 2, 1i32);
+            env.mem.write(time.cast::<u32>() + 3, 1u32);
+            time.cast().cast_const()
+        }),
+    ),
+    (
+        "_AVAudioSessionInterruptionNotification",
+        HostConstant::NSString("AVAudioSessionInterruptionNotification"),
+    ),
+    (
+        "_AVAudioSessionInterruptionOptionKey",
+        HostConstant::NSString("AVAudioSessionInterruptionOptionKey"),
+    ),
+    (
+        "_AVAudioSessionInterruptionTypeKey",
+        HostConstant::NSString("AVAudioSessionInterruptionTypeKey"),
+    ),
+    (
+        "_AVAudioSessionPortBuiltInSpeaker",
+        HostConstant::NSString("AVAudioSessionPortBuiltInSpeaker"),
+    ),
+    (
+        "_AVAudioSessionPortHeadphones",
+        HostConstant::NSString("AVAudioSessionPortHeadphones"),
+    ),
+    (
+        "_UIApplicationSignificantTimeChangeNotification",
+        HostConstant::NSString("UIApplicationSignificantTimeChangeNotification"),
+    ),
+    (
+        "_NSGregorianCalendar",
+        HostConstant::NSString("gregorian"),
+    ),
+    (
+        "_NSUnderlyingErrorKey",
+        HostConstant::NSString("NSUnderlyingError"),
+    ),
+    (
+        "_SKStoreProductParameterITunesItemIdentifier",
+        HostConstant::NSString("SKStoreProductParameterITunesItemIdentifier"),
+    ),
+    (
+        "_ADBannerContentSizeIdentifierPortrait",
+        HostConstant::NSString("ADBannerContentSize320x50"),
+    ),
+    (
+        "_ADBannerContentSizeIdentifierLandscape",
+        HostConstant::NSString("ADBannerContentSize480x32"),
+    ),
 ];

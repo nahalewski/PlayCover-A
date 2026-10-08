@@ -357,6 +357,17 @@ impl super::ObjC {
             );
         }
 
+        // ARC `__weak` variables that pointed at this object become nil.
+        if let Some(slots) = self.weak_targets.remove(&object) {
+            for slot in slots {
+                self.weak_slots.remove(&slot);
+                let slot_ptr: crate::mem::MutPtr<id> = crate::mem::Ptr::from_bits(slot);
+                if mem.read(slot_ptr) == object {
+                    mem.write(slot_ptr, nil);
+                }
+            }
+        }
+
         std::mem::drop(host_object);
 
         mem.free(object.cast());

@@ -22,7 +22,9 @@ use crate::frameworks::uikit::ui_device::{
     UIDeviceOrientationLandscapeLeft, UIDeviceOrientationLandscapeRight,
     UIDeviceOrientationPortraitUpsideDown,
 };
-use crate::objc::{id, msg, msg_class, msg_super, nil, objc_classes, ClassExports};
+use crate::objc::{
+    id, msg, msg_class, msg_super, nil, objc_classes, release, retain, ClassExports,
+};
 
 #[derive(Default)]
 pub struct State {
@@ -33,6 +35,9 @@ pub struct State {
     /// The most recent window which received `makeKeyAndVisible` message.
     /// Non-retaining!
     pub key_window: Option<id>,
+    /// (window, root view controller) pairs set via `setRootViewController:`.
+    /// The controllers are retained.
+    root_view_controllers: Vec<(id, id)>,
 }
 
 pub const CLASSES: ClassExports = objc_classes! {
@@ -42,6 +47,41 @@ pub const CLASSES: ClassExports = objc_classes! {
 @implementation UIWindow: UIView
 
 // TODO: more?
+
+// iOS 4+. The old way was to add the controller's view as a subview of the
+// window, so do just that; `addSubview:` below already handles the
+// view-controller bookkeeping.
+- (())setRootViewController:(id)vc { // UIViewController *
+    let list = &mut env.framework_state.uikit.ui_view.ui_window.root_view_controllers;
+    let old = list.iter().position(|&(w, _)| w == this).map(|i| list.remove(i).1);
+    if let Some(old) = old {
+        let old_view: id = msg![env; old view];
+        () = msg![env; old_view removeFromSuperview];
+        release(env, old);
+    }
+    if vc != nil {
+        retain(env, vc);
+        env.framework_state
+            .uikit
+            .ui_view
+            .ui_window
+            .root_view_controllers
+            .push((this, vc));
+        let view: id = msg![env; vc view];
+        () = msg![env; this addSubview:view];
+    }
+}
+
+- (id)rootViewController {
+    env.framework_state
+        .uikit
+        .ui_view
+        .ui_window
+        .root_view_controllers
+        .iter()
+        .find(|&&(w, _)| w == this)
+        .map_or(nil, |&(_, vc)| vc)
+}
 
 - (id)initWithFrame:(CGRect)frame {
     let this = msg_super![env; this initWithFrame:frame];
@@ -64,6 +104,16 @@ pub const CLASSES: ClassExports = objc_classes! {
 // NSCoding implementation
 - (id)initWithCoder:(id)coder {
     let this = msg_super![env; this initWithCoder:coder];
+    // Interface Builder can archive a placeholder window size while requesting
+    // the main screen's actual size at runtime (e.g. an iPad NIB with a
+    // 320x480 placeholder). Keep custom geometry when this flag is absent.
+    let key = ns_string::get_static_str(env, "UIResizesToFullScreen");
+    let resizes: bool = msg![env; coder decodeBoolForKey:key];
+    if resizes {
+        let screen: id = msg_class![env; UIScreen mainScreen];
+        let bounds: CGRect = msg![env; screen bounds];
+        () = msg![env; this setFrame:bounds];
+    }
     // Undocumented: windows seem to be hidden by default on iOS, unlike views.
     // Super call to bypass the overriden setter on this class, which would post
     // a notification.
@@ -257,6 +307,18 @@ pub const UIKeyboardDidHideNotification: &str = "UIKeyboardDidHideNotification";
 pub const UIKeyboardBoundsUserInfoKey: &str = "UIKeyboardBoundsUserInfoKey";
 
 pub const CONSTANTS: ConstantExports = &[
+    (
+        "_UIWindowLevelNormal",
+        HostConstant::Custom(|env| env.mem.alloc_and_write(0f32).cast().cast_const()),
+    ),
+    (
+        "_UIWindowLevelStatusBar",
+        HostConstant::Custom(|env| env.mem.alloc_and_write(1000f32).cast().cast_const()),
+    ),
+    (
+        "_UIWindowLevelAlert",
+        HostConstant::Custom(|env| env.mem.alloc_and_write(2000f32).cast().cast_const()),
+    ),
     (
         "_UIWindowDidBecomeKeyNotification",
         HostConstant::NSString(UIWindowDidBecomeKeyNotification),

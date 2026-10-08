@@ -25,6 +25,7 @@ use crate::frameworks::core_animation::ca_animation::{
 use crate::frameworks::core_animation::ca_layer::remove_anonymous_animation;
 use crate::frameworks::core_animation::{ca_layer::CALayerHostObject, CACurrentMediaTime};
 use crate::frameworks::core_foundation::time::CFTimeInterval;
+use crate::frameworks::core_graphics::cg_affine_transform::CGAffineTransform;
 use crate::frameworks::core_graphics::cg_color::CGColorHostObject;
 use crate::frameworks::foundation::ns_string::{from_rust_string, to_rust_string};
 use crate::objc::{id, msg, nil, release, retain};
@@ -110,18 +111,8 @@ impl State {
                 as f32)
                 .min(effective_repeat_count);
 
-            let mut progress = current_repeat.fract();
-
             let autoreverses: bool = msg![env; animation autoreverses];
-            if autoreverses {
-                // From the docs:
-                // Setting the repeat count to a whole number (such as 1.0) for
-                // an autoreversing animation causes the animation to stop on
-                // its starting value.
-                // Adding an extra half step (such as a repeat count of 1.5)
-                // causes the animation to stop on its end value
-                progress = ((progress * 2.0 - 1.0).abs() - 1.0).abs();
-            }
+            let progress = animation_progress(current_repeat, effective_repeat_count, autoreverses);
 
             let timing_function: id = msg![env; animation timingFunction];
             let interpolation_amount: f32 = msg![env; timing_function _solveForInput: progress];
@@ -153,6 +144,21 @@ impl State {
             // Only these properties are animatable
             // TODO: Implement for all properties
             match &*key_path {
+                // Apple defines these keys as scalar radians about z.
+                // Interpolate angles directly so full turns retain their winding.
+                "transform.rotation.z" | "transform.rotation" => {
+                    let from = id_as_option(from_value).map(|obj| msg![env; obj floatValue]);
+                    let to = id_as_option(to_value).map(|obj| msg![env; obj floatValue]);
+                    let by = id_as_option(by_value).map(|obj| msg![env; obj floatValue]);
+                    presentation.affine_transform = animate_z_rotation(
+                        presentation.affine_transform,
+                        from,
+                        to,
+                        by,
+                        interpolation_amount,
+                    )
+                    .unwrap_or_else(|reason| panic!("Unsupported z rotation animation: {reason}"));
+                }
                 "anchorPoint" => {
                     let from_value =
                         id_as_option(from_value).map(|obj| msg![env; obj CGPointValue]);
@@ -329,5 +335,146 @@ fn id_as_option(value: id) -> Option<id> {
         None
     } else {
         Some(value)
+    }
+}
+
+fn animation_progress(current_repeat: f32, repeat_count: f32, autoreverses: bool) -> f32 {
+    let mut progress = current_repeat.fract();
+    // Completed whole forward repeats end at 1, not fract()'s zero. An
+    // autoreversed whole repeat still ends at its initial value.
+    if current_repeat >= repeat_count && current_repeat > 0.0 && progress == 0.0 {
+        progress = 1.0;
+    }
+    if autoreverses {
+        ((progress * 2.0 - 1.0).abs() - 1.0).abs()
+    } else {
+        progress
+    }
+}
+
+/// Preserve positive axis scales and translation while replacing 2D rotation.
+/// Shear, reflection and degenerate transforms need fuller decomposition.
+fn animate_z_rotation(
+    transform: CGAffineTransform,
+    from: Option<f32>,
+    to: Option<f32>,
+    by: Option<f32>,
+    progress: f32,
+) -> Result<CGAffineTransform, &'static str> {
+    let CGAffineTransform { a, b, c, d, tx, ty } = transform;
+    if ![a, b, c, d, tx, ty, progress]
+        .into_iter()
+        .all(f32::is_finite)
+        || from.into_iter().chain(to).chain(by).any(|v| !v.is_finite())
+    {
+        return Err("nonfinite scalar or affine transform");
+    }
+    let sx = a.hypot(b);
+    let sy = c.hypot(d);
+    let product = sx * sy;
+    if !product.is_finite()
+        || product == 0.0
+        || a * d - b * c <= 0.0
+        || (a * c + b * d).abs() > product * 1e-5
+    {
+        return Err("requires nonsingular positive-scale affine transform without shear");
+    }
+    if from.is_none() && to.is_none() && by.is_none() {
+        return Err("no scalar endpoints");
+    }
+    if from.is_some() && to.is_some() && by.is_some() {
+        return Err("from, to, and by cannot all be supplied");
+    }
+    let (from, by) = get_from_and_by_values(Some(b.atan2(a)), from, to, by);
+    let angle = from + by * progress;
+    if !angle.is_finite() {
+        return Err("interpolated rotation overflow");
+    }
+    let (sin, cos) = angle.sin_cos();
+    Ok(CGAffineTransform {
+        a: sx * cos,
+        b: sx * sin,
+        c: -sy * sin,
+        d: sy * cos,
+        tx,
+        ty,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::frameworks::core_graphics::cg_affine_transform::CGAffineTransformIdentity;
+    fn close(actual: f32, expected: f32) {
+        assert!((actual - expected).abs() < 1e-5, "{actual} != {expected}");
+    }
+    #[test]
+    fn rotation_retains_full_turn_winding() {
+        let t = animate_z_rotation(
+            CGAffineTransformIdentity,
+            Some(0.0),
+            Some(std::f32::consts::TAU),
+            None,
+            0.25,
+        )
+        .unwrap();
+        close(t.a, 0.0);
+        close(t.b, 1.0);
+        close(t.c, -1.0);
+        close(t.d, 0.0);
+        let t = animate_z_rotation(
+            CGAffineTransformIdentity,
+            Some(0.0),
+            Some(std::f32::consts::TAU),
+            None,
+            0.5,
+        )
+        .unwrap();
+        close(t.a, -1.0);
+        close(t.b, 0.0);
+    }
+    #[test]
+    fn rotation_preserves_scales_translation_and_implicit_model_angle() {
+        let model = CGAffineTransform {
+            a: 0.0,
+            b: 2.0,
+            c: -3.0,
+            d: 0.0,
+            tx: 7.0,
+            ty: -9.0,
+        };
+        let t =
+            animate_z_rotation(model, None, None, Some(std::f32::consts::FRAC_PI_2), 1.0).unwrap();
+        close(t.a, -2.0);
+        close(t.b, 0.0);
+        close(t.c, 0.0);
+        close(t.d, -3.0);
+        close(t.tx, 7.0);
+        close(t.ty, -9.0);
+        let t =
+            animate_z_rotation(model, Some(0.0), Some(std::f32::consts::PI), None, 0.0).unwrap();
+        close(t.a, 2.0);
+        close(t.d, 3.0);
+    }
+    #[test]
+    fn rotation_rejects_unsupported_matrices_and_nonfinite_values() {
+        let mut t = CGAffineTransformIdentity;
+        t.c = 0.5;
+        assert!(animate_z_rotation(t, Some(0.0), Some(1.0), None, 0.5).is_err());
+        t = CGAffineTransformIdentity;
+        t.d = -1.0;
+        assert!(animate_z_rotation(t, Some(0.0), Some(1.0), None, 0.5).is_err());
+        assert!(
+            animate_z_rotation(CGAffineTransformIdentity, Some(f32::NAN), None, None, 0.5).is_err()
+        );
+    }
+    #[test]
+    fn completed_forward_repeat_keeps_endpoint_and_autoreverse_returns_to_start() {
+        close(animation_progress(1.0, 1.0, false), 1.0);
+        close(animation_progress(2.0, 2.0, false), 1.0);
+        close(animation_progress(1.0, 1.0, true), 0.0);
+        close(animation_progress(1.5, 1.5, true), 1.0);
+        close(animation_progress(1.0, 2.0, false), 0.0);
+        close(animation_progress(0.25, f32::INFINITY, false), 0.25);
     }
 }

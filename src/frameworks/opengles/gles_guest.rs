@@ -61,7 +61,7 @@ const SUPPORTED_COMPRESSED_TEXTURE_FORMATS: &[GLenum] = &[
 ///
 /// In case of missing EAGL context for a current thread,
 /// returns a default value.
-fn with_ctx_and_mem<T, U: Default>(env: &mut Environment, f: T) -> U
+pub(super) fn with_ctx_and_mem<T, U: Default>(env: &mut Environment, f: T) -> U
 where
     T: FnOnce(&mut dyn GLES, &mut Mem) -> U,
 {
@@ -139,9 +139,22 @@ fn panic_on_gl_errors(gles: &mut dyn GLES) {
 // Generic state manipulation
 fn glGetError(env: &mut Environment) -> GLenum {
     let ignore_gl_errors = env.options.ignore_gl_errors;
+    let thread = env.current_thread;
     with_ctx_and_mem(env, |gles, _mem| {
         let err = unsafe { gles.GetError() };
         if err != 0 {
+            {
+                use std::sync::atomic::{AtomicU32, Ordering};
+                static N: AtomicU32 = AtomicU32::new(0);
+                if N.fetch_add(1, Ordering::Relaxed) < 6 {
+                    let (fb, status) = unsafe {
+                        let mut fb = 0;
+                        gles.GetIntegerv(gles11::FRAMEBUFFER_BINDING_OES, &mut fb);
+                        (fb, gles.CheckFramebufferStatusOES(gles11::FRAMEBUFFER_OES))
+                    };
+                    log!("glGetError {:#x} on thread {}: bound framebuffer {}, status {:#x}", err, thread, fb, status);
+                }
+            }
             if ignore_gl_errors {
                 log_once!(
                     "Warning: Guest error reporting is ignored for glGetError(), returning 0."
@@ -153,6 +166,7 @@ fn glGetError(env: &mut Environment) -> GLenum {
         err
     })
 }
+
 fn glEnable(env: &mut Environment, cap: GLenum) {
     with_ctx_and_mem(env, |gles, _mem| {
         unsafe { gles.Enable(cap) };
@@ -618,7 +632,7 @@ fn glNormal3x(env: &mut Environment, nx: GLfixed, ny: GLfixed, nz: GLfixed) {
 /// parameter of certain functions is either a pointer or an offset!
 ///
 /// See also: [translate_pointer_or_offset_to_guest]
-unsafe fn translate_pointer_or_offset_to_host(
+pub(super) unsafe fn translate_pointer_or_offset_to_host(
     gles: &mut dyn GLES,
     mem: &Mem,
     pointer_or_offset: ConstVoidPtr,
@@ -1059,7 +1073,8 @@ fn glTexImage2D(
         } else {
             let pixel_count: GuestUSize = width.checked_mul(height).unwrap().try_into().unwrap();
             let size = image_size_estimate(pixel_count, format, type_);
-            mem.ptr_at(pixels.cast::<u8>(), size).cast::<GLvoid>()
+            let host = mem.ptr_at(pixels.cast::<u8>(), size);
+            host.cast::<GLvoid>()
         };
         gles.TexImage2D(
             target,
@@ -1230,7 +1245,16 @@ fn glGenFramebuffersOES(env: &mut Environment, n: GLsizei, framebuffers: MutPtr<
         let n_usize: GuestUSize = n.try_into().unwrap();
         let framebuffers = mem.ptr_at_mut(framebuffers, n_usize);
         unsafe { gles.GenFramebuffersOES(n, framebuffers) }
-    })
+    });
+    // Remember that these names now exist in the current context.
+    let n_usize: GuestUSize = n.try_into().unwrap();
+    let mut names: Vec<GLuint> = Vec::new();
+    for i in 0..n_usize {
+        names.push(env.mem.read(framebuffers + i));
+    }
+    if let Some(ctx) = *env.framework_state.opengles.current_ctx_for_thread(env.current_thread) {
+        env.framework_state.opengles.fbo_in_context.entry(ctx).or_default().extend(names);
+    }
 }
 fn glGenRenderbuffersOES(env: &mut Environment, n: GLsizei, renderbuffers: MutPtr<GLuint>) {
     with_ctx_and_mem(env, |gles, mem| {
@@ -1250,8 +1274,46 @@ fn glIsRenderbufferOES(env: &mut Environment, renderbuffer: GLuint) -> GLboolean
     })
 }
 fn glBindFramebufferOES(env: &mut Environment, target: GLenum, framebuffer: GLuint) {
+    // Framebuffer objects are not shared between contexts of a share group in
+    // the host drivers, but iPhone OS apps (e.g. LEGO Harry Potter's loading
+    // thread) bind a framebuffer made in another context of their share group
+    // and expect it to work. When a framebuffer name is first bound in a
+    // context that did not create it, recreate it there from the recorded
+    // attachments (renderbuffers and textures are shared).
+    let mut replay: Vec<(GLenum, bool, u32, i32)> = Vec::new();
+    if framebuffer != 0 {
+        let thread = env.current_thread;
+        if let Some(ctx) = *env.framework_state.opengles.current_ctx_for_thread(thread) {
+            let known = env
+                .framework_state
+                .opengles
+                .fbo_in_context
+                .entry(ctx)
+                .or_default()
+                .contains(&framebuffer);
+            if !known {
+                if let Some(attachments) = env.framework_state.opengles.fbo_attachments.get(&framebuffer) {
+                    replay = attachments.clone();
+                    log!("Recreating framebuffer {} in context {:?} with {} attachment(s)", framebuffer, ctx, replay.len());
+                }
+                env.framework_state
+                    .opengles
+                    .fbo_in_context
+                    .entry(ctx)
+                    .or_default()
+                    .insert(framebuffer);
+            }
+        }
+    }
     with_ctx_and_mem(env, |gles, _mem| unsafe {
-        gles.BindFramebufferOES(target, framebuffer)
+        gles.BindFramebufferOES(target, framebuffer);
+        for (attachment, is_texture, object, level) in replay {
+            if is_texture {
+                gles.FramebufferTexture2DOES(target, attachment, gles11::TEXTURE_2D, object, level);
+            } else {
+                gles.FramebufferRenderbufferOES(target, attachment, gles11::RENDERBUFFER_OES, object);
+            }
+        }
     })
 }
 fn glBindRenderbufferOES(env: &mut Environment, target: GLenum, renderbuffer: GLuint) {
@@ -1259,6 +1321,13 @@ fn glBindRenderbufferOES(env: &mut Environment, target: GLenum, renderbuffer: GL
         gles.BindRenderbufferOES(target, renderbuffer)
     })
 }
+/// Diagnostic: bounded logging of framebuffer-object setup calls.
+fn fbo_log_allowed() -> bool {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static N: AtomicU32 = AtomicU32::new(0);
+    N.fetch_add(1, Ordering::Relaxed) < 200
+}
+
 fn glRenderbufferStorageOES(
     env: &mut Environment,
     target: GLenum,
@@ -1269,10 +1338,40 @@ fn glRenderbufferStorageOES(
     // apply scale hack: give the app a larger framebuffer than it asked for
     let factor = env.options.scale_hack.get() as GLsizei;
     let (width, height) = (width * factor, height * factor);
+    let log_it = fbo_log_allowed();
     with_ctx_and_mem(env, |gles, _mem| unsafe {
-        gles.RenderbufferStorageOES(target, internalformat, width, height)
+        gles.RenderbufferStorageOES(target, internalformat, width, height);
+        if log_it {
+            let err = gles.GetError();
+            log!("FBO glRenderbufferStorageOES(target {:#x}, fmt {:#x}, {}x{}) => err {:#x}", target, internalformat, width, height, err);
+        }
     })
 }
+/// Remember what is attached to framebuffer `framebuffer` (see
+/// `glBindFramebufferOES`). An object name of 0 detaches.
+fn record_fbo_attachment(
+    env: &mut Environment,
+    framebuffer: GLuint,
+    attachment: GLenum,
+    is_texture: bool,
+    object: GLuint,
+    level: i32,
+) {
+    if framebuffer == 0 {
+        return;
+    }
+    let list = env
+        .framework_state
+        .opengles
+        .fbo_attachments
+        .entry(framebuffer)
+        .or_default();
+    list.retain(|&(a, ..)| a != attachment);
+    if object != 0 {
+        list.push((attachment, is_texture, object, level));
+    }
+}
+
 fn glFramebufferRenderbufferOES(
     env: &mut Environment,
     target: GLenum,
@@ -1280,9 +1379,18 @@ fn glFramebufferRenderbufferOES(
     renderbuffertarget: GLenum,
     renderbuffer: GLuint,
 ) {
-    with_ctx_and_mem(env, |gles, _mem| unsafe {
-        gles.FramebufferRenderbufferOES(target, attachment, renderbuffertarget, renderbuffer)
-    })
+    let log_it = fbo_log_allowed();
+    let bound: GLuint = with_ctx_and_mem(env, |gles, _mem| unsafe {
+        gles.FramebufferRenderbufferOES(target, attachment, renderbuffertarget, renderbuffer);
+        if log_it {
+            let err = gles.GetError();
+            log!("FBO glFramebufferRenderbufferOES(target {:#x}, attachment {:#x}, rb {}) => err {:#x}", target, attachment, renderbuffer, err);
+        }
+        let mut fb = 0;
+        gles.GetIntegerv(gles11::FRAMEBUFFER_BINDING_OES, &mut fb);
+        fb as GLuint
+    });
+    record_fbo_attachment(env, bound, attachment, false, renderbuffer, 0);
 }
 fn glFramebufferTexture2DOES(
     env: &mut Environment,
@@ -1292,9 +1400,18 @@ fn glFramebufferTexture2DOES(
     texture: GLuint,
     level: i32,
 ) {
-    with_ctx_and_mem(env, |gles, _mem| unsafe {
-        gles.FramebufferTexture2DOES(target, attachment, textarget, texture, level)
-    })
+    let log_it = fbo_log_allowed();
+    let bound: GLuint = with_ctx_and_mem(env, |gles, _mem| unsafe {
+        gles.FramebufferTexture2DOES(target, attachment, textarget, texture, level);
+        if log_it {
+            let err = gles.GetError();
+            log!("FBO glFramebufferTexture2DOES(target {:#x}, attachment {:#x}, tex {}, level {}) => err {:#x}", target, attachment, texture, level, err);
+        }
+        let mut fb = 0;
+        gles.GetIntegerv(gles11::FRAMEBUFFER_BINDING_OES, &mut fb);
+        fb as GLuint
+    });
+    record_fbo_attachment(env, bound, attachment, true, texture, level);
 }
 fn glGetFramebufferAttachmentParameterivOES(
     env: &mut Environment,
@@ -1326,8 +1443,13 @@ fn glGetRenderbufferParameterivOES(
     })
 }
 fn glCheckFramebufferStatusOES(env: &mut Environment, target: GLenum) -> GLenum {
+    let log_it = fbo_log_allowed();
     with_ctx_and_mem(env, |gles, _mem| unsafe {
-        gles.CheckFramebufferStatusOES(target)
+        let status = gles.CheckFramebufferStatusOES(target);
+        if log_it {
+            log!("FBO glCheckFramebufferStatusOES({:#x}) => {:#x}", target, status);
+        }
+        status
     })
 }
 fn glDeleteFramebuffersOES(env: &mut Environment, n: GLsizei, framebuffers: ConstPtr<GLuint>) {
@@ -1449,6 +1571,11 @@ fn glUnmapBufferOES(env: &mut Environment, target: GLenum) -> GLboolean {
 /// It prevents divisions by zero in levels where fog is used and both
 /// values are set to 10000.
 unsafe fn clamp_fog_state_values(gles: &mut dyn GLES) -> Option<(f32, f32)> {
+    // Fog is fixed-function only; querying it in an ES 2.0 context would just
+    // raise GL_INVALID_ENUM.
+    if gles.api_version() != 1 {
+        return None;
+    }
     let mut fogEnabled: GLboolean = 0;
     gles.GetBooleanv(gles11::FOG, &mut fogEnabled);
     if fogEnabled != 0 {

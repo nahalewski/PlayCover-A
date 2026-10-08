@@ -747,6 +747,82 @@ pub fn strftime(
                 // TODO: return the current timezone
                 res.extend_from_slice(b"GMT");
             }
+            b'A' => {
+                let wday = time_val.tm_wday;
+                assert!((0..7).contains(&wday));
+                let name = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"][wday as usize];
+                res.extend_from_slice(name.as_bytes());
+            }
+            b'B' => {
+                let mon = time_val.tm_mon;
+                assert!((0..12).contains(&mon));
+                let name = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"][mon as usize];
+                res.extend_from_slice(name.as_bytes());
+            }
+            b'h' => {
+                let mon = time_val.tm_mon;
+                assert!((0..12).contains(&mon));
+                let name = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][mon as usize];
+                res.extend_from_slice(name.as_bytes());
+            }
+            b'e' => res.extend_from_slice(format!("{:2}", { time_val.tm_mday }).as_bytes()),
+            b'y' => res.extend_from_slice(format!("{:02}", ({ time_val.tm_year } + 1900) % 100).as_bytes()),
+            b'C' => res.extend_from_slice(format!("{:02}", ({ time_val.tm_year } + 1900) / 100).as_bytes()),
+            b'j' => res.extend_from_slice(format!("{:03}", { time_val.tm_yday } + 1).as_bytes()),
+            b'w' => res.extend_from_slice(format!("{}", { time_val.tm_wday }).as_bytes()),
+            b'u' => res.extend_from_slice(format!("{}", if { time_val.tm_wday } == 0 { 7 } else { time_val.tm_wday }).as_bytes()),
+            b'k' => res.extend_from_slice(format!("{:2}", { time_val.tm_hour }).as_bytes()),
+            b'l' => {
+                let h = time_val.tm_hour % 12;
+                res.extend_from_slice(format!("{:2}", if h == 0 { 12 } else { h }).as_bytes());
+            }
+            b'D' | b'x' => res.extend_from_slice(
+                format!("{:02}/{:02}/{:02}", { time_val.tm_mon } + 1, { time_val.tm_mday }, ({ time_val.tm_year } + 1900) % 100).as_bytes(),
+            ),
+            b'F' => res.extend_from_slice(
+                format!("{}-{:02}-{:02}", { time_val.tm_year } + 1900, { time_val.tm_mon } + 1, { time_val.tm_mday }).as_bytes(),
+            ),
+            b'T' | b'X' => res.extend_from_slice(
+                format!("{:02}:{:02}:{:02}", { time_val.tm_hour }, { time_val.tm_min }, { time_val.tm_sec }).as_bytes(),
+            ),
+            b'R' => res.extend_from_slice(format!("{:02}:{:02}", { time_val.tm_hour }, { time_val.tm_min }).as_bytes()),
+            b'c' => {
+                let wday = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][(time_val.tm_wday.rem_euclid(7)) as usize];
+                let mon = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][(time_val.tm_mon.rem_euclid(12)) as usize];
+                res.extend_from_slice(
+                    format!(
+                        "{} {} {:2} {:02}:{:02}:{:02} {}",
+                        wday, mon, { time_val.tm_mday }, { time_val.tm_hour }, { time_val.tm_min }, { time_val.tm_sec }, { time_val.tm_year } + 1900
+                    )
+                    .as_bytes(),
+                );
+            }
+            b'r' => {
+                let hour = { time_val.tm_hour };
+                let h12 = if hour % 12 == 0 { 12 } else { hour % 12 };
+                res.extend_from_slice(
+                    format!("{:02}:{:02}:{:02} {}", h12, { time_val.tm_min }, { time_val.tm_sec }, if hour < 12 { "AM" } else { "PM" }).as_bytes(),
+                );
+            }
+            b'U' => {
+                let (yday, wday) = ({ time_val.tm_yday }, { time_val.tm_wday });
+                res.extend_from_slice(format!("{:02}", (yday + 7 - wday) / 7).as_bytes());
+            }
+            b'W' => {
+                let (yday, wday) = ({ time_val.tm_yday }, { time_val.tm_wday });
+                res.extend_from_slice(format!("{:02}", (yday + 7 - (wday + 6) % 7) / 7).as_bytes());
+            }
+            // ISO 8601 week-based items are approximated by the plain week number and year.
+            b'V' => {
+                let (yday, wday) = ({ time_val.tm_yday }, { time_val.tm_wday });
+                res.extend_from_slice(format!("{:02}", ((yday + 7 - (wday + 6) % 7) / 7).max(1)).as_bytes());
+            }
+            b'G' => res.extend_from_slice(format!("{}", { time_val.tm_year } + 1900).as_bytes()),
+            b'g' => res.extend_from_slice(format!("{:02}", ({ time_val.tm_year } + 1900) % 100).as_bytes()),
+            b'z' => res.extend_from_slice(b"+0000"),
+            b'n' => res.push(10),
+            b't' => res.push(9),
+            b'%' => res.push(b'%'),
             b'#' => {
                 // macOS seems to skip that completly
                 res.extend_from_slice(b"#");

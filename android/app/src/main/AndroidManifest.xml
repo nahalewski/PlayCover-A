@@ -30,6 +30,9 @@
         android:required="false" />
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <!-- External mouse input events -->
     <uses-feature
@@ -57,27 +60,53 @@
     <!-- <uses-permission android:name="android.permission.RECORD_AUDIO" /> -->
 
     <application
+        android:networkSecurityConfig="@xml/apple_companion_network"
         android:allowBackup="true"
         android:hardwareAccelerated="true"
         android:icon="${icon}"
         android:label="@string/app_name"
         android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
 
+        <activity android:name="org.touchhle.android.AppleStoreActivity" android:exported="false" />
+
+        <service
+            android:name="org.touchhle.android.IpaDownloadService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
         <!-- Example of setting SDL hints from AndroidManifest.xml:
         <meta-data android:name="SDL_ENV.SDL_ACCELEROMETER_AS_JOYSTICK" android:value="0"/>
          -->
 
+        <!-- The app library / home screen -->
         <activity
-            android:name="org.touchhle.android.MainActivity"
-            android:alwaysRetainTaskState="true"
-            android:configChanges="layoutDirection|locale|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation"
+            android:name="org.touchhle.android.LauncherActivity"
             android:exported="true"
-            android:launchMode="singleInstance"
-            android:preferMinimalPostProcessing="true">
+            android:launchMode="singleTop"
+            android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="altstore" android:host="source" />
+            </intent-filter>
+        </activity>
+
+        <!-- Hosts the emulator; started by LauncherActivity -->
+        <activity
+            android:name="org.touchhle.android.MainActivity"
+            android:process=":game"
+            android:alwaysRetainTaskState="true"
+            android:configChanges="layoutDirection|locale|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation"
+            android:exported="true"
+            android:launchMode="singleInstance"
+            android:resizeableActivity="true"
+            android:supportsPictureInPicture="true"
+            android:preferMinimalPostProcessing="true">
             <!-- Let Android know that we can handle some USB devices and should receive this event -->
             <intent-filter>
                 <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />

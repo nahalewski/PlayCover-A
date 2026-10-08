@@ -10,6 +10,7 @@
 //! topic.
 
 mod eagl;
+mod gles2_guest;
 mod gles_guest;
 
 use touchHLE_gl_bindings::gles11::types::GLenum;
@@ -21,7 +22,7 @@ pub const DYLIB: crate::dyld::HostDylib = crate::dyld::HostDylib {
     aliases: &[],
     class_exports: &[eagl::CLASSES],
     constant_exports: &[eagl::CONSTANTS],
-    function_exports: &[gles_guest::FUNCTIONS],
+    function_exports: &[gles_guest::FUNCTIONS, gles2_guest::FUNCTIONS],
 };
 
 #[derive(Default)]
@@ -29,6 +30,14 @@ pub struct State {
     /// Current EAGLContext for each thread
     current_ctxs: std::collections::HashMap<crate::ThreadId, Option<crate::objc::id>>,
     strings_cache: std::collections::HashMap<GLenum, ConstPtr<u8>>,
+    /// Attachments recorded for each application-visible framebuffer name:
+    /// (attachment point, is a texture rather than a renderbuffer, object name,
+    /// mipmap level). Used by [gles_guest] to recreate a framebuffer inside
+    /// another context of the same share group, see `glBindFramebufferOES`.
+    fbo_attachments: std::collections::HashMap<u32, Vec<(GLenum, bool, u32, i32)>>,
+    /// Framebuffer names that already exist inside each EAGLContext's native
+    /// context.
+    fbo_in_context: std::collections::HashMap<crate::objc::id, std::collections::HashSet<u32>>,
 }
 impl State {
     fn current_ctx_for_thread(&mut self, thread: crate::ThreadId) -> &mut Option<crate::objc::id> {

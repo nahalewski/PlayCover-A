@@ -6,15 +6,20 @@
 //! `sys/mount.h`, file system statistics
 
 use crate::dyld::{export_c_func, FunctionExports};
-use crate::fs::GuestPath;
+use crate::fs::{resolve_path, Fs, GuestPath};
 use crate::libc::dirent::MAXPATHLEN;
-use crate::libc::errno::{set_errno, EBADF, ENOENT};
+use crate::libc::errno::{set_errno, EBADF, EFAULT, EINVAL, ENOENT, ENOTDIR};
 use crate::libc::posix_io::stat::uid_t;
 use crate::libc::posix_io::{FileDescriptor, STDERR_FILENO, STDIN_FILENO, STDOUT_FILENO};
 use crate::mem::{ConstPtr, MutPtr, SafeRead};
 use crate::Environment;
 
 const MFSTYPENAMELEN: usize = 16;
+// Darwin mount flags, not the differently numbered POSIX statvfs flags.
+const MNT_RDONLY: u32 = 0x1;
+const MNT_NOSUID: u32 = 0x8;
+const MNT_NODEV: u32 = 0x10;
+const MNT_LOCAL: u32 = 0x1000;
 
 #[allow(non_camel_case_types)]
 #[derive(Default, Debug, Copy, Clone)]
@@ -61,7 +66,7 @@ fn fake_statfs() -> statfs {
         },
         f_owner: 0,
         f_type: 17,
-        f_flags: 75550720,
+        f_flags: MNT_NOSUID | MNT_NODEV | MNT_LOCAL,
         f_fssubtype: 1,
         f_fstypename: [b'\0'; MFSTYPENAMELEN],
         f_mntonname: [b'\0'; MAXPATHLEN],
@@ -76,24 +81,59 @@ fn fake_statfs() -> statfs {
 
 /// Internal helper for `statfs`, not a part of the API.
 pub fn statfs_inner(env: &mut Environment, path: ConstPtr<u8>) -> Result<statfs, i32> {
-    // FIXME does directory matter?
-    assert!(env
-        .mem
-        .cstr_at_utf8(path)
-        .is_ok_and(|path| path.starts_with(env.fs.home_directory().join("Documents").as_str())));
+    if path.is_null() {
+        return Err(EFAULT);
+    }
+    let path = env.mem.cstr_at_utf8(path).map_err(|_| EINVAL)?;
+    statfs_for_path(&env.fs, path)
+}
 
-    // TODO: Handle additional errors
-    let path = env.mem.cstr_at_utf8(path).unwrap();
-    if !env.fs.exists(GuestPath::new(path)) {
+fn statfs_for_path(fs: &Fs, path: &str) -> Result<statfs, i32> {
+    if path.is_empty() {
         return Err(ENOENT);
     }
+    let guest = GuestPath::new(path);
+    let (exists, _, writable, _) = fs.access(guest);
+    if !exists {
+        // Distinguish a missing entry from traversal through a regular file.
+        let components = resolve_path(guest, Some(fs.working_directory()));
+        let mut prefix = String::new();
+        for component in components.iter().take(components.len().saturating_sub(1)) {
+            prefix.push('/');
+            prefix.push_str(component);
+            if fs.is_file(GuestPath::new(&prefix)) {
+                return Err(ENOTDIR);
+            }
+            if !fs.exists(GuestPath::new(&prefix)) {
+                return Err(ENOENT);
+            }
+        }
+        return Err(ENOENT);
+    }
+    Ok(statfs_for_access(writable))
+}
 
-    Ok(fake_statfs())
+fn statfs_for_access(writable: bool) -> statfs {
+    // Capacity remains the existing emulated filesystem's simulator-derived
+    // defaults; it is not a measurement of host free disk space. Mount access
+    // is derived from Fs's real write policy, including immutable IPA assets.
+    let mut result = fake_statfs();
+    if !writable {
+        result.f_flags |= MNT_RDONLY;
+        result.f_bfree = 0;
+        result.f_bavail = 0;
+        result.f_ffree = 0;
+    }
+    result
 }
 
 fn statfs(env: &mut Environment, path: ConstPtr<u8>, buf: MutPtr<statfs>) -> i32 {
     // TODO: handle errno properly
     set_errno(env, 0);
+    if buf.is_null() {
+        set_errno(env, EFAULT);
+        return -1;
+    }
 
     let result = match statfs_inner(env, path) {
         Ok(statfs) => {
@@ -116,9 +156,14 @@ fn statfs(env: &mut Environment, path: ConstPtr<u8>, buf: MutPtr<statfs>) -> i32
 fn fstatfs(env: &mut Environment, fd: FileDescriptor, buf: MutPtr<statfs>) -> i32 {
     // TODO: handle errno properly
     set_errno(env, 0);
+    if buf.is_null() {
+        set_errno(env, EFAULT);
+        return -1;
+    }
 
-    let result = if !matches!(fd, STDIN_FILENO | STDOUT_FILENO | STDERR_FILENO)
-        && !env.libc_state.posix_io.is_fd_open(fd)
+    let result = if fd < 0
+        || (!matches!(fd, STDIN_FILENO | STDOUT_FILENO | STDERR_FILENO)
+            && !env.libc_state.posix_io.is_fd_open(fd))
     {
         set_errno(env, EBADF);
         -1
@@ -133,3 +178,33 @@ fn fstatfs(env: &mut Environment, fd: FileDescriptor, buf: MutPtr<statfs>) -> i3
 
 pub const FUNCTIONS: FunctionExports =
     &[export_c_func!(statfs(_, _)), export_c_func!(fstatfs(_, _))];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn readonly_root_is_queryable_and_missing_paths_fail() {
+        let fs = Fs::new_fake_fs();
+        let stats = statfs_for_path(&fs, "/").unwrap();
+        let flags = stats.f_flags;
+        let available = stats.f_bavail;
+        assert_ne!(flags & MNT_RDONLY, 0);
+        assert_eq!(available, 0);
+        assert_eq!(statfs_for_path(&fs, "").unwrap_err(), ENOENT);
+        assert_eq!(statfs_for_path(&fs, "/missing").unwrap_err(), ENOENT);
+    }
+    #[test]
+    fn writable_defaults_and_readonly_mount_policy_are_distinct() {
+        let writable = statfs_for_access(true);
+        let readonly = statfs_for_access(false);
+        let flags = writable.f_flags;
+        let readonly_flags = readonly.f_flags;
+        let available = writable.f_bavail;
+        assert_eq!(flags & MNT_RDONLY, 0);
+        assert_ne!(available, 0);
+        assert_eq!(readonly_flags, flags | MNT_RDONLY);
+        assert_eq!(readonly.f_fstypename, writable.f_fstypename);
+        let reserved = readonly.f_reserved;
+        assert_eq!(reserved, [0; 8]);
+    }
+}

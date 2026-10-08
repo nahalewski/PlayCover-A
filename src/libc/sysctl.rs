@@ -15,7 +15,14 @@ use crate::Environment;
 
 // Top level constants
 const CTL_KERN: i32 = 1;
+const CTL_NET: i32 = 4;
 const CTL_HW: i32 = 6;
+
+// CTL_NET: the (CTL_NET, AF_ROUTE, 0, AF_LINK, NET_RT_IFLIST, ifindex) query used
+// to read a network interface's link-layer (MAC) address.
+const AF_ROUTE: i32 = 17;
+const AF_LINK: i32 = 18;
+const NET_RT_IFLIST: i32 = 3;
 
 // CTL_KERN
 const KERN_OSTYPE: i32 = 1;
@@ -28,6 +35,7 @@ const KERN_OSVERSION: i32 = 65;
 
 // KERN_PROC
 const KERN_PROC_ALL: i32 = 0;
+const KERN_PROC_PID: i32 = 1;
 
 // CTL_HW
 const HW_MACHINE: i32 = 1;
@@ -170,6 +178,24 @@ fn sysctl(
                 log!("TODO: sysctl() for 'kern.proc.all', returning -1");
                 return -1;
             }
+            if name0 == CTL_KERN && name1 == KERN_PROC && name2 == KERN_PROC_PID {
+                // Debugger check (`P_TRACED` in `kinfo_proc.p_flag`): answer with a
+                // zeroed `struct kinfo_proc` (648 bytes on 32-bit Darwin), i.e. "not traced".
+                const KINFO_PROC_SIZE: GuestUSize = 648;
+                if !oldlenp.is_null() {
+                    let capacity = env.mem.read(oldlenp);
+                    env.mem.write(oldlenp, KINFO_PROC_SIZE);
+                    if !oldp.is_null() {
+                        if capacity < KINFO_PROC_SIZE {
+                            set_errno(env, 12); // ENOMEM
+                            return -1;
+                        }
+                        env.mem.bytes_at_mut(oldp.cast::<u8>(), KINFO_PROC_SIZE).fill(0);
+                    }
+                }
+                log!("TODO: sysctl() for 'kern.proc.pid' returns an empty kinfo_proc");
+                return 0;
+            }
             sysctl_generic(
                 env,
                 |_| {
@@ -189,8 +215,71 @@ fn sysctl(
                 newlen,
             )
         }
+        6 => {
+            let mib: Vec<i32> = (0..6).map(|i| env.mem.read(name + i)).collect();
+            if mib[0] == CTL_NET
+                && mib[1] == AF_ROUTE
+                && mib[3] == AF_LINK
+                && mib[4] == NET_RT_IFLIST
+            {
+                return sysctl_iflist(env, mib[5], oldp, oldlenp);
+            }
+            unimplemented!("Unknown sysctl parameter {mib:?}!")
+        }
         _ => unimplemented!("sysctl() for name length {name_len} is unimplemented!"),
     }
+}
+
+/// Answers the "interface list" routing query for the one interface touchHLE
+/// pretends to have (`en0`), with iOS's placeholder MAC address
+/// 02:00:00:00:00:00 (what iOS 7+ reports to apps). Apps use this to derive a
+/// device identifier. The reply is a `struct if_msghdr` (112 bytes on iOS)
+/// followed by a `struct sockaddr_dl` holding the interface name and address.
+fn sysctl_iflist(
+    env: &mut Environment,
+    if_index: i32,
+    oldp: MutVoidPtr,
+    oldlenp: MutPtr<GuestUSize>,
+) -> i32 {
+    const ENOMEM: i32 = 12;
+    const IF_MSGHDR_SIZE: usize = 112;
+    const SDL_SIZE: usize = 20;
+    const TOTAL: GuestUSize = (IF_MSGHDR_SIZE + SDL_SIZE) as GuestUSize;
+
+    if oldlenp.is_null() {
+        return 0;
+    }
+    let available = env.mem.read(oldlenp);
+    env.mem.write(oldlenp, TOTAL);
+    if oldp.is_null() {
+        // Just asking for the size.
+        return 0;
+    }
+    if available < TOTAL {
+        set_errno(env, ENOMEM);
+        return -1;
+    }
+    let buf = env.mem.bytes_at_mut(oldp.cast(), TOTAL);
+    buf.fill(0);
+    // struct if_msghdr
+    buf[0..2].copy_from_slice(&(TOTAL as u16).to_le_bytes()); // ifm_msglen
+    buf[2] = 5; // ifm_version (RTM_VERSION)
+    buf[3] = 0xe; // ifm_type (RTM_IFINFO)
+    buf[4..8].copy_from_slice(&0x10u32.to_le_bytes()); // ifm_addrs (RTA_IFP)
+    buf[8..12].copy_from_slice(&0x8863u32.to_le_bytes()); // ifm_flags (up, broadcast, running, …)
+    buf[12..14].copy_from_slice(&(if_index as u16).to_le_bytes()); // ifm_index
+                                                                   // struct sockaddr_dl
+    let sdl = &mut buf[IF_MSGHDR_SIZE..];
+    sdl[0] = SDL_SIZE as u8; // sdl_len
+    sdl[1] = AF_LINK as u8; // sdl_family
+    sdl[2..4].copy_from_slice(&(if_index as u16).to_le_bytes()); // sdl_index
+    sdl[4] = 6; // sdl_type (IFT_ETHER)
+    sdl[5] = 3; // sdl_nlen
+    sdl[6] = 6; // sdl_alen
+    sdl[7] = 0; // sdl_slen
+    sdl[8..11].copy_from_slice(b"en0"); // sdl_data: name, then the address
+    sdl[11..17].copy_from_slice(&[0x02, 0, 0, 0, 0, 0]);
+    0
 }
 
 fn sysctlbyname(
@@ -260,7 +349,8 @@ where
     if oldlen < len {
         // TODO: set errno
         // TODO: write partial data
-        log!("sysctl(byname) for '{name_str}': the buffer of size {oldlen} is too low to fit the value of size {len}, returning -1");
+        // Some games ask for this every frame, so only report it once per name.
+        log_once!("sysctl(byname) for '{name_str}': the buffer of size {oldlen} is too low to fit the value of size {len}, returning -1");
         return -1;
     }
     match val {

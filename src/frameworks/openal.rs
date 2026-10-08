@@ -22,8 +22,45 @@ use crate::dyld::{export_c_func, FunctionExports, HostDylib};
 use crate::libc::string::strcmp;
 use crate::mem::{ConstPtr, ConstVoidPtr, GuestUSize, MutPtr, MutVoidPtr, Ptr, SafeWrite};
 use crate::Environment;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::{CStr, CString};
+
+// Parameters this file needs that the bindings do not define.
+const AL_LOOPING_PARAM: ALenum = 0x1007;
+const AL_SAMPLE_OFFSET_PARAM: ALenum = 0x1025;
+const AL_BYTE_OFFSET_PARAM: ALenum = 0x1026;
+
+/// How many frames each streamed chunk of a static buffer holds, and how many
+/// chunks are kept queued ahead of the playback position.
+const STATIC_CHUNK_FRAMES: GuestUSize = 512;
+const STATIC_QUEUE_DEPTH: usize = 3;
+
+/// A buffer given to `alBufferDataStatic`. On iOS the app keeps ownership of the
+/// memory and the sound system plays it live, so apps (e.g. the Sonic games'
+/// emulator) loop a small ring buffer and keep rewriting it. OpenAL Soft has no
+/// such extension, so a source bound to one is fed from a queue of chunks that
+/// are copied out of the guest memory shortly before they play.
+#[derive(Copy, Clone)]
+struct StaticBuffer {
+    data: ConstVoidPtr,
+    size: GuestUSize,
+    format: ALenum,
+    rate: ALsizei,
+}
+
+struct StaticStream {
+    /// The app's static buffer name.
+    buffer: ALuint,
+    /// Chunks currently queued on the source, oldest first, with the ring byte
+    /// position each one starts at.
+    queue: VecDeque<(ALuint, GuestUSize)>,
+    free_chunks: Vec<ALuint>,
+    /// Ring byte position of the next chunk to queue.
+    next_pos: GuestUSize,
+    playing: bool,
+    /// One-shot (non-looping) source: the whole buffer has been queued.
+    finished: bool,
+}
 
 pub const DYLIB: HostDylib = HostDylib {
     path: "/System/Library/Frameworks/OpenAL.framework/OpenAL",
@@ -46,7 +83,188 @@ pub struct State {
     warned_mixer_get_rate: bool,
     warned_mixer_output_rate_proc: bool,
     warned_invalid_host_devices: HashSet<*mut ALCdevice>,
+    static_buffers: HashMap<ALuint, StaticBuffer>,
+    static_streams: HashMap<ALuint, StaticStream>,
+    /// Sources the app set AL_LOOPING on (ring buffers loop; sound effects do not).
+    looping_sources: HashSet<ALuint>,
 }
+
+fn static_frame_bytes(format: ALenum) -> GuestUSize {
+    match format {
+        0x1100 => 1,         // AL_FORMAT_MONO8
+        0x1101 | 0x1102 => 2, // AL_FORMAT_MONO16 / AL_FORMAT_STEREO8
+        _ => 4,              // AL_FORMAT_STEREO16
+    }
+}
+
+/// Usable length of the ring: a whole number of frames.
+fn static_ring_len(buf: &StaticBuffer) -> GuestUSize {
+    let frame = static_frame_bytes(buf.format);
+    (buf.size / frame * frame).max(frame)
+}
+
+fn static_chunk_len(buf: &StaticBuffer) -> GuestUSize {
+    let frame = static_frame_bytes(buf.format);
+    (STATIC_CHUNK_FRAMES * frame).min(static_ring_len(buf))
+}
+
+/// Copy `len` bytes out of the app's ring buffer, wrapping around its end.
+fn static_ring_bytes(env: &mut Environment, buf: &StaticBuffer, start: GuestUSize, len: GuestUSize) -> Vec<u8> {
+    let ring = static_ring_len(buf);
+    let mut out = Vec::with_capacity(len as usize);
+    let mut pos = start % ring;
+    let mut remaining = len;
+    while remaining > 0 {
+        let n = remaining.min(ring - pos);
+        let src: ConstPtr<u8> = buf.data.cast();
+        out.extend_from_slice(env.mem.bytes_at(src + pos, n));
+        pos = (pos + n) % ring;
+        remaining -= n;
+    }
+    out
+}
+
+/// Keep a source that plays a static buffer supplied with fresh chunks.
+fn pump_static_stream(env: &mut Environment, source: ALuint) {
+    let Some(mut stream) = State::get(env).static_streams.remove(&source) else {
+        return;
+    };
+    let Some(buf) = State::get(env).static_buffers.get(&stream.buffer).copied() else {
+        State::get(env).static_streams.insert(source, stream);
+        return;
+    };
+    let ring = static_ring_len(&buf);
+    let chunk_len = static_chunk_len(&buf);
+
+    // Reclaim chunks that have finished playing.
+    let mut state_value: ALint = 0;
+    let mut freed: Vec<ALuint> = Vec::new();
+    if let Some(ctx) = State::try_make_current(env) {
+        unsafe {
+            let mut processed: ALint = 0;
+            ctx.GetSourcei(source, al::AL_BUFFERS_PROCESSED, &mut processed);
+            if processed > 0 {
+                let mut ids = vec![0 as ALuint; processed as usize];
+                ctx.SourceUnqueueBuffers(source, processed, ids.as_mut_ptr());
+                freed = ids;
+            }
+            ctx.GetSourcei(source, al::AL_SOURCE_STATE, &mut state_value);
+        }
+    }
+    for _ in 0..freed.len() {
+        stream.queue.pop_front();
+    }
+    stream.free_chunks.extend(freed);
+
+    let looping = State::get(env).looping_sources.contains(&source);
+    // A one-shot sound effect is queued whole, exactly once.
+    if !looping && !stream.finished && stream.playing {
+        let start = stream.next_pos;
+        let bytes = static_ring_bytes(env, &buf, start, ring - start.min(ring));
+        if let Some(ctx) = State::try_make_current(env) {
+            let chunk = match stream.free_chunks.pop() {
+                Some(id) => id,
+                None => {
+                    let mut id: ALuint = 0;
+                    unsafe { ctx.GenBuffers(1, &mut id) };
+                    id
+                }
+            };
+            unsafe {
+                ctx.BufferData(chunk, buf.format, bytes.as_ptr() as *const ALvoid, bytes.len() as ALsizei, buf.rate);
+                ctx.SourceQueueBuffers(source, 1, &chunk);
+            }
+            stream.queue.push_back((chunk, start));
+            stream.next_pos = 0;
+            stream.finished = true;
+        }
+    }
+
+    // Top the queue up from the ring.
+    while looping && stream.queue.len() < STATIC_QUEUE_DEPTH {
+        let start = stream.next_pos;
+        let bytes = static_ring_bytes(env, &buf, start, chunk_len);
+        let Some(ctx) = State::try_make_current(env) else {
+            break;
+        };
+        let chunk = match stream.free_chunks.pop() {
+            Some(id) => id,
+            None => {
+                let mut id: ALuint = 0;
+                unsafe { ctx.GenBuffers(1, &mut id) };
+                id
+            }
+        };
+        unsafe {
+            ctx.BufferData(chunk, buf.format, bytes.as_ptr() as *const ALvoid, bytes.len() as ALsizei, buf.rate);
+            ctx.SourceQueueBuffers(source, 1, &chunk);
+        }
+        stream.queue.push_back((chunk, start));
+        stream.next_pos = (start + chunk_len) % ring;
+    }
+
+    // If the queue ran dry the source stopped itself: restart it.
+    if looping && stream.playing && state_value == al::AL_STOPPED {
+        if let Some(ctx) = State::try_make_current(env) {
+            unsafe { ctx.SourcePlay(source) };
+        }
+    }
+    State::get(env).static_streams.insert(source, stream);
+}
+
+/// Where in the app's ring buffer playback currently is, in bytes.
+fn static_stream_position(env: &mut Environment, source: ALuint) -> Option<GuestUSize> {
+    pump_static_stream(env, source);
+    let (front, next_pos, buffer) = {
+        let stream = State::get(env).static_streams.get(&source)?;
+        (stream.queue.front().copied(), stream.next_pos, stream.buffer)
+    };
+    let buf = State::get(env).static_buffers.get(&buffer).copied()?;
+    let ring = static_ring_len(&buf);
+    let Some((_, start)) = front else {
+        return Some(next_pos % ring);
+    };
+    let mut offset: ALint = 0;
+    if let Some(ctx) = State::try_make_current(env) {
+        unsafe { ctx.GetSourcei(source, AL_BYTE_OFFSET_PARAM, &mut offset) };
+    }
+    Some((start + offset.max(0) as GuestUSize) % ring)
+}
+
+/// Stop a streamed source and drop its queued chunks. If `forget` is set the
+/// source stops being treated as a static-buffer source.
+fn reset_static_stream(env: &mut Environment, source: ALuint, forget: bool) {
+    let Some(mut stream) = State::get(env).static_streams.remove(&source) else {
+        return;
+    };
+    if let Some(ctx) = State::try_make_current(env) {
+        unsafe {
+            ctx.SourceStop(source);
+            let mut queued: ALint = 0;
+            ctx.GetSourcei(source, al::AL_BUFFERS_QUEUED, &mut queued);
+            if queued > 0 {
+                let mut ids = vec![0 as ALuint; queued as usize];
+                ctx.SourceUnqueueBuffers(source, queued, ids.as_mut_ptr());
+            }
+            if forget {
+                let mut all: Vec<ALuint> = stream.queue.iter().map(|(id, _)| *id).collect();
+                all.extend(stream.free_chunks.iter().copied());
+                if !all.is_empty() {
+                    ctx.DeleteBuffers(all.len() as ALsizei, all.as_ptr());
+                }
+            }
+        }
+    }
+    if !forget {
+        let queued: Vec<ALuint> = stream.queue.drain(..).map(|(id, _)| id).collect();
+        stream.free_chunks.extend(queued);
+        stream.next_pos = 0;
+        stream.playing = false;
+        stream.finished = false;
+        State::get(env).static_streams.insert(source, stream);
+    }
+}
+
 impl State {
     fn get(env: &mut Environment) -> &mut Self {
         &mut env.framework_state.openal
@@ -427,6 +645,21 @@ fn alcGetProcAddress(
             }
             return Ptr::null();
         }
+        // Apple-specific rendering quality extension: purely a quality hint,
+        // and apps are expected to cope with it being unavailable.
+        // Likewise for the rest of Apple's OpenAL extensions (`alcMacOSX*`
+        // and the Apple Spatial Audio `alcASA*` functions): optional extras
+        // that apps look up by name and check for NULL.
+        if mangled_func_name.starts_with("_alcMacOSX")
+            || mangled_func_name.starts_with("_alcASA")
+            || matches!(
+                mangled_func_name.as_str(),
+                "_alSourceAddNotification" | "_alSourceRemoveNotification" | "_alBufferDataStatic"
+            )
+        {
+            log_once!("Tolerating nonexistent Apple OpenAL extension func(s) in alcGetProcAddress(), returning NULL.");
+            return Ptr::null();
+        }
         panic!(
             "Request for procedure address for unimplemented OpenAL function {mangled_func_name}"
         );
@@ -616,6 +849,10 @@ fn alGenSources(env: &mut Environment, n: ALsizei, sources: MutPtr<ALuint>) {
 fn alDeleteSources(env: &mut Environment, n: ALsizei, sources: ConstPtr<ALuint>) {
     let n_usize: GuestUSize = n.try_into().unwrap();
     let sources = env.mem.ptr_at(sources, n_usize);
+    let names: Vec<ALuint> = (0..n_usize as usize).map(|i| unsafe { *sources.add(i) }).collect();
+    for name in names {
+        reset_static_stream(env, name, true);
+    }
     try_get_context!(env, context);
     unsafe { context.DeleteSources(n, sources) };
 }
@@ -642,6 +879,37 @@ fn alSource3f(
     unsafe { context.Source3f(source, param, value1, value2, value3) };
 }
 fn alSourcei(env: &mut Environment, source: ALuint, param: ALenum, value: ALint) {
+    if param == al::AL_BUFFER {
+        // Whatever was bound before no longer applies.
+        reset_static_stream(env, source, true);
+        let name = value as ALuint;
+        if value != 0 && State::get(env).static_buffers.contains_key(&name) {
+            State::get(env).static_streams.insert(
+                source,
+                StaticStream {
+                    buffer: name,
+                    queue: VecDeque::new(),
+                    free_chunks: Vec::new(),
+                    next_pos: 0,
+                    playing: false,
+                    finished: false,
+                },
+            );
+            return;
+        }
+    } else if param == AL_LOOPING_PARAM {
+        let in_stream = State::get(env).static_streams.contains_key(&source);
+        log!("openal: app set AL_LOOPING={} on source {} (static-stream: {})", value, source, in_stream);
+        if value != 0 {
+            State::get(env).looping_sources.insert(source);
+        } else {
+            State::get(env).looping_sources.remove(&source);
+        }
+        if State::get(env).static_streams.contains_key(&source) {
+            // The ring buffer is looped by feeding it round and round.
+            return;
+        }
+    }
     try_get_context!(env, context);
     unsafe { context.Sourcei(source, param, value) };
 }
@@ -696,6 +964,31 @@ fn alGetSourcefv(env: &mut Environment, source: ALuint, param: ALenum, values: M
     unsafe { context.GetSourcefv(source, param, values) };
 }
 fn alGetSourcei(env: &mut Environment, source: ALuint, param: ALenum, value: MutPtr<ALint>) {
+    if State::get(env).static_streams.contains_key(&source) {
+        // Every poll also tops up the streamed chunks.
+        match param {
+            al::AL_BUFFER => {
+                let buffer = State::get(env).static_streams[&source].buffer;
+                pump_static_stream(env, source);
+                env.mem.write(value, buffer as ALint);
+                return;
+            }
+            AL_BYTE_OFFSET_PARAM | AL_SAMPLE_OFFSET_PARAM => {
+                if let Some(pos) = static_stream_position(env, source) {
+                    let buffer = State::get(env).static_streams[&source].buffer;
+                    let format = State::get(env).static_buffers[&buffer].format;
+                    let result = if param == AL_SAMPLE_OFFSET_PARAM {
+                        pos / static_frame_bytes(format)
+                    } else {
+                        pos
+                    };
+                    env.mem.write(value, result as ALint);
+                    return;
+                }
+            }
+            _ => pump_static_stream(env, source),
+        }
+    }
     let value = env.mem.ptr_at_mut(value, 1);
     try_get_context!(env, context);
     unsafe { context.GetSourcei(source, param, value) };
@@ -729,19 +1022,50 @@ fn alGetSourceiv(env: &mut Environment, source: ALuint, param: ALenum, values: M
     unsafe { context.GetSourceiv(source, param, values) };
 }
 
+/// Playing a one-shot sound effect again after it ran to the end starts it over.
+fn restart_finished_one_shot(env: &mut Environment, source: ALuint) {
+    let finished = State::get(env).static_streams.get(&source).is_some_and(|s| s.finished);
+    if !finished || State::get(env).looping_sources.contains(&source) {
+        return;
+    }
+    let mut state_value: ALint = 0;
+    if let Some(ctx) = State::try_make_current(env) {
+        unsafe { ctx.GetSourcei(source, al::AL_SOURCE_STATE, &mut state_value) };
+    }
+    if state_value != al::AL_PLAYING {
+        reset_static_stream(env, source, false);
+    }
+}
+
 fn alSourcePlay(env: &mut Environment, source: ALuint) {
+    restart_finished_one_shot(env, source);
+    if let Some(stream) = State::get(env).static_streams.get_mut(&source) {
+        stream.playing = true;
+        pump_static_stream(env, source);
+    }
     try_get_context!(env, context);
     unsafe { context.SourcePlay(source) };
 }
 fn alSourcePause(env: &mut Environment, source: ALuint) {
+    if let Some(stream) = State::get(env).static_streams.get_mut(&source) {
+        stream.playing = false;
+    }
     try_get_context!(env, context);
     unsafe { context.SourcePause(source) };
 }
 fn alSourceStop(env: &mut Environment, source: ALuint) {
+    if State::get(env).static_streams.contains_key(&source) {
+        reset_static_stream(env, source, false);
+        return;
+    }
     try_get_context!(env, context);
     unsafe { context.SourceStop(source) };
 }
 fn alSourceRewind(env: &mut Environment, source: ALuint) {
+    if State::get(env).static_streams.contains_key(&source) {
+        reset_static_stream(env, source, false);
+        return;
+    }
     try_get_context!(env, context);
     unsafe { context.SourceRewind(source) };
 }
@@ -749,6 +1073,14 @@ fn alSourceRewind(env: &mut Environment, source: ALuint) {
 fn alSourcePlayv(env: &mut Environment, nsources: ALsizei, sources: ConstPtr<ALuint>) {
     let nsources_usize: GuestUSize = nsources.try_into().unwrap();
     let sources = env.mem.ptr_at(sources, nsources_usize);
+    let names: Vec<ALuint> = (0..nsources_usize as usize).map(|i| unsafe { *sources.add(i) }).collect();
+    for name in names {
+        restart_finished_one_shot(env, name);
+        if let Some(stream) = State::get(env).static_streams.get_mut(&name) {
+            stream.playing = true;
+            pump_static_stream(env, name);
+        }
+    }
     try_get_context!(env, context);
     unsafe { context.SourcePlayv(nsources, sources) };
 }
@@ -830,6 +1162,10 @@ fn alGenBuffers(env: &mut Environment, n: ALsizei, buffers: MutPtr<ALuint>) {
 fn alDeleteBuffers(env: &mut Environment, n: ALsizei, buffers: ConstPtr<ALuint>) {
     let n_usize: GuestUSize = n.try_into().unwrap();
     let buffers = env.mem.ptr_at(buffers, n_usize);
+    for i in 0..n_usize as usize {
+        let name = unsafe { *buffers.add(i) };
+        State::get(env).static_buffers.remove(&name);
+    }
     let ctx_ptr = State::get(env).current_ctx;
     let Some(context) = State::try_make_current(env) else {
         let state = State::get(env);
@@ -877,6 +1213,20 @@ fn alBufferDataStatic(
     size: ALsizei,
     samplerate: ALsizei,
 ) {
+    // Remember where the app's memory is so sources bound to this buffer can
+    // be streamed from it live (see `StaticBuffer`). Also give the buffer its
+    // initial contents, for any use that does not go through a source.
+    if !data.is_null() && size > 0 {
+        State::get(env).static_buffers.insert(
+            buffer,
+            StaticBuffer {
+                data,
+                size: size as GuestUSize,
+                format,
+                rate: samplerate,
+            },
+        );
+    }
     alBufferData(env, buffer, format, data, size, samplerate);
 }
 
@@ -938,14 +1288,29 @@ fn alcGetEnumValue(
 ) -> ALenum {
     todo!();
 }
+/// Stub: answers the common device queries with plausible fixed values
+/// (reporting OpenAL 1.1 with 44.1 kHz output) rather than asking the host
+/// OpenAL, and reports 0 for anything else. Only the first value is written.
 fn alcGetIntegerv(
-    _env: &mut Environment,
+    env: &mut Environment,
     _device: MutPtr<GuestALCdevice>,
-    _param: ALenum,
-    _size: ALCsizei,
-    _values: MutPtr<ALCint>,
+    param: ALenum,
+    size: ALCsizei,
+    values: MutPtr<ALCint>,
 ) {
-    todo!();
+    log_once!("TODO: alcGetIntegerv() is a stub that returns fixed values");
+    if size < 1 || values.is_null() {
+        return;
+    }
+    let value: ALCint = match param {
+        0x1000 => 1,     // ALC_MAJOR_VERSION
+        0x1001 => 1,     // ALC_MINOR_VERSION
+        0x1007 => 44100, // ALC_FREQUENCY
+        0x1010 => 255,   // ALC_MONO_SOURCES
+        0x1011 => 1,     // ALC_STEREO_SOURCES
+        _ => 0,          // includes ALC_ATTRIBUTES_SIZE and ALC_ALL_ATTRIBUTES: no attributes
+    };
+    env.mem.write(values, value);
 }
 fn alcIsExtensionPresent(
     _env: &mut Environment,

@@ -38,6 +38,17 @@ fn NSClassFromString(env: &mut Environment, string: id) -> Class {
     // so this could be troublesome. So, let's use get_known_class, which panics
     // when it can't find the class. We could except certain classes or apps if
     // we need to.
+    if env.options.ignore_unknown_selectors {
+        // Compatibility mode: answer like iOS would for a class that is not
+        // there (nil) instead of stopping the app.
+        return match env.objc.try_get_known_class(&string, &mut env.mem) {
+            Some(class) => class,
+            None => {
+                log!("NSClassFromString({:?}): no such class, returning nil", string);
+                nil
+            }
+        };
+    }
     env.objc.get_known_class(&string, &mut env.mem)
 }
 

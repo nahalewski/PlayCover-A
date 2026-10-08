@@ -18,7 +18,8 @@ use super::cg_image::{
     self, kCGBitmapAlphaInfoMask, kCGBitmapByteOrderMask, kCGImageAlphaFirst, kCGImageAlphaLast,
     kCGImageAlphaNone, kCGImageAlphaNoneSkipFirst, kCGImageAlphaNoneSkipLast, kCGImageAlphaOnly,
     kCGImageAlphaPremultipliedFirst, kCGImageAlphaPremultipliedLast, kCGImageByteOrder32Big,
-    kCGImageByteOrderDefault, CGBitmapInfo, CGImageAlphaInfo, CGImageRef,
+    kCGImageByteOrder32Little, kCGImageByteOrderDefault, CGBitmapInfo, CGImageAlphaInfo,
+    CGImageRef,
 };
 use super::{CGFloat, CGPoint, CGRect};
 use crate::dyld::{export_c_func, FunctionExports};
@@ -37,6 +38,7 @@ pub(super) struct CGBitmapContextData {
     bytes_per_row: GuestUSize,
     color_space: &'static str,
     alpha_info: CGImageAlphaInfo,
+    byte_order: CGBitmapInfo,
 }
 
 pub fn CGBitmapContextCreate(
@@ -58,6 +60,8 @@ pub fn CGBitmapContextCreate(
         kCGColorSpaceGenericGray => components_for_gray(bitmap_info).unwrap(),
         _ => unimplemented!("support other color spaces"),
     };
+    let minimum_stride = width.checked_mul(component_count).unwrap();
+    assert!(bytes_per_row == 0 || bytes_per_row >= minimum_stride);
 
     let (data, data_is_owned, bytes_per_row) = if data.is_null() {
         let bytes_per_row = if bytes_per_row == 0 {
@@ -83,6 +87,7 @@ pub fn CGBitmapContextCreate(
             bytes_per_row,
             color_space,
             alpha_info: bitmap_info & kCGBitmapAlphaInfoMask,
+            byte_order: bitmap_info & kCGBitmapByteOrderMask,
         }),
         // TODO: is this the correct default?
         rgb_fill_color: (0.0, 0.0, 0.0, 0.0),
@@ -90,6 +95,10 @@ pub fn CGBitmapContextCreate(
         font_size: 14.0,
         transform: CGAffineTransformIdentity,
         blend_mode: kCGBlendModeNormal,
+        alpha: 1.0,
+        rendering_intent: 0,
+        should_antialias: true,
+        allows_antialias: true,
         text_transform: None,
         state_stack: Vec::new(),
     };
@@ -125,26 +134,19 @@ fn CGBitmapContextGetBytesPerRow(env: &mut Environment, context: CGContextRef) -
 }
 
 pub fn CGBitmapContextCreateImage(env: &mut Environment, context: CGContextRef) -> CGImageRef {
-    // TODO: Image::from_pixel_vec() should not exist, and this function should
-    // support any bitmap format.
     let host_obj = env.objc.borrow::<CGContextHostObject>(context);
     let CGContextSubclass::CGBitmapContext(bitmap_data) = host_obj.subclass;
-    assert!(
-        bitmap_data.bits_per_component == 8
-            && bitmap_data.bytes_per_row == bitmap_data.width * 4
-            && bitmap_data.color_space == kCGColorSpaceGenericRGB
-            && matches!(
-                bitmap_data.alpha_info,
-                kCGImageAlphaNoneSkipLast | kCGImageAlphaPremultipliedLast
-            )
-    );
-    let pixels = env
-        .mem
-        .bytes_at(
+    assert_eq!(bitmap_data.color_space, kCGColorSpaceGenericRGB);
+    let pixels = cg_image::rgb_pixels_to_rgba(
+        env.mem.bytes_at(
             bitmap_data.data.cast(),
             bitmap_data.bytes_per_row * bitmap_data.height,
-        )
-        .to_vec();
+        ),
+        bitmap_data.width,
+        bitmap_data.height,
+        bitmap_data.bytes_per_row,
+        bitmap_data.alpha_info | bitmap_data.byte_order,
+    );
     cg_image::from_image(
         env,
         Image::from_pixel_vec(pixels, (bitmap_data.width, bitmap_data.height)),
@@ -153,13 +155,21 @@ pub fn CGBitmapContextCreateImage(env: &mut Environment, context: CGContextRef) 
 
 fn components_for_rgb(bitmap_info: CGBitmapInfo) -> Result<GuestUSize, ()> {
     let byte_order = bitmap_info & kCGBitmapByteOrderMask;
-    if byte_order != kCGImageByteOrderDefault && byte_order != kCGImageByteOrder32Big {
+    if byte_order != kCGImageByteOrderDefault
+        && byte_order != kCGImageByteOrder32Big
+        && byte_order != kCGImageByteOrder32Little
+    {
         return Err(()); // TODO: handle other byte orders
     }
 
     let alpha_info = bitmap_info & kCGBitmapAlphaInfoMask;
     if (alpha_info | byte_order) != bitmap_info {
         return Err(()); // TODO: handle other cases (float)
+    }
+    if byte_order == kCGImageByteOrder32Little
+        && matches!(alpha_info, kCGImageAlphaNone | kCGImageAlphaOnly)
+    {
+        return Err(());
     }
     match alpha_info & kCGBitmapAlphaInfoMask {
         kCGImageAlphaNone => Ok(3), // RGB
@@ -206,7 +216,7 @@ fn bytes_per_pixel(data: &CGBitmapContextData) -> GuestUSize {
     } = data;
     assert!(bits_per_component == 8);
     match color_space {
-        kCGColorSpaceGenericRGB => components_for_rgb(alpha_info).unwrap(),
+        kCGColorSpaceGenericRGB => components_for_rgb(alpha_info | data.byte_order).unwrap(),
         kCGColorSpaceGenericGray => components_for_gray(alpha_info).unwrap(),
         _ => unimplemented!("support other color spaces"),
     }
@@ -286,17 +296,7 @@ fn blend_premultiplied(
 /// per component offsets (r, g, b, a)
 fn pixel_offsets(data: &CGBitmapContextData) -> (usize, usize, usize, Option<usize>) {
     match data.color_space {
-        kCGColorSpaceGenericRGB => {
-            match data.alpha_info {
-                kCGImageAlphaNone => (0, 1, 2, None),
-                kCGImageAlphaPremultipliedLast | kCGImageAlphaLast => (0, 1, 2, Some(3)),
-                kCGImageAlphaPremultipliedFirst | kCGImageAlphaFirst => (1, 2, 3, Some(0)),
-                kCGImageAlphaNoneSkipLast => (0, 1, 2, None),
-                kCGImageAlphaNoneSkipFirst => (1, 2, 3, None),
-                kCGImageAlphaOnly => (0, 0, 0, Some(0)),
-                _ => unreachable!(), // checked by bytes_per_pixel
-            }
-        }
+        kCGColorSpaceGenericRGB => cg_image::rgb_pixel_offsets(data.alpha_info | data.byte_order),
         kCGColorSpaceGenericGray => {
             // TODO: this is probably isn't doing RGB to grayscale conversion
             // properly
@@ -347,6 +347,7 @@ fn put_pixel(
     pixel: (CGFloat, CGFloat, CGFloat, CGFloat),
     blend: bool,
     blend_mode: CGBlendMode,
+    coverage: f32,
 ) {
     let (x, y) = coords;
     if x < 0 || y < 0 {
@@ -368,7 +369,7 @@ fn put_pixel(
 
     // Blending like this must be done in linear RGB, so this must come before
     // gamma encoding.
-    let (r, g, b, a) = if blend {
+    let composed = if blend && blend_mode != kCGBlendModeCopy {
         match data.alpha_info {
             kCGImageAlphaLast | kCGImageAlphaFirst => blend_straight(bg_pixel, pixel, blend_mode),
             kCGImageAlphaPremultipliedLast | kCGImageAlphaPremultipliedFirst => {
@@ -388,6 +389,11 @@ fn put_pixel(
     } else {
         pixel
     };
+    let premultiplied = matches!(
+        data.alpha_info,
+        kCGImageAlphaPremultipliedLast | kCGImageAlphaPremultipliedFirst
+    );
+    let (r, g, b, a) = mix_coverage(bg_pixel, composed, coverage, premultiplied);
 
     // Alpha is always linear.
     let (r, g, b) = (gamma_encode(r), gamma_encode(g), gamma_encode(b));
@@ -407,12 +413,50 @@ fn put_pixel(
     }
 }
 
-/// Abstract interface for use by host code that wants to draw in a bitmap
-/// context.
+fn scale_opacity(
+    color: (f32, f32, f32, f32),
+    opacity: f32,
+    premultiplied: bool,
+) -> (f32, f32, f32, f32) {
+    let rgb = if premultiplied { opacity } else { 1.0 };
+    (
+        color.0 * rgb,
+        color.1 * rgb,
+        color.2 * rgb,
+        color.3 * opacity,
+    )
+}
+
+/// Coverage interpolates the completed blend, so Copy also preserves the
+/// uncovered part of a boundary pixel, including when copying transparent ink.
+fn mix_coverage(
+    bg: (f32, f32, f32, f32),
+    fg: (f32, f32, f32, f32),
+    coverage: f32,
+    premultiplied: bool,
+) -> (f32, f32, f32, f32) {
+    if coverage == 1.0 {
+        return fg;
+    }
+    let a = bg.3 * (1.0 - coverage) + fg.3 * coverage;
+    let bg_scale = if premultiplied { 1.0 } else { bg.3 };
+    let fg_scale = if premultiplied { 1.0 } else { fg.3 };
+    let divisor = if premultiplied { 1.0 } else { a };
+    if divisor == 0.0 {
+        return (0.0, 0.0, 0.0, a);
+    }
+    let mix =
+        |b: f32, f: f32| (b * bg_scale * (1.0 - coverage) + f * fg_scale * coverage) / divisor;
+    (mix(bg.0, fg.0), mix(bg.1, fg.1), mix(bg.2, fg.2), a)
+}
+
+/// Abstract interface for host code drawing in a bitmap context.
 pub struct CGBitmapContextDrawer<'a> {
     bitmap_info: CGBitmapContextData,
     rgb_fill_color: (CGFloat, CGFloat, CGFloat, CGFloat),
     blend_mode: CGBlendMode,
+    alpha: CGFloat,
+    antialias: bool,
     transform: CGAffineTransform,
     pixels: &'a mut [u8],
 }
@@ -427,6 +471,9 @@ impl CGBitmapContextDrawer<'_> {
             rgb_fill_color,
             transform,
             blend_mode,
+            alpha,
+            should_antialias,
+            allows_antialias,
             ..
         } = objc.borrow(context);
 
@@ -436,6 +483,8 @@ impl CGBitmapContextDrawer<'_> {
             bitmap_info,
             rgb_fill_color,
             blend_mode,
+            alpha,
+            antialias: should_antialias && allows_antialias,
             transform,
             pixels,
         }
@@ -473,6 +522,24 @@ impl CGBitmapContextDrawer<'_> {
         color: (CGFloat, CGFloat, CGFloat, CGFloat),
         blend: bool,
     ) {
+        self.put_pixel_covered(coords, color, blend, 1.0)
+    }
+
+    fn put_pixel_covered(
+        &mut self,
+        coords: (i32, i32),
+        color: (CGFloat, CGFloat, CGFloat, CGFloat),
+        blend: bool,
+        coverage: f32,
+    ) {
+        let color = scale_opacity(
+            color,
+            self.alpha,
+            matches!(
+                self.bitmap_info.alpha_info,
+                kCGImageAlphaPremultipliedLast | kCGImageAlphaPremultipliedFirst
+            ),
+        );
         put_pixel(
             &self.bitmap_info,
             self.pixels,
@@ -480,6 +547,7 @@ impl CGBitmapContextDrawer<'_> {
             color,
             blend,
             self.blend_mode,
+            coverage,
         )
     }
 
@@ -530,6 +598,41 @@ impl CGBitmapContextDrawer<'_> {
 
 #[cfg(test)]
 #[test]
+fn little_endian_bitmap_rasterizer_writes_guest_bgra() {
+    let mut data = CGBitmapContextData {
+        data: Ptr::null(),
+        data_is_owned: false,
+        width: 1,
+        height: 1,
+        bits_per_component: 8,
+        bytes_per_row: 4,
+        color_space: kCGColorSpaceGenericRGB,
+        alpha_info: kCGImageAlphaPremultipliedFirst,
+        byte_order: kCGImageByteOrder32Little,
+    };
+    let mut bytes = [0; 4];
+    put_pixel(
+        &data,
+        &mut bytes,
+        (0, 0),
+        (gamma_decode(0.4), gamma_decode(0.2), gamma_decode(0.1), 0.5),
+        false,
+        kCGBlendModeCopy,
+        1.0,
+    );
+    assert!((bytes[0] as i32 - 25).abs() <= 1);
+    assert!((bytes[1] as i32 - 51).abs() <= 1);
+    assert!((bytes[2] as i32 - 102).abs() <= 1);
+    assert_eq!(bytes[3], 127);
+    let pixel = get_pixel(&data, &mut bytes, 0);
+    assert!((pixel.0 - gamma_decode(0.4)).abs() < 0.005);
+    assert!((pixel.3 - 0.5).abs() < 0.005);
+    data.alpha_info = kCGImageAlphaNoneSkipFirst;
+    assert_eq!(get_pixel(&data, &mut bytes, 0).3, 1.0);
+}
+
+#[cfg(test)]
+#[test]
 fn test_iter_transformed_pixels() {
     use super::CGSize;
 
@@ -548,9 +651,12 @@ fn test_iter_transformed_pixels() {
                 bytes_per_row: 3 * width,
                 color_space: "kCGColorSpaceGenericRGB",
                 alpha_info: 0,
+                byte_order: kCGImageByteOrderDefault,
             },
             rgb_fill_color: (0.0, 0.0, 0.0, 0.0),
             blend_mode: kCGBlendModeNormal,
+            alpha: 1.0,
+            antialias: true,
             transform,
             pixels: &mut [],
         }
@@ -632,10 +738,85 @@ pub(super) fn fill_rect(env: &mut Environment, context: CGContextRef, rect: CGRe
     } else {
         drawer.rgb_fill_color()
     };
-    // TODO: correct anti-aliasing
+    if !clear && drawer.antialias {
+        let bounds = drawer.transform.apply_to_rect(rect);
+        let inverse = drawer.transform.invert();
+        let x0 = bounds.origin.x.floor().max(0.0) as i32;
+        let y0 = bounds.origin.y.floor().max(0.0) as i32;
+        let x1 = (bounds.origin.x + bounds.size.width)
+            .ceil()
+            .min(drawer.width() as f32) as i32;
+        let y1 = (bounds.origin.y + bounds.size.height)
+            .ceil()
+            .min(drawer.height() as f32) as i32;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let coverage = rect_coverage(rect, inverse, x, y);
+                if coverage > 0.0 {
+                    drawer.put_pixel_covered((x, y), color, true, coverage);
+                }
+            }
+        }
+        return;
+    }
     for ((x, y), _) in drawer.iter_transformed_pixels(rect) {
         drawer.put_pixel((x, y), color, /* blend: */ !clear)
     }
+}
+
+/// Fixed 4x4 coverage sampling supports rotated/fractional rectangle edges.
+fn rect_coverage(rect: CGRect, inverse: CGAffineTransform, x: i32, y: i32) -> f32 {
+    if rect.size.width <= 0.0 || rect.size.height <= 0.0 {
+        return 0.0;
+    }
+    let mut count = 0;
+    for sy in 0..4 {
+        for sx in 0..4 {
+            let p = inverse.apply_to_point(CGPoint {
+                x: x as f32 + (sx as f32 + 0.5) / 4.0,
+                y: y as f32 + (sy as f32 + 0.5) / 4.0,
+            });
+            if p.x >= rect.origin.x
+                && p.x < rect.origin.x + rect.size.width
+                && p.y >= rect.origin.y
+                && p.y < rect.origin.y + rect.size.height
+            {
+                count += 1;
+            }
+        }
+    }
+    count as f32 / 16.0
+}
+
+#[test]
+fn global_alpha_and_fractional_rectangle_coverage() {
+    // Copying transparent ink over half a pixel must keep half its backdrop.
+    assert_eq!(
+        mix_coverage((0.2, 0.4, 0.6, 1.0), (0.0, 0.0, 0.0, 0.0), 0.5, false),
+        (0.2, 0.4, 0.6, 0.5)
+    );
+    assert_eq!(
+        mix_coverage((0.2, 0.4, 0.6, 1.0), (0.0, 0.0, 0.0, 0.0), 0.5, true),
+        (0.1, 0.2, 0.3, 0.5)
+    );
+    assert_eq!(
+        scale_opacity((0.4, 0.2, 0.1, 0.5), 0.5, true),
+        (0.2, 0.1, 0.05, 0.25)
+    );
+    assert_eq!(
+        scale_opacity((0.4, 0.2, 0.1, 0.5), 0.5, false),
+        (0.4, 0.2, 0.1, 0.25)
+    );
+    let rect = CGRect {
+        origin: CGPoint { x: 0.5, y: 0.0 },
+        size: super::CGSize {
+            width: 1.0,
+            height: 1.0,
+        },
+    };
+    assert_eq!(rect_coverage(rect, CGAffineTransformIdentity, 0, 0), 0.5);
+    assert_eq!(rect_coverage(rect, CGAffineTransformIdentity, 1, 0), 0.5);
+    assert_eq!(rect_coverage(rect, CGAffineTransformIdentity, 2, 0), 0.0);
 }
 
 /// Implementation of `CGContextDrawImage` for `CGBitmapContext`.

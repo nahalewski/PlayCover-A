@@ -116,6 +116,10 @@ fn fstat_inner(env: &mut Environment, fd: FileDescriptor, buf: MutPtr<stat>) -> 
 
             // TODO: st_size
         }
+        GuestFile::RandomDevice => {
+            // character device
+            stat.st_mode |= 0o020000;
+        }
         _ => unimplemented!(),
     }
 
@@ -172,8 +176,30 @@ fn lstat(env: &mut Environment, path: ConstPtr<u8>, buf: MutPtr<stat>) -> i32 {
     stat(env, path, buf)
 }
 
+fn chmod(env: &mut Environment, path: ConstPtr<u8>, mode: mode_t) -> i32 {
+    // touchHLE's guest file system has no permission bits, so there is nothing
+    // to change. Succeed if the path exists, like a real chmod() would.
+    let path_str = env.mem.cstr_at_utf8(path).unwrap().to_string();
+    let (exists, _, _, _) = env.fs.access(GuestPath::new(&path_str));
+    log!(
+        "TODO: chmod({:?} {:?}, {:#o}) ignored (exists: {})",
+        path,
+        path_str,
+        mode,
+        exists
+    );
+    if exists {
+        set_errno(env, 0);
+        0
+    } else {
+        set_errno(env, ENOENT);
+        -1
+    }
+}
+
 pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(mkdir(_, _)),
+    export_c_func!(chmod(_, _)),
     export_c_func!(fstat(_, _)),
     export_c_func!(stat(_, _)),
     export_c_func!(lstat(_, _)),

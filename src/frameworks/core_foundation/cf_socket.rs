@@ -21,7 +21,7 @@ fn CFSocketCreate(
     callout: MutVoidPtr,
     context: MutVoidPtr,
 ) -> CFTypeRef {
-    assert!(allocator == kCFAllocatorDefault || env.mem.read(allocator).is_system_default()); // unimplemented
+    assert!(allocator.is_null() || allocator == kCFAllocatorDefault || env.mem.read(allocator).is_system_default()); // unimplemented
     log!(
         "TODO: CFSocketCreate({}, {}, {}, {}, {:?}, {:?}) -> NULL",
         protocol_family,

@@ -141,3 +141,11 @@ These are impractical to reimplement, but they are Free Software.
 > >
 > > **END OF TERMS AND CONDITIONS**
 > >
+
+## libc++.1.dylib
+
+* Used by apps built with the iOS 5+ SDK against LLVM libc++ (`std::__1`).
+* Binary origin: compilation of LLVM libc++ 3.4.2 (`llvmorg-3.4.2`, `libcxx/`) with touchHLE's `common-3.0-sdk` toolchain for armv7, base address 0x37800000. Build code: `tools/build_old_libcxx.sh` and `tools/link_old_libcxx.sh` in the PlayCover-A tree (shims for the 2009 SDK headers; `xlocale/*.h` from `apple-oss-distributions/Libc` tag `Libc-594.9.4`).
+* The C++ ABI part (`__cxa_*`, `std::exception` classes, typeinfo vtables) is left undefined and resolved at load time from the bundled libstdc++ and libgcc.
+* Source code: <https://github.com/llvm/llvm-project/tree/llvmorg-3.4.2/libcxx>
+* License: see `COPYING.libcxx` (MIT and University of Illinois/NCSA, per LLVM's libc++ licence).

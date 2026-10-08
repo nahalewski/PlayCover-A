@@ -304,6 +304,13 @@ impl Environment {
     ) -> Result<Environment, String> {
         let startup_time = Instant::now();
 
+        crate::dyld::TRACE_HOST_CALLS
+            .store(options.trace_messages, std::sync::atomic::Ordering::Relaxed);
+        crate::dyld::IGNORE_UNIMPLEMENTED_FUNCTIONS.store(
+            options.ignore_unknown_selectors,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+
         // Enforces the one (real) Environment limit. See `with_yielder` for
         // why this is needed.
         if ENVIRONMENT_INSTANCE_EXISTS.swap(true, std::sync::atomic::Ordering::SeqCst) {
@@ -343,6 +350,50 @@ impl Environment {
                 };
                 log!("App needs non-portrait user interface orientation {:?}, applying device orientation {:?}.", non_portrait_orientation, options.initial_orientation);
             }
+        }
+
+        #[cfg(target_os = "android")]
+        {
+            // Override values: 0 Portrait, 1 LandscapeRight, 2 PortraitUpsideDown,
+            // 3 LandscapeLeft (device orientations; UI landscape names are flipped).
+            let mut mask = 0u32;
+            for o in bundle.supported_interface_orientations() {
+                mask |= match o {
+                    "UIInterfaceOrientationPortrait" => 1 << 0,
+                    "UIInterfaceOrientationLandscapeLeft" => 1 << 1,
+                    "UIInterfaceOrientationPortraitUpsideDown" => 1 << 2,
+                    "UIInterfaceOrientationLandscapeRight" => 1 << 3,
+                    "UIInterfaceOrientationLandscape" => (1 << 1) | (1 << 3),
+                    _ => 0,
+                };
+            }
+            log!(
+                "Supported interface orientations {:?} -> mask {:#06b}",
+                bundle.supported_interface_orientations(),
+                mask
+            );
+            // Many landscape games (LEGO Harry Potter, Secret of Mana) list all
+            // four orientations but only ever lay out landscape content.
+            // iOS launches in the first listed orientation, so when that is a
+            // landscape one, do not follow the device into portrait: on
+            // near-square foldables that would clip the game.
+            let first_is_landscape = bundle
+                .supported_interface_orientations()
+                .first()
+                .is_some_and(|o| o.starts_with("UIInterfaceOrientationLandscape"));
+            // An app (or its default options) can also start in landscape
+            // without declaring it, e.g. Secret of Mana has no orientation keys.
+            let starts_landscape = matches!(
+                options.initial_orientation,
+                window::DeviceOrientation::LandscapeLeft
+                    | window::DeviceOrientation::LandscapeRight
+            );
+            if starts_landscape {
+                mask = 0b1010;
+            } else if first_is_landscape && mask & 0b1010 != 0 {
+                mask &= 0b1010;
+            }
+            window::set_android_supported_orientations(if mask == 0 { 0b1111 } else { mask });
         }
 
         let device_family_override = options.device_family;
@@ -456,6 +507,11 @@ impl Environment {
                 let name = dylib_path.file_name().unwrap();
                 let dylib_slide = match name {
                     "libstdc++.6.dylib" | "libstdc++.6.0.9.dylib" => 0x3748a000,
+                    "libc++.1.dylib" | "libc++.dylib" => {
+                        // Built from LLVM libc++ sources with our OSS toolchain
+                        // (tools/build_libcxx.sh); its base address is already set.
+                        0
+                    }
                     "libgcc_s.1.dylib" => 0x30000000,
                     "libz.1.dylib" | "libz.1.2.3.dylib" | "libz.dylib" | "libz.1.1.3.dylib" => {
                         // We build `libz` from sources with our OSS toolchain,
@@ -497,6 +553,44 @@ impl Environment {
             }
         }
 
+        // The bundled libstdc++ calls into libgcc's exception unwinder (e.g.
+        // `_Unwind_SjLj_Register`), but an app that links libstdc++ doesn't
+        // necessarily list libgcc itself, so load it too in that case.
+        let links = |needle: &str| {
+            executable
+                .dynamic_libraries
+                .iter()
+                .any(|d| d.contains(needle))
+        };
+        // Likewise, an app built against libc++ gets the C++ ABI support
+        // (exceptions, RTTI, `std::exception` classes) from libstdc++ here.
+        if links("libc++") && !links("libstdc++") {
+            let libstdcxx_path = "/usr/lib/libstdc++.6.dylib";
+            if fs.is_file(fs::GuestPath::new(libstdcxx_path)) {
+                let libstdcxx = mach_o::MachO::load_from_file(
+                    fs::GuestPath::new(libstdcxx_path),
+                    &fs,
+                    &mut mem,
+                    /* slide: */ 0x3748a000,
+                )
+                .map_err(|e| format!("Could not load bundled libstdc++: {e}"))?;
+                dylibs.push(libstdcxx);
+            }
+        }
+        if (links("libstdc++") || links("libc++")) && !links("libgcc_s") {
+            let libgcc_path = "/usr/lib/libgcc_s.1.dylib";
+            if fs.is_file(fs::GuestPath::new(libgcc_path)) {
+                let libgcc = mach_o::MachO::load_from_file(
+                    fs::GuestPath::new(libgcc_path),
+                    &fs,
+                    &mut mem,
+                    /* slide: */ 0x30000000,
+                )
+                .map_err(|e| format!("Could not load bundled libgcc: {e}"))?;
+                dylibs.push(libgcc);
+            }
+        }
+
         let entry_point_addr = executable
             .entry_point_pc
             .ok_or_else(|| {
@@ -525,6 +619,7 @@ impl Environment {
             let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 env.with_yielder(yielder, move |env| {
                     echo!("CPU emulation begins now.");
+                    install_guest_probes(env);
                     // Some apps use the stack inside the static initializer.
                     // While properly behaving apps should be fine, some app
                     // will try to poke the top of the stack, so we'll give
@@ -1590,6 +1685,9 @@ impl Environment {
                 // instruction after the SVC, but we want the
                 // address of the SVC itself.
                 let svc_pc = self.cpu.regs()[cpu::Cpu::PC] - 4;
+                if let Some(next) = handle_guest_probe(self, svc, svc_pc) {
+                    return next;
+                }
                 match svc {
                     dyld::Dyld::SVC_RETURN_TO_HOST => {
                         assert!(
@@ -2141,4 +2239,55 @@ mod dylib_sorting_tests {
             "Sort should detect self-dependency as a cycle and return an error"
         );
     }
+}
+
+/// Debug aid for `--probe-guest=ADDR,...`: the first time guest ARM code runs
+/// at each address, log it with the argument registers. Works by planting an
+/// SVC over the first instruction and putting the original back when it fires.
+static GUEST_PROBES: std::sync::Mutex<Vec<(u32, u32)>> = std::sync::Mutex::new(Vec::new());
+const GUEST_PROBE_SVC_BASE: u32 = 0x00f0_0000;
+
+fn install_guest_probes(env: &mut Environment) {
+    let addrs = env.options.probe_guest.clone();
+    let mut probes = GUEST_PROBES.lock().unwrap();
+    for (i, addr) in addrs.into_iter().enumerate() {
+        let ptr: mem::MutPtr<u32> = mem::Ptr::from_bits(addr);
+        let original = env.mem.read(ptr);
+        env.mem.write(ptr, 0xef00_0000 | (GUEST_PROBE_SVC_BASE + i as u32));
+        env.cpu.invalidate_cache_range(addr, 4);
+        probes.push((addr, original));
+        log!("Probe {} installed at {:#x} (original instruction {:#010x})", i, addr, original);
+    }
+}
+
+fn handle_guest_probe(
+    env: &mut Environment,
+    svc: u32,
+    svc_pc: u32,
+) -> Option<ThreadNextAction> {
+    if !(GUEST_PROBE_SVC_BASE..GUEST_PROBE_SVC_BASE + 0x1000).contains(&svc) {
+        return None;
+    }
+    let (addr, original) = *GUEST_PROBES
+        .lock()
+        .unwrap()
+        .get((svc - GUEST_PROBE_SVC_BASE) as usize)?;
+    let regs = *env.cpu.regs();
+    log!(
+        "PROBE hit {:#x} (first time): r0={:#x} r1={:#x} r2={:#x} r3={:#x} r4={:#x} r5={:#x} r6={:#x} r7={:#x} sp={:#x} lr={:#x}",
+        addr, regs[0], regs[1], regs[2], regs[3], regs[4], regs[5], regs[6], regs[7], regs[13], regs[14]
+    );
+    for (name, value) in [("r0", regs[0]), ("r0+216", regs[0].wrapping_add(216)), ("r1", regs[1])] {
+        if value >= 0x1000 {
+            if let Some(bytes) = env.mem.get_bytes_fallible(mem::Ptr::from_bits(value), 112) {
+                let words: Vec<u32> = bytes.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+                log!("PROBE   [{}] = {:x?}", name, words);
+            }
+        }
+    }
+    let ptr: mem::MutPtr<u32> = mem::Ptr::from_bits(addr);
+    env.mem.write(ptr, original);
+    env.cpu.invalidate_cache_range(addr, 4);
+    env.cpu.regs_mut()[cpu::Cpu::PC] = svc_pc;
+    Some(ThreadNextAction::Continue)
 }

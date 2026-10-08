@@ -14,7 +14,7 @@ use super::ca_eagl_layer::find_fullscreen_eagl_layer;
 use super::ca_layer::CALayerHostObject;
 use crate::frameworks::core_animation::animation;
 use crate::frameworks::core_graphics::cg_color::CGColorHostObject;
-use crate::frameworks::core_graphics::{cg_bitmap_context, cg_image, CGFloat, CGRect};
+use crate::frameworks::core_graphics::{cg_bitmap_context, cg_image, CGFloat, CGRect, CGSize};
 use crate::gles::gles11_raw as gles11; // constants only
 use crate::gles::gles11_raw::types::*;
 use crate::gles::present::{present_frame, FpsCounter};
@@ -142,6 +142,25 @@ pub fn recomposite_if_necessary(env: &mut Environment, force: bool) -> Option<In
         env.window().rotation_matrix(),
         env.window().virtual_cursor_visible_at(),
     );
+
+    {
+        // Diagnostic: report the presentation geometry whenever it changes.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static LAST: AtomicU64 = AtomicU64::new(0);
+        let vp = present_frame_args.0;
+        let drawable = env.window().drawable_size_for_log();
+        let key = (vp.0 as u64) ^ ((vp.1 as u64) << 12) ^ ((vp.2 as u64) << 24)
+            ^ ((vp.3 as u64) << 36) ^ ((drawable.0 as u64) << 48);
+        if LAST.swap(key, Ordering::Relaxed) != key {
+            log!(
+                "composite: viewport {:?}, drawable {:?}, screen fb {}x{}",
+                vp,
+                drawable,
+                fb_width,
+                fb_height
+            );
+        }
+    }
 
     // TODO: draw status bar if it's not hidden
 
@@ -354,7 +373,18 @@ pub fn recomposite_if_necessary(env: &mut Environment, force: bool) -> Option<In
         gles.LoadIdentity();
         gles.BindBuffer(gles11::ARRAY_BUFFER, 0);
         gles.BindBuffer(gles11::ELEMENT_ARRAY_BUFFER, 0);
-        assert_eq!(gles.GetError(), 0);
+        // A GL error here is not fatal: after the app is backgrounded and
+        // resumed on Android the GL state can be briefly invalid. Report it
+        // (once per distinct code) and clear it so the next frame can recover.
+        let mut error = gles.GetError();
+        while error != 0 {
+            use std::sync::atomic::{AtomicU32, Ordering};
+            static LAST: AtomicU32 = AtomicU32::new(0);
+            if LAST.swap(error, Ordering::Relaxed) != error {
+                log!("Warning: GL error {:#x} while compositing the screen; continuing", error);
+            }
+            error = gles.GetError();
+        }
     }
 
     // Present our rendered frame (bound to TEXTURE_2D). This copies it to the
@@ -590,6 +620,47 @@ unsafe fn composite_layer_recursive(
 
     // Draw texture, if any
     if need_texture {
+        // Gravity positions bitmap contents independently of the background
+        // and sublayer coordinate space. Internal backing buffers include the
+        // resolution multiplier; authored CGImages contain logical pixels.
+        let content_size = if host_obj.contents != nil {
+            let (width, height) = cg_image::borrow_image(&env.objc, host_obj.contents).dimensions();
+            CGSize {
+                width: width as f32,
+                height: height as f32,
+            }
+        } else if let Some((_, width, height)) = &host_obj.presented_pixels {
+            let scale = env.options.scale_hack.get() as f32;
+            CGSize {
+                width: *width as f32 / scale,
+                height: *height as f32 / scale,
+            }
+        } else if let Some(context) = host_obj.cg_context {
+            let (width, height, _) = cg_bitmap_context::get_data(&env.objc, context);
+            let scale = env.options.scale_hack.get() as f32;
+            CGSize {
+                width: width as f32 / scale,
+                height: height as f32 / scale,
+            }
+        } else {
+            host_obj.bounds.size
+        };
+        let source_rect = host_obj.contents_source_rect;
+        let content_size = CGSize {
+            width: content_size.width * source_rect.size.width,
+            height: content_size.height * source_rect.size.height,
+        };
+        let rect = super::ca_layer::contents_rect(
+            host_obj.bounds,
+            content_size,
+            &host_obj.contents_gravity,
+        );
+        load_matrix(
+            gles.as_mut(),
+            Matrix::<4>::from(&Matrix::scale_2d(rect.size.width, rect.size.height))
+                .multiply(&Matrix::translate_3d(rect.origin.x, rect.origin.y, 0.0))
+                .multiply(&cumulative_transform),
+        );
         let misc = env
             .framework_state
             .core_animation
@@ -599,7 +670,11 @@ unsafe fn composite_layer_recursive(
             .unwrap();
 
         gles.Color4f(opacity, opacity, opacity, opacity);
-        if opacity == 1.0 && host_obj.opaque && !have_background {
+        // An image set as a layer's contents keeps its own alpha even when the layer
+        // is flagged opaque (apps such as the Sonic ports do this for their
+        // translucent controls), so only skip blending for layers drawn from a
+        // context or the app's own GL surface.
+        if opacity == 1.0 && host_obj.opaque && !have_background && host_obj.contents == nil {
             gles.Disable(gles11::BLEND);
         } else {
             gles.Enable(gles11::BLEND);
@@ -613,15 +688,14 @@ unsafe fn composite_layer_recursive(
         gles.EnableClientState(gles11::TEXTURE_COORD_ARRAY);
         // Normal images will have top-to-bottom row order, but OpenGL ES
         // expects bottom-to-top, so flip the UVs in that case.
-        gles.BindBuffer(
-            gles11::ARRAY_BUFFER,
-            if host_obj.contents != nil {
-                misc.basic_square_buffer
-            } else {
-                misc.flipped_square_buffer
-            },
+        let texture_coords = contents_texture_coords(source_rect, host_obj.contents == nil);
+        gles.BindBuffer(gles11::ARRAY_BUFFER, 0);
+        gles.TexCoordPointer(
+            2,
+            gles11::FLOAT,
+            0,
+            texture_coords.as_ptr() as *const GLvoid,
         );
-        gles.TexCoordPointer(2, gles11::FLOAT, 0, 0 as *const GLvoid);
         gles.Enable(gles11::TEXTURE_2D);
         gles.DrawElements(
             gles11::TRIANGLES,
@@ -647,6 +721,35 @@ unsafe fn composite_layer_recursive(
 }
 
 const FLOATS_PER_POINT: usize = 2;
+fn contents_texture_coords(rect: CGRect, flipped: bool) -> [f32; 8] {
+    let mut result = BASIC_SQUARE_POINTS;
+    for point in result.chunks_exact_mut(2) {
+        point[0] = rect.origin.x + point[0] * rect.size.width;
+        let y = rect.origin.y + point[1] * rect.size.height;
+        point[1] = if flipped { 1.0 - y } else { y };
+    }
+    result
+}
+
+#[test]
+fn contents_crop_preserves_bitmap_orientation() {
+    use crate::frameworks::core_graphics::CGPoint;
+    let rect = CGRect {
+        origin: CGPoint { x: 0.25, y: 0.125 },
+        size: CGSize {
+            width: 0.5,
+            height: 0.25,
+        },
+    };
+    assert_eq!(
+        contents_texture_coords(rect, false),
+        [0.25, 0.375, 0.25, 0.125, 0.75, 0.375, 0.75, 0.125]
+    );
+    assert_eq!(
+        contents_texture_coords(rect, true),
+        [0.25, 0.625, 0.25, 0.875, 0.75, 0.625, 0.75, 0.875]
+    );
+}
 const BASIC_SQUARE_POINTS: [f32; 4 * FLOATS_PER_POINT] = [0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0];
 const SQUARE_INDICES: [u8; 6] = [0, 1, 2, 2, 1, 3];
 const FLIPPED_SQUARE_POINTS: [f32; 4 * FLOATS_PER_POINT] = [0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0];

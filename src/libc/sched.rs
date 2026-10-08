@@ -16,4 +16,17 @@ fn sched_yield(env: &mut Environment) -> i32 {
     0 // success
 }
 
-pub const FUNCTIONS: FunctionExports = &[export_c_func!(sched_yield())];
+// Values that iPhone OS / Darwin reports for all policies (SCHED_OTHER,
+// SCHED_RR, SCHED_FIFO). touchHLE ignores thread priorities anyway.
+fn sched_get_priority_min(_env: &mut Environment, _policy: i32) -> i32 {
+    15
+}
+fn sched_get_priority_max(_env: &mut Environment, _policy: i32) -> i32 {
+    47
+}
+
+pub const FUNCTIONS: FunctionExports = &[
+    export_c_func!(sched_yield()),
+    export_c_func!(sched_get_priority_min(_)),
+    export_c_func!(sched_get_priority_max(_)),
+];

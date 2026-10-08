@@ -272,6 +272,11 @@ impl ObjC {
 }
 
 /// Standard Objective-C runtime function for selector registration.
+/// `sel_getUid()` is the old name for `sel_registerName()`.
+pub(super) fn sel_getUid(env: &mut Environment, name: ConstPtr<u8>) -> SEL {
+    sel_registerName(env, name)
+}
+
 pub(super) fn sel_registerName(env: &mut Environment, name: ConstPtr<u8>) -> SEL {
     let name = env.mem.cstr_at_utf8(name).unwrap();
 

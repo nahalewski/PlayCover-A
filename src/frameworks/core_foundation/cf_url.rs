@@ -61,7 +61,7 @@ pub fn CFURLCreateFromFileSystemRepresentation(
     buffer_size: CFIndex,
     is_directory: bool,
 ) -> CFURLRef {
-    assert!(allocator == kCFAllocatorDefault || env.mem.read(allocator).is_system_default()); // unimplemented
+    assert!(allocator.is_null() || allocator == kCFAllocatorDefault || env.mem.read(allocator).is_system_default()); // unimplemented
 
     let buffer_size: NSUInteger = buffer_size.try_into().unwrap();
 
@@ -84,7 +84,7 @@ fn CFURLCreateWithBytes(
     encoding: CFStringEncoding,
     base_url: CFURLRef,
 ) -> CFURLRef {
-    assert!(allocator == kCFAllocatorDefault || env.mem.read(allocator).is_system_default()); // unimplemented
+    assert!(allocator.is_null() || allocator == kCFAllocatorDefault || env.mem.read(allocator).is_system_default()); // unimplemented
     assert_eq!(encoding, kCFStringEncodingASCII); // TODO
     assert!(base_url.is_null()); // TODO
 
@@ -117,10 +117,44 @@ fn CFURLCreateWithFileSystemPath(
     style: CFURLPathStyle,
     is_directory: bool,
 ) -> CFURLRef {
-    assert!(allocator == kCFAllocatorDefault || env.mem.read(allocator).is_system_default()); // unimplemented
+    assert!(allocator.is_null() || allocator == kCFAllocatorDefault || env.mem.read(allocator).is_system_default()); // unimplemented
     assert_eq!(style, kCFURLPOSIXPathStyle);
     let url: id = msg_class![env; NSURL alloc];
     msg![env; url initFileURLWithPath:file_path isDirectory:is_directory]
+}
+
+/// `CFURLCreateStringByAddingPercentEscapes()`: escapes every byte that is not
+/// alphanumeric, a URL-legal character or in `leave_unescaped`; characters in
+/// `legal_to_escape` are escaped even when they are legal. Text is taken as
+/// UTF-8 whatever `encoding` says.
+fn CFURLCreateStringByAddingPercentEscapes(
+    env: &mut Environment,
+    allocator: CFAllocatorRef,
+    original: CFStringRef,
+    leave_unescaped: CFStringRef,
+    legal_to_escape: CFStringRef,
+    _encoding: CFStringEncoding,
+) -> CFStringRef {
+    assert!(allocator.is_null() || allocator == kCFAllocatorDefault || env.mem.read(allocator).is_system_default()); // unimplemented
+    if original.is_null() {
+        return original;
+    }
+    let text = to_rust_string(env, original);
+    let keep: String = if leave_unescaped.is_null() { String::new() } else { to_rust_string(env, leave_unescaped).into_owned() };
+    let escape: String = if legal_to_escape.is_null() { String::new() } else { to_rust_string(env, legal_to_escape).into_owned() };
+    const LEGAL: &str = "-._~:/?#[]@!$&'()*+,;=";
+    let mut out = String::with_capacity(text.len());
+    for byte in text.bytes() {
+        let c = byte as char;
+        let legal = byte.is_ascii_alphanumeric() || LEGAL.contains(c);
+        let keep_it = (legal && !escape.contains(c)) || (byte.is_ascii() && keep.contains(c));
+        if keep_it {
+            out.push(c);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    crate::frameworks::foundation::ns_string::from_rust_string(env, out)
 }
 
 fn CFURLCreateWithString(
@@ -129,7 +163,7 @@ fn CFURLCreateWithString(
     url_string: CFStringRef,
     base_url: CFURLRef,
 ) -> CFURLRef {
-    assert!(allocator == kCFAllocatorDefault || env.mem.read(allocator).is_system_default()); // unimplemented
+    assert!(allocator.is_null() || allocator == kCFAllocatorDefault || env.mem.read(allocator).is_system_default()); // unimplemented
     assert!(base_url.is_null()); // TODO
     let url: id = msg_class![env; NSURL alloc];
     msg![env; url initWithString:url_string]
@@ -158,7 +192,7 @@ fn CFURLCreateCopyAppendingPathComponent(
     path_component: CFStringRef,
     is_directory: bool,
 ) -> CFURLRef {
-    assert!(allocator == kCFAllocatorDefault || env.mem.read(allocator).is_system_default()); // unimplemented
+    assert!(allocator.is_null() || allocator == kCFAllocatorDefault || env.mem.read(allocator).is_system_default()); // unimplemented
     let new_url =
         msg![env; url URLByAppendingPathComponent:path_component isDirectory:is_directory];
     msg![env; new_url copy]
@@ -169,7 +203,7 @@ fn CFURLCreateCopyDeletingLastPathComponent(
     allocator: CFAllocatorRef,
     url: CFURLRef,
 ) -> CFURLRef {
-    assert!(allocator == kCFAllocatorDefault || env.mem.read(allocator).is_system_default()); // unimplemented
+    assert!(allocator.is_null() || allocator == kCFAllocatorDefault || env.mem.read(allocator).is_system_default()); // unimplemented
     let new_url = msg![env; url URLByDeletingLastPathComponent];
     msg![env; new_url copy]
 }
@@ -200,6 +234,7 @@ pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(CFURLCreateWithBytes(_, _, _, _, _)),
     export_c_func!(CFURLCreateWithFileSystemPath(_, _, _, _)),
     export_c_func!(CFURLCreateWithString(_, _, _)),
+    export_c_func!(CFURLCreateStringByAddingPercentEscapes(_, _, _, _, _)),
     export_c_func!(CFURLCopyPathExtension(_)),
     export_c_func!(CFURLCopyFileSystemPath(_, _)),
     export_c_func!(CFURLCreateCopyAppendingPathComponent(_, _, _, _)),

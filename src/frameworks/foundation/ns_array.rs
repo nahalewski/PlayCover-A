@@ -52,6 +52,7 @@ pub const CLASSES: ClassExports = objc_classes! {
 // For the time being, that will always be _touchHLE_NSArray.
 @implementation NSArray: NSObject
 
+
 + (id)allocWithZone:(NSZonePtr)zone {
     // NSArray might be subclassed by something which needs allocWithZone:
     // to have the normal behaviour. Unimplemented: call superclass alloc then.
@@ -248,6 +249,20 @@ pub const CLASSES: ClassExports = objc_classes! {
     true
 }
 
+// Modern Objective-C subscripting: `array[index]`.
+- (id)objectAtIndexedSubscript:(NSUInteger)index {
+    msg![env; this objectAtIndex:index]
+}
+
+- (())getObjects:(MutPtr<id>)objects range:(NSRange)range {
+    let location = range.location;
+    let length = range.length;
+    for i in 0..length {
+        let item: id = msg![env; this objectAtIndex:(location + i)];
+        env.mem.write(objects + i, item);
+    }
+}
+
 @end
 
 // NSMutableArray is an abstract class. A subclass must provide everything
@@ -344,6 +359,16 @@ pub const CLASSES: ClassExports = objc_classes! {
     let other: id = msg_class![env; NSArray alloc];
     let other: id = msg![env; other initWithArray:this];
     other
+}
+
+// `array[index] = object`. Index == count appends, like Cocoa.
+- (())setObject:(id)object atIndexedSubscript:(NSUInteger)index {
+    let count: NSUInteger = msg![env; this count];
+    if index == count {
+        msg![env; this addObject:object]
+    } else {
+        msg![env; this replaceObjectAtIndex:index withObject:object]
+    }
 }
 
 @end
@@ -443,6 +468,15 @@ pub const CLASSES: ClassExports = objc_classes! {
 - (id)objectAtIndex:(NSUInteger)index {
     // TODO: throw real exception rather than panic if out-of-bounds?
     env.objc.borrow::<ArrayHostObject>(this).array[index as usize]
+}
+
+- (())getObjects:(MutPtr<id>)objects range:(NSRange)range {
+    let location = range.location as usize;
+    let length = range.length as usize;
+    let items: Vec<id> = env.objc.borrow::<ArrayHostObject>(this).array[location..location + length].to_vec();
+    for (i, item) in items.into_iter().enumerate() {
+        env.mem.write(objects + i as u32, item);
+    }
 }
 
 - (id)description {

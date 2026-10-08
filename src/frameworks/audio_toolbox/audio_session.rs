@@ -29,6 +29,11 @@ const kAudioSessionProperty_CurrentHardwareOutputVolume: AudioSessionPropertyID 
 const kAudioSessionProperty_PreferredHardwareIOBufferDuration: AudioSessionPropertyID =
     fourcc(b"iobd");
 const kAudioSessionProperty_PreferredHardwareSampleRate: AudioSessionPropertyID = fourcc(b"hwsr");
+// Mixing/routing options. These are accepted but have no effect: there is no
+// other audio to mix with or duck, and no alternate routes to choose between.
+const kAudioSessionProperty_OtherMixableAudioShouldDuck: AudioSessionPropertyID = fourcc(b"duck");
+const kAudioSessionProperty_OverrideCategoryMixWithOthers: AudioSessionPropertyID = fourcc(b"cmix");
+const kAudioSessionProperty_OverrideAudioRoute: AudioSessionPropertyID = fourcc(b"ovrd");
 
 const kAudioSessionCategory_SoloAmbientSound: u32 = fourcc(b"solo");
 const kAudioSessionProperty_CurrentHardwareIOBufferDuration: u32 = fourcc(b"chbd");
@@ -150,7 +155,19 @@ fn AudioSessionSetProperty(
         kAudioSessionProperty_AudioCategory => guest_size_of::<u32>(),
         kAudioSessionProperty_PreferredHardwareIOBufferDuration => guest_size_of::<f32>(),
         kAudioSessionProperty_PreferredHardwareSampleRate => guest_size_of::<f64>(),
-        _ => unimplemented!("Unimplemented property ID: {}", debug_fourcc(in_ID)),
+        kAudioSessionProperty_OtherMixableAudioShouldDuck
+        | kAudioSessionProperty_OverrideCategoryMixWithOthers
+        | kAudioSessionProperty_OverrideAudioRoute => guest_size_of::<u32>(),
+        _ => {
+            // Properties like Amateur Surgeon's 'uifx' only tune the real iOS
+            // audio session; accepting them silently is harmless.
+            log!(
+                "TODO: AudioSessionSetProperty({}, {} bytes) ignored",
+                debug_fourcc(in_ID),
+                in_data_size
+            );
+            return 0;
+        }
     };
     if in_data_size != required_size {
         log!("Warning: AudioSessionSetProperty() failed");

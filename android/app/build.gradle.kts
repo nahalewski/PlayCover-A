@@ -49,9 +49,9 @@ android {
         if (!branding.isEmpty()) {
             applicationIdSuffix = branding.lowercase()
         }
-        resValue("string", "app_name", join("touchHLE", " ", branding))
-        buildConfigField("String", "APP_NAME", "\"${join("touchHLE", " ", branding)}\"")
-        manifestPlaceholders["icon"] = join("@drawable/icon", "_", branding.lowercase())
+        resValue("string", "app_name", join("PlayCover-A", " ", branding))
+        buildConfigField("String", "APP_NAME", "\"${join("PlayCover-A", " ", branding)}\"")
+        manifestPlaceholders["icon"] = "@mipmap/ic_launcher"
         buildConfigField("int", "APP_ICON", join("R.drawable.icon", "_", branding.lowercase()))
         versionName = join(getTouchHLEVersionName(), " ", branding)
 
@@ -170,11 +170,14 @@ cargoNdk {
         "--lib",
         "--no-default-features",
         "--features",
-        "touchHLE_openal_soft_wrapper/static,sdl2/bundled"
+        "touchHLE_openal_soft_wrapper/static,sdl2/bundled,a64"
     )
 }
 
 dependencies {
+    testImplementation("junit:junit:4.13.2")
+    // Android org.json is a stub on the host; use the real parser for JVM tests.
+    testImplementation("org.json:json:20240303")
     implementation(fileTree("libs") {
         include("*.jar")
     })

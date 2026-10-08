@@ -16,7 +16,9 @@ use super::{
 };
 use crate::libc::string::strdup;
 use crate::mach_o::MachO;
-use crate::mem::{guest_size_of, ConstPtr, ConstVoidPtr, GuestUSize, Mem, MutPtr, Ptr, SafeRead};
+use crate::mem::{
+    guest_size_of, ConstPtr, ConstVoidPtr, GuestUSize, Mem, MutPtr, MutVoidPtr, Ptr, SafeRead,
+};
 use crate::Environment;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, VecDeque};
@@ -525,6 +527,16 @@ impl ObjC {
         self.link_class_inner(name, is_metaclass, mem, true)
     }
 
+    /// Like [Self::get_known_class] but returns `None` instead of panicking
+    /// when the class has no implementation (guest-defined classes count).
+    pub fn try_get_known_class(&mut self, name: &str, mem: &mut Mem) -> Option<Class> {
+        if self.classes.contains_key(name) || Self::find_template(name).is_some() {
+            Some(self.get_known_class(name, mem))
+        } else {
+            None
+        }
+    }
+
     /// For use by host functions: get a particular class. If we don't have an
     /// implementation of the class, panic.
     pub fn get_known_class(&mut self, name: &str, mem: &mut Mem) -> Class {
@@ -997,6 +1009,15 @@ impl ObjC {
         )
     }
 
+    /// The superclass of a class (nil for root classes and for placeholders of
+    /// classes we do not implement).
+    pub fn superclass_of(&self, class: Class) -> Class {
+        if class == nil {
+            return nil;
+        }
+        try_class_host_object(self, class).map_or(nil, |host_object| host_object.superclass)
+    }
+
     pub fn is_fake_class(&self, class: Class) -> bool {
         if class == nil {
             return false;
@@ -1008,16 +1029,81 @@ impl ObjC {
 
 pub(super) fn objc_getClass(env: &mut Environment, name: ConstPtr<u8>) -> id {
     let name_str = env.mem.cstr_at_utf8(name).unwrap();
+    match env.objc.get_class(name_str, false, &env.mem) {
+        Some(class) => class,
+        // Compatibility mode: a class that is not there is nil, as on iOS.
+        None if env.options.ignore_unknown_selectors => {
+            log!("objc_getClass({:?}): no such class, returning nil", name_str);
+            nil
+        }
+        None => panic!("objc_getClass() for unimplemented class {name_str}"),
+    }
+}
+
+/// `objc_lookUpClass()`: like `objc_getClass()`, but never stops the app: NULL for a
+/// class that does not exist.
+pub(super) fn objc_lookUpClass(env: &mut Environment, name: ConstPtr<u8>) -> id {
+    let name_str = env.mem.cstr_at_utf8(name).unwrap().to_owned();
     env.objc
-        .get_class(name_str, false, &env.mem)
-        .unwrap_or_else(|| panic!("objc_getClass() for unimplemented class {name_str}"))
+        .try_get_known_class(&name_str, &mut env.mem)
+        .unwrap_or(nil)
+}
+
+/// `objc_copyClassList()`: a malloc()ed, NULL-terminated array of the registered
+/// classes (the caller frees it), with the count written to `out_count`.
+pub(super) fn objc_copyClassList(env: &mut Environment, out_count: MutPtr<u32>) -> MutPtr<Class> {
+    let count = objc_getClassList(env, Ptr::null(), 0);
+    let list: MutPtr<Class> = env.mem.alloc((count as GuestUSize + 1) * 4).cast();
+    objc_getClassList(env, list, count);
+    env.mem.write(list + count as GuestUSize, nil);
+    if !out_count.is_null() {
+        env.mem.write(out_count, count as u32);
+    }
+    list
+}
+
+pub(super) fn class_getName(env: &mut Environment, cls: Class) -> ConstPtr<u8> {
+    if let Some(&cstr) = env.objc.class_name_cstrs.get(&cls) {
+        return cstr;
+    }
+    // Apple's runtime returns "nil" for a nil class.
+    let name = if cls == nil {
+        "nil".to_string()
+    } else {
+        env.objc
+            .try_get_class_name(cls)
+            .unwrap_or("nil")
+            .to_string()
+    };
+    let cstr = env.mem.alloc_and_write_cstr(name.as_bytes()).cast_const();
+    env.objc.class_name_cstrs.insert(cls, cstr);
+    cstr
+}
+
+/// Called by compiled fast-enumeration (`for ... in`) loops when the
+/// collection's mutation counter changed during the loop. Apple's runtime
+/// throws an exception here (it's a programming error).
+pub(super) fn objc_enumerationMutation(_env: &mut Environment, obj: id) {
+    panic!(
+        "objc_enumerationMutation({:?}): collection was mutated while being enumerated",
+        obj
+    );
+}
+
+/// Like [ObjC::borrow] for a [ClassHostObject], but returns [None] for
+/// placeholders ([UnimplementedClass], [FakeClass]) that aren't real classes.
+fn try_class_host_object(objc: &ObjC, class: Class) -> Option<&ClassHostObject> {
+    objc.get_host_object(class)?
+        .as_any()
+        .downcast_ref::<ClassHostObject>()
 }
 
 pub(super) fn class_getSuperclass(env: &mut Environment, cls: Class) -> Class {
     if cls == nil {
         nil
     } else {
-        env.objc.borrow::<ClassHostObject>(cls).superclass
+        // A placeholder for an unimplemented class has no known superclass.
+        try_class_host_object(&env.objc, cls).map_or(nil, |host_object| host_object.superclass)
     }
 }
 
@@ -1100,11 +1186,15 @@ pub(super) fn class_getMethodImplementation(env: &mut Environment, cls: Class, n
     }
     let mut class = cls;
     loop {
-        let &ClassHostObject {
+        let Some(&ClassHostObject {
             superclass: next,
             ref methods,
             ..
-        } = env.objc.borrow(class);
+        }) = try_class_host_object(&env.objc, class)
+        else {
+            // Hit a placeholder for an unimplemented class.
+            return IMP::guest_null();
+        };
         if methods.contains_key(&name) {
             let method = methods.get(&name).unwrap().clone();
             assert!(matches!(method, IMP::Guest(_))); // TODO
@@ -1115,4 +1205,129 @@ pub(super) fn class_getMethodImplementation(env: &mut Environment, cls: Class, n
         }
         class = next;
     }
+}
+
+/// What an Objective-C `Method` handle points to in guest memory.
+///
+/// touchHLE has no real `Method` objects: methods live in each class's
+/// `methods` map. A handle just remembers which class owns the method and its
+/// selector, which is enough to get or replace the implementation (this also
+/// means replacing a method inherited from a superclass changes the
+/// superclass, like on a real runtime).
+#[repr(C, packed)]
+#[derive(Clone, Copy)]
+struct GuestMethod {
+    class: Class,
+    sel: SEL,
+}
+unsafe impl SafeRead for GuestMethod {}
+
+/// Find the class in `cls`'s superclass chain that has a method for `sel`
+/// and make a `Method` handle for it, or return NULL.
+fn make_method_handle(env: &mut Environment, cls: Class, sel: SEL) -> MutVoidPtr {
+    let mut class = cls;
+    while class != nil {
+        let Some(host_object) = try_class_host_object(&env.objc, class) else {
+            break;
+        };
+        if host_object.methods.contains_key(&sel) {
+            return env.mem.alloc_and_write(GuestMethod { class, sel }).cast();
+        }
+        class = host_object.superclass;
+    }
+    Ptr::null()
+}
+
+pub(super) fn class_getInstanceMethod(env: &mut Environment, cls: Class, sel: SEL) -> MutVoidPtr {
+    if cls == nil {
+        return Ptr::null();
+    }
+    make_method_handle(env, cls, sel)
+}
+
+pub(super) fn class_getClassMethod(env: &mut Environment, cls: Class, sel: SEL) -> MutVoidPtr {
+    if cls == nil {
+        return Ptr::null();
+    }
+    // Class methods live on the metaclass.
+    let metaclass = super::ObjC::read_isa(cls, &env.mem);
+    make_method_handle(env, metaclass, sel)
+}
+
+pub(super) fn method_getImplementation(env: &mut Environment, method: MutVoidPtr) -> IMP {
+    if method.is_null() {
+        return IMP::guest_null();
+    }
+    let GuestMethod { class, sel } = env.mem.read(method.cast::<GuestMethod>().cast_const());
+    class_getMethodImplementation(env, class, sel)
+}
+
+/// Returns the previous implementation.
+pub(super) fn method_setImplementation(env: &mut Environment, method: MutVoidPtr, imp: IMP) -> IMP {
+    if method.is_null() {
+        return IMP::guest_null();
+    }
+    let GuestMethod { class, sel } = env.mem.read(method.cast::<GuestMethod>().cast_const());
+    let host_object = env.objc.borrow_mut::<ClassHostObject>(class);
+    host_object
+        .methods
+        .insert(sel, imp)
+        .unwrap_or_else(IMP::guest_null)
+}
+
+pub(super) fn method_exchangeImplementations(
+    env: &mut Environment,
+    method1: MutVoidPtr,
+    method2: MutVoidPtr,
+) {
+    if method1.is_null() || method2.is_null() {
+        return;
+    }
+    let imp1 = method_getImplementation(env, method1);
+    let imp2 = method_getImplementation(env, method2);
+    method_setImplementation(env, method1, imp2);
+    method_setImplementation(env, method2, imp1);
+}
+
+/// Fills `buffer` with up to `buffer_count` of the classes currently
+/// registered (in name order, so the result is stable), and returns the total
+/// number of registered classes. If `buffer` is NULL, only the count is
+/// returned. Apps use this to find, for example, all subclasses of a class.
+pub(super) fn objc_getClassList(
+    env: &mut Environment,
+    buffer: MutPtr<Class>,
+    buffer_count: i32,
+) -> i32 {
+    let mut names: Vec<&String> = env.objc.classes.keys().collect();
+    names.sort();
+    // Skip the placeholders for classes that touchHLE doesn't implement: the
+    // app can't do anything sensible with those.
+    let classes: Vec<Class> = names
+        .iter()
+        .map(|name| env.objc.classes[*name])
+        .filter(|&class| {
+            env.objc.get_host_object(class).is_some_and(|host_object| {
+                host_object
+                    .as_any()
+                    .downcast_ref::<ClassHostObject>()
+                    .is_some()
+            })
+        })
+        .collect();
+    if !buffer.is_null() {
+        let max = usize::try_from(buffer_count).unwrap_or(0);
+        for (i, &class) in classes.iter().take(max).enumerate() {
+            let element: MutPtr<Class> = Ptr::from_bits(buffer.to_bits() + (i as GuestUSize) * 4);
+            env.mem.write(element, class);
+        }
+    }
+    classes.len().try_into().unwrap()
+}
+
+/// Stub: touchHLE doesn't track which protocols classes conform to, so this
+/// always answers "no". Fine for apps that scan all classes looking for ones
+/// that optionally conform to some protocol.
+pub(super) fn class_conformsToProtocol(_env: &mut Environment, _cls: Class, _protocol: id) -> bool {
+    log_once!("TODO: class_conformsToProtocol() is a stub that always returns false");
+    false
 }

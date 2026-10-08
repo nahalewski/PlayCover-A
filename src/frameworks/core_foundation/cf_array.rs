@@ -12,7 +12,7 @@ use super::cf_allocator::{kCFAllocatorDefault, CFAllocatorRef};
 use super::CFIndex;
 use crate::dyld::{export_c_func, FunctionExports};
 use crate::frameworks::foundation::NSUInteger;
-use crate::mem::ConstVoidPtr;
+use crate::mem::{ConstVoidPtr, Ptr};
 use crate::objc::{id, msg, msg_class};
 use crate::Environment;
 
@@ -26,11 +26,30 @@ fn CFArrayCreateMutable(
     capacity: CFIndex,
     callbacks: ConstVoidPtr, // TODO, should be `const CFArrayCallBacks*`
 ) -> CFMutableArrayRef {
-    assert!(allocator == kCFAllocatorDefault || env.mem.read(allocator).is_system_default()); // unimplemented
-    assert!(capacity == 0); // TODO: fixed capacity support
-    assert!(callbacks.is_null()); // TODO: support retaining etc
+    assert!(allocator.is_null() || allocator == kCFAllocatorDefault || env.mem.read(allocator).is_system_default()); // unimplemented
+    if capacity != 0 {
+        // TODO: fixed capacity support. The limit is not enforced; a
+        // well-behaved app never exceeds it, so this is only a warning.
+        log_once!("TODO: CFArrayCreateMutable() capacity limit is not enforced");
+    }
 
-    msg_class![env; _touchHLE_NSMutableArray_non_retaining new]
+    // `CFArrayCallBacks` is { version: CFIndex, retain: fn ptr, release: fn ptr,
+    // copyDescription: fn ptr, equal: fn ptr }. NULL callbacks (or a NULL
+    // retain function) means the array doesn't retain its contents.
+    // TODO: support custom retain/release/equal callbacks. If the retain
+    // function is set, we assume it is the standard CFType one.
+    let retains = !callbacks.is_null() && {
+        let retain_fn: u32 = env
+            .mem
+            .read(Ptr::<u32, false>::from_bits(callbacks.to_bits() + 4));
+        retain_fn != 0
+    };
+
+    if retains {
+        msg_class![env; NSMutableArray new]
+    } else {
+        msg_class![env; _touchHLE_NSMutableArray_non_retaining new]
+    }
 }
 
 fn CFArrayGetCount(env: &mut Environment, array: CFArrayRef) -> CFIndex {
@@ -53,6 +72,21 @@ fn CFArrayRemoveValueAtIndex(env: &mut Environment, array: CFMutableArrayRef, id
     let idx: NSUInteger = idx.try_into().unwrap();
     msg![env; array removeObjectAtIndex:idx]
 }
+
+use crate::dyld::{ConstantExports, HostConstant};
+
+pub const CONSTANTS: ConstantExports = &[(
+    "_kCFTypeArrayCallBacks",
+    HostConstant::Custom(|env| {
+        // CFArrayCallBacks { version, retain, release, copyDescription, equal }.
+        // CFArrayCreateMutable() above only checks that `retain` is non-NULL.
+        let callbacks = env.mem.alloc(20).cast::<u32>();
+        for (i, value) in [0u32, 1, 1, 0, 0].into_iter().enumerate() {
+            env.mem.write(callbacks + i as u32, value);
+        }
+        callbacks.cast().cast_const()
+    }),
+)];
 
 pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(CFArrayCreateMutable(_, _, _)),

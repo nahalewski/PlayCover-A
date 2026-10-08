@@ -8,7 +8,7 @@
 use crate::dyld::FunctionExports;
 use crate::export_c_func;
 use crate::libc::errno::set_errno;
-use crate::mem::MutPtr;
+use crate::mem::{ConstPtr, MutPtr};
 use crate::Environment;
 
 // TODO: struct definition
@@ -27,7 +27,20 @@ fn freeifaddrs(_env: &mut Environment, _ifp: MutPtr<ifaddrs>) {
     // TODO
 }
 
+/// Looks up a network interface index by name. touchHLE only pretends to have
+/// one interface, `en0`; any other name returns 0 (and `ENXIO`).
+fn if_nametoindex(env: &mut Environment, name: ConstPtr<u8>) -> u32 {
+    const ENXIO: i32 = 6;
+    // touchHLE pretends to have a single interface, `en0` (see sysctl.rs).
+    if env.mem.cstr_at_utf8(name) == Ok("en0") {
+        return 1;
+    }
+    set_errno(env, ENXIO);
+    0
+}
+
 pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(getifaddrs(_)),
     export_c_func!(freeifaddrs(_)),
+    export_c_func!(if_nametoindex(_)),
 ];

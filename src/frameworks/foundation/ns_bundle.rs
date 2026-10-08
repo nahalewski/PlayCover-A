@@ -10,9 +10,7 @@ use crate::bundle::Bundle;
 use crate::frameworks::core_foundation::cf_bundle::{
     CFBundleCopyBundleLocalizations, CFBundleCopyPreferredLocalizationsFromArray,
 };
-use crate::frameworks::foundation::ns_string::{
-    from_rust_string, to_rust_string, NSUTF8StringEncoding,
-};
+use crate::frameworks::foundation::ns_string::{from_rust_string, to_rust_string};
 use crate::mem::{ConstVoidPtr, MutPtr, Ptr};
 use crate::objc::{
     autorelease, id, msg, msg_class, nil, objc_classes, release, retain, Class, ClassExports,
@@ -27,14 +25,20 @@ use std::collections::{HashMap, HashSet};
 const LANG_ID_TO_LANG_PROJ: &[(&str, &[&str])] = &[
     ("da", &["Danish.lproj", "da.lproj"]),
     ("nl", &["Dutch.lproj", "nl.lproj"]),
-    ("en", &["English.lproj", "en.lproj"]),
+    ("en", &["English.lproj", "en.lproj", "eng.lproj"]),
     ("fi", &["Finnish.lproj", "fi.lproj"]),
-    ("fr", &["French.lproj", "fr.lproj"]),
-    ("de", &["German.lproj", "de.lproj"]),
-    ("it", &["Italian.lproj", "it.lproj"]),
-    ("ja", &["Japanese.lproj", "ja.lproj"]),
+    (
+        "fr",
+        &["French.lproj", "fr.lproj", "fra.lproj", "fre.lproj"],
+    ),
+    (
+        "de",
+        &["German.lproj", "de.lproj", "deu.lproj", "ger.lproj"],
+    ),
+    ("it", &["Italian.lproj", "it.lproj", "ita.lproj"]),
+    ("ja", &["Japanese.lproj", "ja.lproj", "jpn.lproj"]),
     ("no", &["Norwegian.lproj", "no.lproj"]),
-    ("es", &["Spanish.lproj", "es.lproj"]),
+    ("es", &["Spanish.lproj", "es.lproj", "spa.lproj"]),
     ("sv", &["Swedish.lproj", "sv.lproj"]),
 ];
 
@@ -208,7 +212,7 @@ pub const CLASSES: ClassExports = objc_classes! {
         log!("TODO: language codes {:?} aren't mapped to a language name, falling back to English", unknown_codes);
     }
 
-    for lproj in ["English.lproj", "en.lproj"] {
+    for lproj in ["English.lproj", "en.lproj", "eng.lproj"] {
         let lproj: id = ns_string::get_static_str(env, lproj);
         let path = path_for_resource_helper(env, this, name, lproj, directory, extension);
         if path != nil {
@@ -386,8 +390,17 @@ fn path_for_resource_helper(
     if directory != nil {
         path = msg![env; path stringByAppendingPathComponent:directory];
     }
-    path = msg![env; path stringByAppendingPathComponent:name];
-    if extension != nil {
+    // CFBundle returns the directory with a trailing slash for an empty
+    // resource name (apps such as PopCap games use this to find their resource
+    // directory); stringByAppendingPathComponent: would drop the empty name.
+    let name_is_empty = ns_string::to_rust_string(env, name).is_empty();
+    if name_is_empty {
+        let slash: id = ns_string::get_static_str(env, "/");
+        path = msg![env; path stringByAppendingString:slash];
+    } else {
+        path = msg![env; path stringByAppendingPathComponent:name];
+    }
+    if extension != nil && !name_is_empty {
         path = msg![env; path stringByAppendingPathExtension:extension];
     }
     let file_manager: id = msg_class![env; NSFileManager defaultManager];
@@ -403,22 +416,50 @@ fn path_for_resource_helper(
 /// comments. Returned dictionary is autoreleased, so it's a responsibility of
 /// the caller to retain it.
 /// [String Resources reference](https://developer.apple.com/library/archive/documentation/Cocoa/Conceptual/LoadingResources/Strings/Strings.html#//apple_ref/doc/uid/10000051i-CH6)
+fn decode_strings_text(bytes: &[u8]) -> Result<String, String> {
+    let big_endian = match bytes.get(..2) {
+        Some([0xfe, 0xff]) => Some(true),
+        Some([0xff, 0xfe]) => Some(false),
+        _ => None,
+    };
+    if let Some(big_endian) = big_endian {
+        let bytes = &bytes[2..];
+        if bytes.len() % 2 != 0 {
+            return Err("Odd byte count in UTF-16 strings resource".into());
+        }
+        let units: Vec<u16> = bytes
+            .chunks_exact(2)
+            .map(|pair| {
+                let pair = [pair[0], pair[1]];
+                if big_endian {
+                    u16::from_be_bytes(pair)
+                } else {
+                    u16::from_le_bytes(pair)
+                }
+            })
+            .collect();
+        String::from_utf16(&units).map_err(|error| error.to_string())
+    } else {
+        let bytes = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes);
+        String::from_utf8(bytes.to_vec()).map_err(|error| error.to_string())
+    }
+}
+
 fn load_strings_as_standard_format(env: &mut Environment, dict_url: id) -> id {
     let res: id = msg_class![env; NSMutableDictionary new];
     // TODO: avoid loading whole file in memory
     let data: id = msg_class![env; NSData dataWithContentsOfURL:dict_url];
     assert!(data != nil); // TODO
     let length: NSUInteger = msg![env; data length];
-    assert!(length > 2);
     let bytes: ConstVoidPtr = msg![env; data bytes];
-    let maybe_bom = env.mem.bytes_at(bytes.cast(), 2);
-    assert!(maybe_bom[0..2] != [0xFE, 0xFF] && maybe_bom[0..2] != [0xFF, 0xFE]); // TODO: UTF-16 cases
-    let strings_str = msg_class![env; NSString alloc];
-    let strings_str: id = msg![env; strings_str initWithData:data encoding:NSUTF8StringEncoding];
-    assert!(strings_str != nil); // TODO
+    let text = decode_strings_text(env.mem.bytes_at(bytes.cast(), length))
+        .expect("Invalid strings resource text encoding");
+    let strings_str = from_rust_string(env, text);
 
     let comment_start = ns_string::get_static_str(env, "/*");
     let comment_end = ns_string::get_static_str(env, "*/");
+    let line_comment = ns_string::get_static_str(env, "//");
+    let newline = ns_string::get_static_str(env, "\n");
     let equal_sign = ns_string::get_static_str(env, "=");
     let semicolon = ns_string::get_static_str(env, ";");
 
@@ -427,7 +468,14 @@ fn load_strings_as_standard_format(env: &mut Environment, dict_url: id) -> id {
     let scanner: id = msg_class![env; NSScanner scannerWithString:strings_str];
     release(env, strings_str);
     while !msg![env; scanner isAtEnd] {
-        while msg![env; scanner scanString:comment_start intoString:null_ptr] {
+        loop {
+            if msg![env; scanner scanString:line_comment intoString:null_ptr] {
+                let _: bool = msg![env; scanner scanUpToString:newline intoString:null_ptr];
+                continue;
+            }
+            if !msg![env; scanner scanString:comment_start intoString:null_ptr] {
+                break;
+            }
             // Assume no nested comments!
             let _: bool = msg![env; scanner scanUpToString:comment_end intoString:null_ptr];
             let has_comment_end: bool =
@@ -495,4 +543,42 @@ fn scan_quoted_sanitized(env: &mut Environment, scanner: id) -> id {
     let range: NSRange = msg![env; res rangeOfString:backslash];
     assert!(range.location == NSNotFound as NSUInteger); // TODO
     res
+}
+
+#[cfg(test)]
+mod strings_encoding_tests {
+    use super::decode_strings_text;
+
+    #[test]
+    fn decodes_both_utf16_orders_without_bom_or_unicode_loss() {
+        let text = "// localized\n\"key\" = \"日本語 😀\\n\";";
+        for big_endian in [false, true] {
+            let mut bytes = if big_endian {
+                vec![0xfe, 0xff]
+            } else {
+                vec![0xff, 0xfe]
+            };
+            for unit in text.encode_utf16() {
+                bytes.extend(if big_endian {
+                    unit.to_be_bytes()
+                } else {
+                    unit.to_le_bytes()
+                });
+            }
+            assert_eq!(decode_strings_text(&bytes).unwrap(), text);
+        }
+        assert_eq!(
+            decode_strings_text(b"\xef\xbb\xbf\"a\" = \"b\";").unwrap(),
+            "\"a\" = \"b\";"
+        );
+        assert_eq!(decode_strings_text(b"").unwrap(), "");
+    }
+
+    #[test]
+    fn rejects_truncated_units_and_unpaired_surrogates() {
+        assert!(decode_strings_text(&[0xff, 0xfe, 0x41]).is_err());
+        assert!(decode_strings_text(&[0xfe, 0xff, 0xd8, 0x00]).is_err());
+        assert!(decode_strings_text(&[0xff]).is_err());
+        assert_eq!(decode_strings_text(&[0xfe, 0xff]).unwrap(), "");
+    }
 }
