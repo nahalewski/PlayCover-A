@@ -69,6 +69,33 @@ pub const CLASSES: ClassExports = objc_classes! {
 
 @implementation NSBundle: NSObject
 
+// Class variant: `directory` is the path of a bundle (or any directory) to
+// look in, rather than a subdirectory of the main bundle.
++ (id)pathForResource:(id)name // NSString*
+               ofType:(id)extension // NSString*
+          inDirectory:(id)directory { // NSString*
+    if name == nil || directory == nil {
+        return nil;
+    }
+    let mut file_name = ns_string::to_rust_string(env, name).to_string();
+    if extension != nil {
+        let extension = ns_string::to_rust_string(env, extension).to_string();
+        if !extension.is_empty() {
+            file_name = format!("{file_name}.{extension}");
+        }
+    }
+    let file_name = ns_string::from_rust_string(env, file_name);
+    let path: id = msg![env; directory stringByAppendingPathComponent:file_name];
+    release(env, file_name);
+    let file_manager: id = msg_class![env; NSFileManager defaultManager];
+    let exists: bool = msg![env; file_manager fileExistsAtPath:path];
+    if exists {
+        path
+    } else {
+        nil
+    }
+}
+
 + (id)mainBundle {
     if let Some(bundle) = env.framework_state.foundation.ns_bundle.main_bundle {
         bundle

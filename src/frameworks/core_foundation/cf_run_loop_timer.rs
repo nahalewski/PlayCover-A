@@ -109,6 +109,33 @@ fn CFRunLoopAddTimer(
     () = msg![env; run_loop addTimer:timer forMode:mode];
 }
 
+/// Inside its own callback a one-shot timer still counts as scheduled, and
+/// apps (e.g. Zenonia 4) rely on that to decide whether to remove and release it.
+fn CFRunLoopContainsTimer(
+    env: &mut Environment,
+    run_loop: CFRunLoopRef,
+    timer: CFRunLoopTimerRef,
+    _mode: CFRunLoopMode,
+) -> bool {
+    if run_loop.is_null() || !crate::frameworks::foundation::ns_timer::is_timer(env, timer) {
+        return false;
+    }
+    crate::frameworks::foundation::ns_timer::is_firing(env, timer)
+        || crate::frameworks::foundation::ns_run_loop::contains_timer(env, run_loop, timer)
+}
+
+fn CFRunLoopRemoveTimer(
+    env: &mut Environment,
+    _run_loop: CFRunLoopRef,
+    timer: CFRunLoopTimerRef,
+    _mode: CFRunLoopMode,
+) {
+    if crate::frameworks::foundation::ns_timer::is_timer(env, timer) {
+        // Does nothing if the timer is already invalid.
+        () = msg![env; timer invalidate];
+    }
+}
+
 /// Re-arm a timer. Apps (e.g. PAC-MAN Remix) use this to drive their main loop.
 fn CFRunLoopTimerSetNextFireDate(
     env: &mut Environment,
@@ -135,6 +162,8 @@ fn CFRunLoopTimerInvalidate(env: &mut Environment, timer: CFRunLoopTimerRef) {
 pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(CFRunLoopTimerCreate(_, _, _, _, _, _, _)),
     export_c_func!(CFRunLoopAddTimer(_, _, _)),
+    export_c_func!(CFRunLoopContainsTimer(_, _, _)),
+    export_c_func!(CFRunLoopRemoveTimer(_, _, _)),
     export_c_func!(CFRunLoopTimerInvalidate(_)),
     export_c_func!(CFRunLoopTimerIsValid(_)),
     export_c_func!(CFRunLoopTimerSetNextFireDate(_, _)),

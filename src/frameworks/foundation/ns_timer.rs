@@ -166,6 +166,13 @@ pub fn set_time_interval(env: &mut Environment, timer: id, interval: NSTimeInter
     host_object.rust_interval = Duration::from_secs_f64(interval);
 }
 
+/// Whether `timer`'s callback is running right now. A non-repeating timer has
+/// already been taken off its run loop at that point, but with Core
+/// Foundation it still counts as scheduled until the callback returns.
+pub fn is_firing(env: &Environment, timer: id) -> bool {
+    is_timer(env, timer) && env.objc.borrow::<NSTimerHostObject>(timer).is_running_callback
+}
+
 /// Whether `object` is a live `NSTimer` instance (not NULL, freed, or a class).
 pub fn is_timer(env: &Environment, object: id) -> bool {
     env.objc

@@ -623,6 +623,10 @@ impl Environment {
                     if env.bundle.bundle_identifier() == "com.gamevil.zenonia2" {
                         objc::install_skipped_method(env, "MainTitleUIController", "sendProfileData");
                     }
+                    if env.bundle.bundle_identifier() == "com.gamevil.zenonia4" {
+                        // Same dead Gamevil profile server as Zenonia 2/3.
+                        objc::install_skipped_method(env, "Zenonia4_iPhoneAppDelegate", "sendProfile");
+                    }
                     if env.bundle.bundle_identifier() == "com.gamevil.zenonia3" {
                         // Same dead Gamevil profile server as Zenonia 2.
                         objc::install_skipped_method(env, "RootController", "uploadDeviceInfo");

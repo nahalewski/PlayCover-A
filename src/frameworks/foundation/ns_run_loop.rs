@@ -198,6 +198,14 @@ pub fn remove_audio_queue(env: &mut Environment, run_loop: id, queue: AudioQueue
     queues.remove(queue_idx);
 }
 
+/// Whether `timer` is currently scheduled on `run_loop`.
+pub fn contains_timer(env: &Environment, run_loop: id, timer: id) -> bool {
+    env.objc
+        .borrow::<NSRunLoopHostObject>(run_loop)
+        .timers
+        .contains(&timer)
+}
+
 /// For use by NSTimer so it can remove itself once it's invalidated.
 pub(super) fn remove_timer(env: &mut Environment, run_loop: id, timer: id) {
     log_dbg!("Removing timer {:?} from run loop {:?}", timer, run_loop,);
