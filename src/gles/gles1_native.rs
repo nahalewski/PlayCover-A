@@ -86,6 +86,11 @@ impl GLES for GLES1Native<'_> {
         let version = CStr::from_ptr(gles11::GetString(gles11::VERSION) as *const _);
         let vendor = CStr::from_ptr(gles11::GetString(gles11::VENDOR) as *const _);
         let renderer = CStr::from_ptr(gles11::GetString(gles11::RENDERER) as *const _);
+        let extensions = gles11::GetString(gles11::EXTENSIONS);
+        if !extensions.is_null() {
+            let extensions = CStr::from_ptr(extensions as *const _);
+            log!("Native GL ES 1.1 extensions: {}", extensions.to_string_lossy());
+        }
         // OpenGL ES requires the version to be prefixed "OpenGL ES", so we
         // don't need to contextualize it.
         format!(
