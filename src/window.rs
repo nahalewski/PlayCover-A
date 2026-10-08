@@ -1518,6 +1518,21 @@ impl Window {
         (x, y, scaled_width, scaled_height)
     }
 
+    /// Map a point in the app's unrotated, unscaled window co-ordinates (the
+    /// co-ordinates UIKit views live in) to physical pixels of the drawable
+    /// (the inverse of the input transform).
+    pub fn unrotated_to_physical(&self, (x, y): (f32, f32)) -> (f32, f32) {
+        let (w, h) = self.size_unrotated_unscaled();
+        let nx = x / w as f32 - 0.5;
+        let ny = y / h as f32 - 0.5;
+        let [rx, ry] = self.rotation_matrix().transform([nx, ny]);
+        let (vx, vy, vw, vh) = self.viewport();
+        (
+            vx as f32 + (rx + 0.5) * vw as f32,
+            vy as f32 + (ry + 0.5) * vh as f32,
+        )
+    }
+
     /// Drawable size, for diagnostics.
     pub fn drawable_size_for_log(&self) -> (u32, u32) {
         self.window.drawable_size()
