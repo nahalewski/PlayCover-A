@@ -281,6 +281,54 @@ fn glVertexAttribPointer(
         gles.VertexAttribPointer(index, size, type_, normalized, stride, pointer)
     })
 }
+fn vertex_attrib_n(env: &mut Environment, index: GLuint, v: [GLfloat; 4]) {
+    with_ctx_and_mem(env, |gles, _mem| unsafe {
+        gles.VertexAttrib4f(index, v[0], v[1], v[2], v[3])
+    })
+}
+fn vertex_attrib_nv(
+    env: &mut Environment,
+    index: GLuint,
+    values: ConstPtr<GLfloat>,
+    n: GuestUSize,
+) {
+    let mut v = [0.0, 0.0, 0.0, 1.0];
+    for (i, item) in v.iter_mut().enumerate().take(n as usize) {
+        *item = env.mem.read(values + i as GuestUSize);
+    }
+    vertex_attrib_n(env, index, v)
+}
+fn glVertexAttrib1f(env: &mut Environment, index: GLuint, x: GLfloat) {
+    vertex_attrib_n(env, index, [x, 0.0, 0.0, 1.0])
+}
+fn glVertexAttrib2f(env: &mut Environment, index: GLuint, x: GLfloat, y: GLfloat) {
+    vertex_attrib_n(env, index, [x, y, 0.0, 1.0])
+}
+fn glVertexAttrib3f(env: &mut Environment, index: GLuint, x: GLfloat, y: GLfloat, z: GLfloat) {
+    vertex_attrib_n(env, index, [x, y, z, 1.0])
+}
+fn glVertexAttrib4f(
+    env: &mut Environment,
+    index: GLuint,
+    x: GLfloat,
+    y: GLfloat,
+    z: GLfloat,
+    w: GLfloat,
+) {
+    vertex_attrib_n(env, index, [x, y, z, w])
+}
+fn glVertexAttrib1fv(env: &mut Environment, index: GLuint, values: ConstPtr<GLfloat>) {
+    vertex_attrib_nv(env, index, values, 1)
+}
+fn glVertexAttrib2fv(env: &mut Environment, index: GLuint, values: ConstPtr<GLfloat>) {
+    vertex_attrib_nv(env, index, values, 2)
+}
+fn glVertexAttrib3fv(env: &mut Environment, index: GLuint, values: ConstPtr<GLfloat>) {
+    vertex_attrib_nv(env, index, values, 3)
+}
+fn glVertexAttrib4fv(env: &mut Environment, index: GLuint, values: ConstPtr<GLfloat>) {
+    vertex_attrib_nv(env, index, values, 4)
+}
 
 // Blending
 
@@ -455,6 +503,14 @@ pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(glEnableVertexAttribArray(_)),
     export_c_func!(glDisableVertexAttribArray(_)),
     export_c_func!(glVertexAttribPointer(_, _, _, _, _, _)),
+    export_c_func!(glVertexAttrib1f(_, _)),
+    export_c_func!(glVertexAttrib2f(_, _, _)),
+    export_c_func!(glVertexAttrib3f(_, _, _, _)),
+    export_c_func!(glVertexAttrib4f(_, _, _, _, _)),
+    export_c_func!(glVertexAttrib1fv(_, _)),
+    export_c_func!(glVertexAttrib2fv(_, _)),
+    export_c_func!(glVertexAttrib3fv(_, _)),
+    export_c_func!(glVertexAttrib4fv(_, _)),
     // Blending
     export_c_func!(glBlendFuncSeparate(_, _, _, _)),
     // Framebuffers and renderbuffers

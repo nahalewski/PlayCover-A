@@ -6,8 +6,8 @@
 //! `CGImage.h`
 
 use super::cg_color_space::{
-    kCGColorSpaceGenericRGB, kCGColorSpaceModelRGB, CGColorSpaceCreateWithName,
-    CGColorSpaceGetModel, CGColorSpaceRef,
+    kCGColorSpaceGenericRGB, kCGColorSpaceModelRGB, CGColorSpaceCreateDeviceGray,
+    CGColorSpaceCreateWithName, CGColorSpaceGetModel, CGColorSpaceRef,
 };
 use super::cg_data_provider::{self, CGDataProviderRef};
 use super::cg_geometry::{CGPointZero, CGRectIntegral, CGRectIntersection, CGRectNull};
@@ -367,12 +367,20 @@ fn CGImageCreateCopyWithColorSpace(
     color_space: CGColorSpaceRef,
 ) -> CGImageRef {
     let image_color_space = CGImageGetColorSpace(env, image);
-    assert_eq!(
-        CGColorSpaceGetModel(env, image_color_space),
-        CGColorSpaceGetModel(env, color_space)
-    );
+    let source_model = CGColorSpaceGetModel(env, image_color_space);
+    let target_model = CGColorSpaceGetModel(env, color_space);
+    // Grayscale sources are stored as RGBA already, so converting to RGB is
+    // just a relabel.
+    let gray_to_rgb = borrow_image(&env.objc, image).source_is_gray()
+        && target_model == kCGColorSpaceModelRGB;
+    if !gray_to_rgb {
+        assert_eq!(source_model, target_model);
+    }
     // If color space matches, we could just create a copy.
-    let new_image = env.objc.borrow::<CGImageHostObject>(image).image.clone();
+    let mut new_image = env.objc.borrow::<CGImageHostObject>(image).image.clone();
+    if gray_to_rgb {
+        new_image.mark_source_rgba();
+    }
     from_image(env, new_image)
 }
 
@@ -412,16 +420,28 @@ fn CGImageCreateWithJPEGDataProvider(
     from_image(env, image)
 }
 
-fn CGImageGetAlphaInfo(_env: &mut Environment, _image: CGImageRef) -> CGImageAlphaInfo {
+fn CGImageGetAlphaInfo(env: &mut Environment, image: CGImageRef) -> CGImageAlphaInfo {
+    // A grayscale file without alpha (e.g. a bitmap font atlas) has no alpha
+    // on iOS either; apps use that to pick a luminance/alpha texture path.
+    let image = borrow_image(&env.objc, image);
+    if image.source_is_gray() && !image.source_has_alpha() {
+        return kCGImageAlphaNone;
+    }
     // our Image type always returns premultiplied RGBA
     // (the premultiplied part must match what the real UIImage does, but
     // considering CgBI's design, maybe the order doesn't?)
     kCGImageAlphaPremultipliedLast
 }
 
-fn CGImageGetColorSpace(env: &mut Environment, _image: CGImageRef) -> CGColorSpaceRef {
+fn CGImageGetColorSpace(env: &mut Environment, image: CGImageRef) -> CGColorSpaceRef {
     // Caller must release
     // FIXME: what if a loaded image is not sRGB?
+
+    // Report grayscale source files as such (pixels are still stored as RGBA
+    // internally, with R = G = B = the gray value).
+    if borrow_image(&env.objc, image).source_is_gray() {
+        return CGColorSpaceCreateDeviceGray(env);
+    }
 
     let srgb_name = ns_string::get_static_str(env, kCGColorSpaceGenericRGB);
     CGColorSpaceCreateWithName(env, srgb_name)

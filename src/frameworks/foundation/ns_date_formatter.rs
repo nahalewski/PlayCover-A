@@ -46,7 +46,12 @@ pub const CLASSES: ClassExports = objc_classes! {
     let &NSDateFormatterHostObject {
         date_format
     } = env.objc.borrow(this);
-    let mut format = ns_string::to_rust_string(env, date_format.unwrap()).to_string().clone();
+    // Apps that only set dateStyle/timeStyle (not implemented) never set a
+    // format: fall back to a plain numeric date and time.
+    let mut format = match date_format {
+        Some(date_format) => ns_string::to_rust_string(env, date_format).to_string().clone(),
+        None => "yyyy-MM-dd HH:mm:ss".to_string(),
+    };
     log_dbg!("date_format before: {:?}", format);
 
     let ti: NSTimeInterval = msg![env; date timeIntervalSinceReferenceDate];

@@ -86,6 +86,8 @@ pub const O_EXCL: OpenFlag = 0x800;
 pub type FileControlCommand = i32;
 const F_GETFD: FileControlCommand = 1;
 const F_SETFD: FileControlCommand = 2;
+const F_GETFL: FileControlCommand = 3;
+const F_SETFL: FileControlCommand = 4;
 const F_GETLK: FileControlCommand = 7;
 const F_SETLK: FileControlCommand = 8;
 const F_RDADVISE: FileControlCommand = 44;
@@ -216,7 +218,7 @@ pub fn open_direct(env: &mut Environment, path: ConstPtr<u8>, flags: i32) -> Fil
             find_or_create_fd(env, host_object)
         }
         Err(error) => {
-            log!("Warning: open({path:?}, {flags:#x}) failed with: {error:?}, returning -1");
+            log!("Warning: open({path:?} {path_string:?}, {flags:#x}) failed with: {error:?}, returning -1");
             let errno = match error {
                 FsError::AccessDenied => EACCES,
                 FsError::AlreadyExist => EEXIST,
@@ -751,6 +753,13 @@ fn fcntl(
     // TODO: handle errno properly
     set_errno(env, 0);
 
+    // A failed open()/socket() gives -1; real fcntl() just reports EBADF.
+    // (Zenonia 2 calls fcntl(-1, F_GETFL) when socket() fails offline.)
+    if fd < 0 {
+        log_dbg!("fcntl({}, {}) on invalid fd => -1 (EBADF)", fd, cmd);
+        set_errno(env, EBADF);
+        return -1;
+    }
     if fd >= NORMAL_FILENO_BASE
         && env
             .libc_state
@@ -844,6 +853,15 @@ fn fcntl(
         }
         F_RDADVISE => {
             log_dbg!("TODO: Ignoring F_RDADVISE for file descriptor {}", fd);
+        }
+        F_GETFL => {
+            // TODO: track O_NONBLOCK/O_APPEND status flags per descriptor.
+            log!("TODO: fcntl({}, F_GETFL) => 0 (status flags not tracked)", fd);
+            return 0;
+        }
+        F_SETFL => {
+            let flags: i32 = args.start().next(env);
+            log!("TODO: fcntl({}, F_SETFL, {:#x}) ignored", fd, flags);
         }
         _ => unimplemented!(),
     }

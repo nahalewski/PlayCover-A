@@ -251,8 +251,11 @@ fn ExtAudioFileSetProperty(
     let audio_desc = AudioStreamBasicDescription::from_audio_description(
         other_host_object.audio_file.audio_description(),
     );
-    // TODO: support audio format conversions
-    assert_eq!(audio_desc, client_audio_desc);
+    // Only sample rate conversion is supported (see `read_resampled()`).
+    // TODO: support other audio format conversions
+    let mut audio_desc_at_client_rate = audio_desc;
+    audio_desc_at_client_rate.sample_rate = client_audio_desc.sample_rate;
+    assert_eq!(audio_desc_at_client_rate, client_audio_desc);
 
     0 // success
 }
@@ -269,6 +272,35 @@ fn ExtAudioFileRead(
     let num_buffers = audio_buffer_list.number_buffers;
     assert_eq!(num_buffers, 1);
 
+    let host_object = env
+        .framework_state
+        .audio_toolbox
+        .extended_audio_file
+        .extended_audio_files
+        .get(&in_ext_audio_file)
+        .unwrap();
+
+    let file_sample_rate = {
+        let guest_audio_file = host_object.guest_audio_file;
+        env.framework_state
+            .audio_toolbox
+            .audio_file
+            .audio_files
+            .get(&guest_audio_file)
+            .map(|f| f.audio_file.audio_description().sample_rate)
+    };
+    let client_sample_rate = host_object.client_data_format.unwrap().sample_rate;
+    if let Some(file_sample_rate) = file_sample_rate {
+        if file_sample_rate != client_sample_rate {
+            return read_resampled(
+                env,
+                in_ext_audio_file,
+                io_number_frames,
+                io_data,
+                file_sample_rate / client_sample_rate,
+            );
+        }
+    }
     let host_object = env
         .framework_state
         .audio_toolbox
@@ -325,6 +357,104 @@ fn ExtAudioFileRead(
 
     env.mem.write(io_data, audio_buffer_list);
 
+    0 // success
+}
+
+/// `ExtAudioFileRead()` when the client asked for a different sample rate than
+/// the file has: linear resampling of 16-bit linear PCM.
+/// `ratio` is file rate divided by client rate.
+fn read_resampled(
+    env: &mut Environment,
+    in_ext_audio_file: ExtAudioFileRef,
+    io_number_frames: MutPtr<u32>,
+    io_data: MutPtr<AudioBufferList<1>>,
+    ratio: f64,
+) -> OSStatus {
+    let mut audio_buffer_list = env.mem.read(io_data);
+    let host_object = env
+        .framework_state
+        .audio_toolbox
+        .extended_audio_file
+        .extended_audio_files
+        .get(&in_ext_audio_file)
+        .unwrap();
+    let client_format = host_object.client_data_format.unwrap();
+    let guest_audio_file = host_object.guest_audio_file;
+    let client_frame_pos = host_object.current_bytes_read / i64::from(client_format.bytes_per_frame);
+    let channels = client_format.channels_per_frame as usize;
+    let bytes_per_frame = client_format.bytes_per_frame;
+    let bits_per_channel = client_format.bits_per_channel;
+    assert_eq!(bits_per_channel, 16); // TODO: other sample formats
+    assert_eq!(bytes_per_frame as usize, channels * 2);
+
+    let requested_frames = env.mem.read(io_number_frames);
+    let exact_start = client_frame_pos as f64 * ratio;
+    let src_start = exact_start.floor() as i64;
+    let frac0 = exact_start - src_start as f64;
+    let src_frames_wanted = (requested_frames as f64 * ratio).ceil() as u32 + 2;
+    let src_bytes_wanted = src_frames_wanted * bytes_per_frame;
+
+    let src_buffer = env.mem.alloc(src_bytes_wanted);
+    let bytes_read_ptr = env.mem.alloc_and_write(src_bytes_wanted);
+    let res = AudioFileReadBytes(
+        env,
+        guest_audio_file,
+        false,
+        src_start * i64::from(bytes_per_frame),
+        bytes_read_ptr,
+        src_buffer,
+    );
+    let src_bytes_read = env.mem.read(bytes_read_ptr);
+    env.mem.free(bytes_read_ptr.cast());
+    if res != 0 && res != eofErr {
+        env.mem.free(src_buffer);
+        return res;
+    }
+    let src: Vec<u8> = env
+        .mem
+        .bytes_at(src_buffer.cast().cast_const(), src_bytes_read)
+        .to_vec();
+    env.mem.free(src_buffer);
+    let src_frames = src.len() / bytes_per_frame as usize;
+    let sample = |frame: usize, channel: usize| -> f64 {
+        let i = (frame * channels + channel) * 2;
+        f64::from(i16::from_le_bytes([src[i], src[i + 1]]))
+    };
+
+    let mut out: Vec<u8> = Vec::with_capacity(requested_frames as usize * bytes_per_frame as usize);
+    for i in 0..requested_frames as usize {
+        let pos = frac0 + i as f64 * ratio;
+        let index = pos.floor() as usize;
+        if index + 1 >= src_frames {
+            break;
+        }
+        let t = pos - index as f64;
+        for channel in 0..channels {
+            let value = sample(index, channel) * (1.0 - t) + sample(index + 1, channel) * t;
+            out.extend_from_slice(&(value.round() as i16).to_le_bytes());
+        }
+    }
+    let produced = (out.len() / bytes_per_frame as usize) as u32;
+    env.mem.write(io_number_frames, produced);
+    if produced == 0 {
+        return 0;
+    }
+    audio_buffer_list.buffers[0].number_channels = client_format.channels_per_frame;
+    audio_buffer_list.buffers[0].data_byte_size = out.len() as u32;
+    let data_ptr = audio_buffer_list.buffers[0].data;
+    env.mem
+        .bytes_at_mut(data_ptr.cast(), out.len() as u32)
+        .copy_from_slice(&out);
+    env.mem.write(io_data, audio_buffer_list);
+
+    let host_object = env
+        .framework_state
+        .audio_toolbox
+        .extended_audio_file
+        .extended_audio_files
+        .get_mut(&in_ext_audio_file)
+        .unwrap();
+    host_object.current_bytes_read += out.len() as i64;
     0 // success
 }
 

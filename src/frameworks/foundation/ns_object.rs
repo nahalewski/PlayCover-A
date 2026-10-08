@@ -297,10 +297,10 @@ forUndefinedKey:(id)key { // NSString*
     log_dbg!("performSelectorOnMainThread:{} withObject:{:?} waitUntilDone:{}", sel.as_str(&env.mem), arg, wait);
     if wait && env.current_thread == 0 {
         if sel.as_str(&env.mem).ends_with(':') {
-            () = msg_send(env, (this, sel, arg));
+            () = msg_send_no_type_checking(env, (this, sel, arg));
         } else {
             assert!(arg.is_null());
-            () = msg_send(env, (this, sel));
+            () = msg_send_no_type_checking(env, (this, sel));
         }
         return;
     }
@@ -354,6 +354,22 @@ forUndefinedKey:(id)key { // NSString*
         sem_wait(env, sem);
         host_destroy_semaphore(env, sem);
     }
+}
+
+// TODO: honour the target thread and the run loop modes. Apps overwhelmingly
+// use these to run something on the main thread, so that is what happens.
+- (())performSelector:(SEL)sel
+              onThread:(id)_thread // NSThread*
+            withObject:(id)arg
+         waitUntilDone:(bool)wait {
+    msg![env; this performSelectorOnMainThread:sel withObject:arg waitUntilDone:wait]
+}
+- (())performSelector:(SEL)sel
+              onThread:(id)_thread // NSThread*
+            withObject:(id)arg
+         waitUntilDone:(bool)wait
+                 modes:(id)_modes { // NSArray*
+    msg![env; this performSelectorOnMainThread:sel withObject:arg waitUntilDone:wait]
 }
 
 // UINibLoadingAdditions protocol

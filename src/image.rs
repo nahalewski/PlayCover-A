@@ -26,6 +26,10 @@ use touchHLE_stb_image_wrapper::*;
 pub struct Image {
     pixels: PixelStore,
     dimensions: (u32, u32),
+    /// Channel count of the source file (1 = gray, 2 = gray + alpha,
+    /// 3 = RGB, 4 = RGBA). Pixels are always stored as RGBA regardless; this
+    /// only lets `CGImage` report the color space the file really had.
+    source_channels: u8,
 }
 
 enum PixelStore {
@@ -49,7 +53,7 @@ impl Image {
 
         let mut x: c_int = 0;
         let mut y: c_int = 0;
-        let mut _channels_in_file: c_int = 0;
+        let mut channels_in_file: c_int = 0;
 
         // TODO: we're currently assuming this is sRGB, can we check somehow?
 
@@ -68,7 +72,7 @@ impl Image {
                 len,
                 &mut x,
                 &mut y,
-                &mut _channels_in_file,
+                &mut channels_in_file,
                 4,
             )
         };
@@ -97,6 +101,10 @@ impl Image {
         Ok(Image {
             pixels: PixelStore::StbImage(pixels),
             dimensions: (width, height),
+            source_channels: match channels_in_file {
+                1..=4 => channels_in_file as u8,
+                _ => 4,
+            },
         })
     }
 
@@ -107,11 +115,25 @@ impl Image {
         Image {
             pixels: PixelStore::Vec(pixels),
             dimensions,
+            source_channels: 4,
         }
     }
 
     pub fn dimensions(&self) -> (u32, u32) {
         self.dimensions
+    }
+
+    /// Whether the source file was grayscale (with or without alpha).
+    pub fn source_is_gray(&self) -> bool {
+        self.source_channels <= 2
+    }
+    /// Forget the source format and report plain RGBA from now on.
+    pub fn mark_source_rgba(&mut self) {
+        self.source_channels = 4;
+    }
+    /// Whether the source file had an alpha channel.
+    pub fn source_has_alpha(&self) -> bool {
+        self.source_channels == 2 || self.source_channels == 4
     }
 
     /// Get image data as bytes (8 bits per channel sRGB RGBA with premultiplied
@@ -231,7 +253,9 @@ impl Clone for Image {
     fn clone(&self) -> Image {
         // Note: implicitly converts pixel storage from StbImage to Vec
         // (if needed)
-        Image::from_pixel_vec(self.pixels().to_vec(), self.dimensions)
+        let mut image = Image::from_pixel_vec(self.pixels().to_vec(), self.dimensions);
+        image.source_channels = self.source_channels;
+        image
     }
 }
 

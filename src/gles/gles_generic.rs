@@ -945,6 +945,19 @@ pub trait GLES {
     ) {
         unimplemented!()
     }
+    /// Generic (constant) vertex attribute value. The guest's
+    /// `glVertexAttrib{1,2,3,4}f[v]` all map onto this, missing components
+    /// default to (0, 0, 0, 1) as in the GL spec.
+    unsafe fn VertexAttrib4f(
+        &mut self,
+        index: GLuint,
+        x: GLfloat,
+        y: GLfloat,
+        z: GLfloat,
+        w: GLfloat,
+    ) {
+        unimplemented!()
+    }
 
     // Blending
     unsafe fn BlendFuncSeparate(

@@ -26,7 +26,10 @@ unsafe impl SafeRead for in_addr {}
 
 fn inet_addr(env: &mut Environment, str: ConstPtr<u8>) -> in_addr_t {
     let inet_addr_str = env.mem.cstr_at_utf8(str).unwrap();
-    let address: Ipv4Addr = inet_addr_str.parse().unwrap();
+    // INADDR_NONE for anything that isn't a dotted-quad address
+    let Ok(address) = inet_addr_str.parse::<Ipv4Addr>() else {
+        return 0xffffffff;
+    };
     let res = u32::from_le_bytes(address.octets());
     log_dbg!("inet_addr({:?}) => {}", inet_addr_str, res);
     res
@@ -54,10 +57,28 @@ fn inet_ntop(
 }
 
 fn inet_pton(env: &mut Environment, af: i32, src: ConstPtr<u8>, dst: MutVoidPtr) -> i32 {
+    // AF_INET6 on Apple platforms
+    const AF_INET6: i32 = 30;
+    let Ok(str) = env.mem.cstr_at_utf8(src.cast()) else {
+        return 0;
+    };
+    log_dbg!("inet_pton({}, '{}')", af, str);
+    if af == AF_INET6 {
+        // libcurl probes hostnames this way; 0 means "not an address".
+        let Ok(address) = str.parse::<std::net::Ipv6Addr>() else {
+            return 0;
+        };
+        let octets = address.octets();
+        env.mem
+            .bytes_at_mut(dst.cast(), octets.len() as GuestUSize)
+            .copy_from_slice(&octets);
+        return 1;
+    }
     assert_eq!(af, AF_INET);
-    let str = env.mem.cstr_at_utf8(src.cast()).unwrap();
-    log_dbg!("inet_pton '{}'", str);
-    let address: Ipv4Addr = str.parse().unwrap();
+    // POSIX: return 0 when src is not a valid address (e.g. a hostname).
+    let Ok(address) = str.parse::<Ipv4Addr>() else {
+        return 0;
+    };
     let addr = in_addr {
         s_addr: u32::from_le_bytes(address.octets()),
     };

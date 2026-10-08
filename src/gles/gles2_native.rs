@@ -646,4 +646,14 @@ impl GLES for GLES2Native<'_> {
     ) {
         gles20::VertexAttribPointer(index, size, type_, normalized, stride, pointer)
     }
+    unsafe fn VertexAttrib4f(
+        &mut self,
+        index: GLuint,
+        x: GLfloat,
+        y: GLfloat,
+        z: GLfloat,
+        w: GLfloat,
+    ) {
+        gles20::VertexAttrib4f(index, x, y, z, w)
+    }
 }

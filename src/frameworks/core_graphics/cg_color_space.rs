@@ -79,7 +79,7 @@ pub fn CGColorSpaceCreateDeviceRGB(env: &mut Environment) -> CGColorSpaceRef {
     )
 }
 
-fn CGColorSpaceCreateDeviceGray(env: &mut Environment) -> CGColorSpaceRef {
+pub fn CGColorSpaceCreateDeviceGray(env: &mut Environment) -> CGColorSpaceRef {
     let isa = env
         .objc
         .get_known_class("_touchHLE_CGColorSpace", &mut env.mem);
@@ -114,6 +114,21 @@ pub fn CGColorSpaceGetModel(env: &mut Environment, cs: CGColorSpaceRef) -> CGCol
     }
 }
 
+/// Number of color components, not counting alpha.
+fn CGColorSpaceGetNumberOfComponents(
+    env: &mut Environment,
+    cs: CGColorSpaceRef,
+) -> crate::mem::GuestUSize {
+    if cs.is_null() {
+        return 0;
+    }
+    match CGColorSpaceGetModel(env, cs) {
+        kCGColorSpaceModelMonochrome => 1,
+        kCGColorSpaceModelRGB => 3,
+        _ => unimplemented!(),
+    }
+}
+
 pub const kCGColorSpaceGenericRGB: &str = "kCGColorSpaceGenericRGB";
 pub const kCGColorSpaceGenericGray: &str = "kCGColorSpaceGenericGray";
 
@@ -135,4 +150,5 @@ pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(CGColorSpaceRetain(_)),
     export_c_func!(CGColorSpaceRelease(_)),
     export_c_func!(CGColorSpaceGetModel(_)),
+    export_c_func!(CGColorSpaceGetNumberOfComponents(_)),
 ];

@@ -257,10 +257,11 @@ pub fn printf_inner<const NS_LOG: bool, F: Fn(&Mem, GuestUSize) -> u8>(
                 assert!(!left_justified);
                 // Note: on 32-bit system int and long are i32,
                 // so single length_modifier is ignored (but not double one!)
-                let int: i64 = if specifier == b'u' {
+                // i128 so that `%llu` values above i64::MAX are representable
+                let int: i128 = if specifier == b'u' {
                     if length_modifier == Some("ll") {
                         let uint: u64 = args.next(env);
-                        uint.try_into().unwrap()
+                        uint.into()
                     } else if length_modifier == Some("hh") {
                         let uint: u8 = args.next(env);
                         uint.into()
@@ -273,7 +274,8 @@ pub fn printf_inner<const NS_LOG: bool, F: Fn(&Mem, GuestUSize) -> u8>(
                         uint.into()
                     }
                 } else if length_modifier == Some("ll") {
-                    args.next(env)
+                    let int: i64 = args.next(env);
+                    int.into()
                 } else if length_modifier == Some("hh") {
                     let int: i8 = args.next(env);
                     int.into()
@@ -336,9 +338,8 @@ pub fn printf_inner<const NS_LOG: bool, F: Fn(&Mem, GuestUSize) -> u8>(
                 assert!(!left_justified);
                 // Note: on 32-bit system unsigned int and unsigned long
                 // are u32, so length_modifier is ignored
-                let uint: u32 = if length_modifier == Some("ll") {
-                    let uint: u64 = args.next(env);
-                    uint.try_into().unwrap()
+                let uint: u64 = if length_modifier == Some("ll") {
+                    args.next(env)
                 } else if length_modifier == Some("hh") {
                     let uint: u8 = args.next(env);
                     uint.into()
@@ -348,7 +349,7 @@ pub fn printf_inner<const NS_LOG: bool, F: Fn(&Mem, GuestUSize) -> u8>(
                 } else {
                     assert!(length_modifier.is_none() || length_modifier == Some("l"));
                     let uint: u32 = args.next(env);
-                    uint
+                    uint.into()
                 };
                 if pad_width > 0 {
                     assert!(precision.is_none()); // TODO
@@ -376,9 +377,8 @@ pub fn printf_inner<const NS_LOG: bool, F: Fn(&Mem, GuestUSize) -> u8>(
                 assert!(precision.is_none());
                 // Note: on 32-bit system unsigned int and unsigned long
                 // are u32, so length_modifier is ignored
-                let uint: u32 = if length_modifier == Some("ll") {
-                    let uint: u64 = args.next(env);
-                    uint.try_into().unwrap()
+                let uint: u64 = if length_modifier == Some("ll") {
+                    args.next(env)
                 } else if length_modifier == Some("hh") {
                     let uint: u8 = args.next(env);
                     uint.into()
@@ -388,7 +388,7 @@ pub fn printf_inner<const NS_LOG: bool, F: Fn(&Mem, GuestUSize) -> u8>(
                 } else {
                     assert!(length_modifier.is_none() || length_modifier == Some("l"));
                     let uint: u32 = args.next(env);
-                    uint
+                    uint.into()
                 };
                 if pad_width > 0 {
                     let pad_width = pad_width as usize;
@@ -960,9 +960,14 @@ where
                                 let c_short_ptr: ConstPtr<i16> = args.next(env);
                                 env.mem.write(c_short_ptr.cast_mut(), val as i16);
                             }
-                            None => {
+                            // long is 32-bit on this target
+                            None | Some("l") => {
                                 let c_int_ptr: ConstPtr<i32> = args.next(env);
                                 env.mem.write(c_int_ptr.cast_mut(), val as i32);
+                            }
+                            Some("ll") => {
+                                let c_i64_ptr: ConstPtr<i64> = args.next(env);
+                                env.mem.write(c_i64_ptr.cast_mut(), val);
                             }
                             _ => unimplemented!("length_modifier {:?}", length_modifier),
                         }
@@ -1029,7 +1034,7 @@ where
                                 let c_short_ptr: ConstPtr<u16> = args.next(env);
                                 env.mem.write(c_short_ptr.cast_mut(), val as u16);
                             }
-                            None => {
+                            None | Some("l") => {
                                 let c_u32_ptr: ConstPtr<u32> = args.next(env);
                                 env.mem.write(c_u32_ptr.cast_mut(), val as u32);
                             }

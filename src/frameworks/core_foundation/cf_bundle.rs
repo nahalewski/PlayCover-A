@@ -104,6 +104,21 @@ fn CFBundleCopyResourceURL(
     let url: CFURLRef = msg![env; bundle URLForResource:resource_name
                                           withExtension:resource_type
                                            subdirectory:sub_dir_name];
+    if url == crate::objc::nil {
+        let show = |env: &mut Environment, s: CFStringRef| {
+            if s == crate::objc::nil {
+                "(null)".to_string()
+            } else {
+                ns_string::to_rust_string(env, s).into_owned()
+            }
+        };
+        let (n, t, d) = (
+            show(env, resource_name),
+            show(env, resource_type),
+            show(env, sub_dir_name),
+        );
+        log_dbg!("CFBundleCopyResourceURL: resource {:?} type {:?} subdir {:?} not found", n, t, d);
+    }
     msg![env; url copy]
 }
 

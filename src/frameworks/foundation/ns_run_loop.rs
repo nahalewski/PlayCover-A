@@ -136,6 +136,19 @@ pub const CLASSES: ClassExports = objc_classes! {
     run_run_loop(env, this, /* single_iteration: */ false, Some(time_limit));
 }
 
+- (bool)runMode:(NSRunLoopMode)_mode
+     beforeDate:(id)date { // NSDate*
+    // Apps usually call this in a polling loop (`while (!done) [loop runMode:
+    // beforeDate:]`). The real method may return as soon as one source has
+    // been handled, so never block for more than a short slice.
+    let now = crate::frameworks::core_foundation::time::CFAbsoluteTimeGetCurrent(env)
+        + 978_307_200.0; // Core Foundation epoch (2001) to Unix epoch
+    let requested: NSTimeInterval = msg![env; date timeIntervalSince1970];
+    let time_limit = requested.min(now + 0.05);
+    run_run_loop(env, this, /* single_iteration: */ false, Some(time_limit));
+    true
+}
+
 // TODO: other run methods
 
 @end
@@ -424,10 +437,10 @@ pub fn run_run_loop(
                     log_dbg!("Running object selector request {target:?} {:?} {argument:?} on run loop {run_loop:?}", selector.as_str(env.mem.as_mut()));
 
                     if selector.as_str(&env.mem).ends_with(':') {
-                        () = msg_send(env, (target, selector, argument));
+                        () = crate::objc::msg_send_no_type_checking(env, (target, selector, argument));
                     } else {
                         assert!(argument.is_null());
-                        () = msg_send(env, (target, selector));
+                        () = crate::objc::msg_send_no_type_checking(env, (target, selector));
                     }
 
                     release(env, target);

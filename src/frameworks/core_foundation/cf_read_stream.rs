@@ -81,9 +81,18 @@ fn CFReadStreamCreateWithFile(
     _allocator: CFAllocatorRef,
     url: CFURLRef,
 ) -> CFReadStreamRef {
-    let path = ns_url::to_rust_path(env, url);
-    let data = env.fs.read(&path).ok();
-    log_dbg!("CFReadStreamCreateWithFile({:?}) => {:?} bytes", path, data.as_ref().map(|d| d.len()));
+    // Apple's CF accepts a NULL URL here (e.g. the result of a failed
+    // CFBundleCopyResourceURL) and returns a stream that fails to open.
+    // Zenonia 2 relies on this for optional resources like com/*.mpl.
+    let data = if url == nil {
+        log_dbg!("CFReadStreamCreateWithFile(NULL) => stream that fails to open");
+        None
+    } else {
+        let path = ns_url::to_rust_path(env, url);
+        let data = env.fs.read(&path).ok();
+        log_dbg!("CFReadStreamCreateWithFile({:?}) => {:?} bytes", path, data.as_ref().map(|d| d.len()));
+        data
+    };
     let stream: id = msg_class![env; _touchHLE_CFReadStream alloc];
     env.objc.borrow_mut::<CFReadStreamHostObject>(stream).data = data;
     stream
@@ -154,6 +163,12 @@ fn CFURLCreatePropertyFromResource(
     error_code: MutPtr<i32>,
 ) -> CFTypeRef {
     let property = ns_string::to_rust_string(env, property).into_owned();
+    if url == nil {
+        if !error_code.is_null() {
+            env.mem.write(error_code, -12); // kCFURLResourceNotFoundError
+        }
+        return nil;
+    }
     let path = ns_url::to_rust_path(env, url);
     let exists = env.fs.exists(&path);
     let result: id = match property.as_str() {
@@ -167,11 +182,11 @@ fn CFURLCreatePropertyFromResource(
     };
     log_dbg!("CFURLCreatePropertyFromResource({:?}, {}) => {:?}", path, property, result);
     if !error_code.is_null() {
-        // kCFURLUnknownError (-10) / kCFURLResourceNotFoundError (-11)
+        // kCFURLUnknownError (-10) / kCFURLResourceNotFoundError (-12)
         let code = if result != nil {
             0
         } else if !exists {
-            -11
+            -12
         } else {
             -10
         };

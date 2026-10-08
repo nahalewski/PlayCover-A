@@ -1170,7 +1170,7 @@ pub(super) fn class_replaceMethod(
     // TODO: use `method_setImplementation` once implemented
     // Note: encoding types are ignored
     let existing = methods.insert(name, imp.clone()).unwrap();
-    assert!(matches!(existing, IMP::Guest(_))); // TODO
+    let existing = imp_for_guest(env, existing);
     log_dbg!(
         "class_replaceMethod: existing {:?} replaced with {:?} for method {}",
         existing,
@@ -1178,6 +1178,58 @@ pub(super) fn class_replaceMethod(
         name.as_str(&env.mem)
     );
     existing
+}
+
+/// Make an IMP safe to hand to guest code. Host methods get a small guest
+/// stub that traps into the host method, so a guest that swizzles a method
+/// implemented by touchHLE can still call the original.
+fn imp_for_guest(env: &mut Environment, imp: IMP) -> IMP {
+    match imp {
+        IMP::Guest(_) => imp,
+        IMP::Host(host_imp) => {
+            let host_function: crate::dyld::HostFunction = host_imp;
+            let function = env
+                .dyld
+                .create_guest_function(&mut env.mem, "hostMethodIMP", host_function);
+            env.cpu
+                .invalidate_cache_range(function.addr_without_thumb_bit(), 8);
+            IMP::Guest(function)
+        }
+    }
+}
+
+/// Adds a method to a class. Returns false (and changes nothing) if the class
+/// itself already has an implementation for `name`, like the real runtime.
+pub(super) fn class_addMethod(
+    env: &mut Environment,
+    cls: Class,
+    name: SEL,
+    imp: IMP,
+    types: ConstPtr<u8>,
+) -> bool {
+    if cls == nil {
+        return false;
+    }
+    if env.objc.borrow::<ClassHostObject>(cls).methods.contains_key(&name) {
+        return false;
+    }
+    let types_copy = if types.is_null() {
+        types
+    } else {
+        // TODO: avoid unnecessary copy of types
+        strdup(env, types).cast_const()
+    };
+    let &mut ClassHostObject {
+        ref mut methods,
+        ref mut guest_method_signatures,
+        ..
+    } = env.objc.borrow_mut(cls);
+    log_dbg!("class_addMethod: adding {:?} for method {}", imp, name.as_str(&env.mem));
+    methods.insert(name, imp);
+    if !types_copy.is_null() {
+        guest_method_signatures.insert(name, types_copy);
+    }
+    true
 }
 
 pub(super) fn class_getMethodImplementation(env: &mut Environment, cls: Class, name: SEL) -> IMP {
@@ -1196,9 +1248,11 @@ pub(super) fn class_getMethodImplementation(env: &mut Environment, cls: Class, n
             return IMP::guest_null();
         };
         if methods.contains_key(&name) {
-            let method = methods.get(&name).unwrap().clone();
-            assert!(matches!(method, IMP::Guest(_))); // TODO
-            return method;
+            let method = match methods.get(&name).unwrap() {
+                IMP::Guest(guest_imp) => IMP::Guest(*guest_imp),
+                IMP::Host(host_imp) => IMP::Host(*host_imp),
+            };
+            return imp_for_guest(env, method);
         } else if next == nil {
             // TODO: currently this returns NULL for unimplemented host methods
             return IMP::guest_null();
@@ -1269,10 +1323,11 @@ pub(super) fn method_setImplementation(env: &mut Environment, method: MutVoidPtr
     }
     let GuestMethod { class, sel } = env.mem.read(method.cast::<GuestMethod>().cast_const());
     let host_object = env.objc.borrow_mut::<ClassHostObject>(class);
-    host_object
-        .methods
-        .insert(sel, imp)
-        .unwrap_or_else(IMP::guest_null)
+    let previous = host_object.methods.insert(sel, imp);
+    match previous {
+        Some(previous) => imp_for_guest(env, previous),
+        None => IMP::guest_null(),
+    }
 }
 
 pub(super) fn method_exchangeImplementations(
