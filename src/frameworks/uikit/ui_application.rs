@@ -203,6 +203,14 @@ pub const CLASSES: ClassExports = objc_classes! {
 }
 - (())setStatusBarOrientation:(UIInterfaceOrientation)orientation {
     let prev_orientation = env.window().current_rotation();
+    // Zenonia 5 (cocos2d-x) asks for landscape and then, still during launch,
+    // for portrait. On iOS that only touched the status bar: the app keeps the
+    // landscape launch orientation (applied with
+    // `--landscape-left`, see touchHLE_default_options.txt).
+    if env.bundle.bundle_identifier() == "com.gamevil.zenonia5free" {
+        log!("Ignoring setStatusBarOrientation:{} for this app (keeps launch orientation)", orientation);
+        return;
+    }
     if let Some(requested) = match orientation {
         UIDeviceOrientationPortrait => Some(DeviceOrientation::Portrait),
         UIDeviceOrientationPortraitUpsideDown => Some(DeviceOrientation::PortraitUpsideDown),

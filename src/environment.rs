@@ -627,6 +627,15 @@ impl Environment {
                         // Same dead Gamevil profile server as Zenonia 2/3.
                         objc::install_skipped_method(env, "Zenonia4_iPhoneAppDelegate", "sendProfile");
                     }
+                    if env.bundle.bundle_identifier() == "com.gamevil.zenonia5free" {
+                        // The Twitter sharing helper dereferences classes of the
+                        // (missing) OAuth library while it is being created.
+                        objc::install_skipped_method(
+                            env,
+                            "GVTwitterViewController",
+                            "initWithKey:Secret:at:withOrientation:withDelegate:",
+                        );
+                    }
                     if env.bundle.bundle_identifier() == "com.gamevil.zenonia3" {
                         // Same dead Gamevil profile server as Zenonia 2.
                         objc::install_skipped_method(env, "RootController", "uploadDeviceInfo");
