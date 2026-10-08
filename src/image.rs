@@ -5,7 +5,8 @@
  */
 //! Image decoding.
 //!
-//! Currently, supports PNG (treated as 8-bit sRGB), JPEG, BMP and GIF files.
+//! Currently, supports PNG (treated as 8-bit sRGB), JPEG, BMP, GIF and (a
+//! baseline subset of) TIFF files.
 //!
 //! Implemented as a wrapper around the C library stb_image, since it supports
 //! "CgBI" PNG files (an Apple proprietary extension used in iPhone OS apps).
@@ -32,10 +33,18 @@ enum PixelStore {
     Vec(Vec<u8>),
 }
 
+mod tiff_decode;
+
 const PNG_MAGIC_NUMBER: [u8; 8] = [137, 80, 78, 71, 13, 10, 26, 10];
 
 impl Image {
     pub fn from_bytes(bytes: &[u8]) -> Result<Image, String> {
+        // stb_image cannot read TIFF, which iPhone OS apps may bundle.
+        if tiff_decode::is_tiff(bytes) {
+            let (width, height, pixels) = tiff_decode::decode(bytes)?;
+            return Ok(Image::from_pixel_vec(pixels, (width, height)));
+        }
+
         let len: c_int = bytes.len().try_into().unwrap();
 
         let mut x: c_int = 0;

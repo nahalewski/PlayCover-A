@@ -1094,14 +1094,28 @@ pub const CLASSES: ClassExports = objc_classes! {
 
 - (id)stringByAddingPercentEscapesUsingEncoding:(NSStringEncoding)encoding {
     assert!(encoding == NSASCIIStringEncoding || encoding == NSUTF8StringEncoding); // TODO: other encodings
-    // TODO: implement escaping as per RFC 2396
-    let str = to_rust_string(env, this);
+    // Leave unreserved and reserved URL characters alone; escape everything
+    // else (spaces, non-ASCII bytes, brackets etc.) as %XX, per RFC 2396.
     // FIXME: figure out why '[' and ']' are escaped on iOS simulator
-    assert!(str.as_bytes().iter().all(|byte| {
-        (byte.is_ascii_alphanumeric() || b"-_.~".contains(byte)) // unreserved
-        || b"!*'();:@&=+$,/?%#".contains(byte) // reserved
-    }));
-    let new: id = msg![env; this copy];
+    let str = to_rust_string(env, this);
+    let mut escaped = String::with_capacity(str.len());
+    let mut changed = false;
+    for &byte in str.as_bytes() {
+        if byte.is_ascii_alphanumeric()
+            || b"-_.~".contains(&byte) // unreserved
+            || b"!*'();:@&=+$,/?%#".contains(&byte) // reserved
+        {
+            escaped.push(byte as char);
+        } else {
+            escaped.push_str(&format!("%{:02X}", byte));
+            changed = true;
+        }
+    }
+    if !changed {
+        let new: id = msg![env; this copy];
+        return autorelease(env, new);
+    }
+    let new = from_rust_string(env, escaped);
     autorelease(env, new)
 }
 

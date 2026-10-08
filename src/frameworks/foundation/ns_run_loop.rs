@@ -101,8 +101,17 @@ pub const CLASSES: ClassExports = objc_classes! {
        forMode:(NSRunLoopMode)mode {
     let default_mode = ns_string::get_static_str(env, NSDefaultRunLoopMode);
     let common_modes = ns_string::get_static_str(env, NSRunLoopCommonModes);
-    // TODO: handle other modes
-    assert!(msg![env; mode isEqualToString:default_mode] || msg![env; mode isEqualToString:common_modes]);
+    // TODO: handle other modes properly. There is only one mode here, so a
+    // timer added for any other mode (e.g. UITrackingRunLoopMode, or an
+    // app-defined one) is simply treated like a default-mode timer.
+    if !(msg![env; mode isEqualToString:default_mode] || msg![env; mode isEqualToString:common_modes]) {
+        log_once!("TODO: run loop modes other than default/common are treated as the default mode");
+    }
+
+    // Apps often add one timer for several modes: that is a no-op here.
+    if env.objc.borrow::<NSRunLoopHostObject>(this).timers.contains(&timer) {
+        return;
+    }
 
     log_dbg!(
         "Adding timer {:?} to run loop {:?} with mode {:?}",
@@ -114,7 +123,6 @@ pub const CLASSES: ClassExports = objc_classes! {
     retain(env, timer);
 
     let host_object = env.objc.borrow_mut::<NSRunLoopHostObject>(this);
-    assert!(!host_object.timers.contains(&timer)); // TODO: what do we do here?
     host_object.timers.push(timer);
     ns_timer::set_run_loop(env, timer, this);
 }
