@@ -245,5 +245,5 @@ com.ea.nfshp.ipad.bv: --force-composition
 com.ea.nfshp.ipad.inc: --force-composition
 # PAC-MAN Remix: no orientation keys; rotates its own views, draws a 320x480 viewport
 com.namconetworks.yellow: --no-landscape-view-adaptation
-# Zenonia: game logic is frame-locked and was designed for 30fps
-com.gamevil.Zenonia: --fps-limit=30
+# Zenonia: game logic is frame-locked and was designed for a low iPhone-era frame rate
+com.gamevil.Zenonia: --fps-limit=20
