@@ -549,7 +549,53 @@ fn glDeleteBuffers(env: &mut Environment, n: GLsizei, buffers: ConstPtr<GLuint>)
         unsafe { gles.DeleteBuffers(n, buffers) }
     })
 }
+// OES_vertex_array_object (advertised in the extension string): only the
+// element array buffer binding, which is part of VAO state, is emulated here;
+// the other vertex array pointers keep living in the shared context state.
+static VAO_ELEMENT_BUFFERS: std::sync::Mutex<Vec<(GLuint, GLuint)>> = std::sync::Mutex::new(Vec::new());
+static VAO_CURRENT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static VAO_NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+
+fn glGenVertexArraysOES(env: &mut Environment, n: GLsizei, arrays: MutPtr<GLuint>) {
+    for i in 0..n.max(0) as GuestUSize {
+        let id = VAO_NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        VAO_ELEMENT_BUFFERS.lock().unwrap().push((id, 0));
+        env.mem.write(arrays + i, id);
+    }
+}
+fn glBindVertexArrayOES(env: &mut Environment, array: GLuint) {
+    VAO_CURRENT.store(array, std::sync::atomic::Ordering::Relaxed);
+    let element = VAO_ELEMENT_BUFFERS
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(id, _)| *id == array)
+        .map_or(0, |&(_, buffer)| buffer);
+    with_ctx_and_mem(env, |gles, _mem| unsafe {
+        gles.BindBuffer(gles11::ELEMENT_ARRAY_BUFFER, element)
+    })
+}
+fn glDeleteVertexArraysOES(env: &mut Environment, n: GLsizei, arrays: ConstPtr<GLuint>) {
+    for i in 0..n.max(0) as GuestUSize {
+        let id = env.mem.read(arrays + i);
+        VAO_ELEMENT_BUFFERS.lock().unwrap().retain(|(vao, _)| *vao != id);
+        if VAO_CURRENT.load(std::sync::atomic::Ordering::Relaxed) == id {
+            VAO_CURRENT.store(0, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+fn glIsVertexArrayOES(_env: &mut Environment, array: GLuint) -> GLboolean {
+    VAO_ELEMENT_BUFFERS.lock().unwrap().iter().any(|(id, _)| *id == array) as GLboolean
+}
 fn glBindBuffer(env: &mut Environment, target: GLenum, buffer: GLuint) {
+    if target == gles11::ELEMENT_ARRAY_BUFFER {
+        let current = VAO_CURRENT.load(std::sync::atomic::Ordering::Relaxed);
+        if current != 0 {
+            if let Some(entry) = VAO_ELEMENT_BUFFERS.lock().unwrap().iter_mut().find(|(id, _)| *id == current) {
+                entry.1 = buffer;
+            }
+        }
+    }
     with_ctx_and_mem(env, |gles, _mem| unsafe { gles.BindBuffer(target, buffer) })
 }
 fn glBufferData(
@@ -1669,6 +1715,10 @@ pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(glIsBuffer(_)),
     export_c_func!(glGenBuffers(_, _)),
     export_c_func!(glDeleteBuffers(_, _)),
+    export_c_func!(glGenVertexArraysOES(_, _)),
+    export_c_func!(glBindVertexArrayOES(_)),
+    export_c_func!(glDeleteVertexArraysOES(_, _)),
+    export_c_func!(glIsVertexArrayOES(_)),
     export_c_func!(glBindBuffer(_, _)),
     export_c_func!(glBufferData(_, _, _, _)),
     export_c_func!(glBufferSubData(_, _, _, _)),
