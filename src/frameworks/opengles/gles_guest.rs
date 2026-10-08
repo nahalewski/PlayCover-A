@@ -386,6 +386,7 @@ fn glScissor(env: &mut Environment, x: GLint, y: GLint, width: GLsizei, height: 
         gles.Scissor(x, y, width, height)
     })
 }
+
 fn glViewport(env: &mut Environment, x: GLint, y: GLint, width: GLsizei, height: GLsizei) {
     // apply scale hack: assume framebuffer's size is larger than the app thinks
     // and scale viewport appropriately

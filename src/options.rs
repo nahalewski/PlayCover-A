@@ -61,6 +61,8 @@ pub struct Options {
     pub trace_messages: bool,
     pub fps_limit: Option<f64>,
     pub force_composition: bool,
+    /// See `--no-landscape-view-adaptation`.
+    pub landscape_view_adaptation: bool,
     pub network_access: bool,
     pub popup_errors: bool,
     pub dumping_options: DumpingOptions,
@@ -98,6 +100,7 @@ impl Default for Options {
             trace_messages: false,
             fps_limit: Some(60.0), // Original iPhone is 60Hz and uses v-sync,
             force_composition: false,
+            landscape_view_adaptation: true,
             network_access: false,
             popup_errors: true,
             dumping_options: Default::default(),
@@ -264,6 +267,8 @@ impl Options {
                     .ok_or_else(|| "Invalid value for --fps-limit=".to_string())?;
                 self.fps_limit = Some(limit);
             }
+        } else if arg == "--no-landscape-view-adaptation" {
+            self.landscape_view_adaptation = false;
         } else if arg == "--force-composition" {
             self.force_composition = true;
         } else if arg == "--allow-network-access" {

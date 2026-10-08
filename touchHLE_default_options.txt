@@ -243,3 +243,5 @@ com.ea.nfshp.bv: --force-composition
 com.ea.nfshp.inc: --force-composition
 com.ea.nfshp.ipad.bv: --force-composition
 com.ea.nfshp.ipad.inc: --force-composition
+# PAC-MAN Remix: no orientation keys; rotates its own views, draws a 320x480 viewport
+com.namconetworks.yellow: --no-landscape-view-adaptation

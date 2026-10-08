@@ -74,11 +74,17 @@ fn CFRunLoopTimerCreate(
     let selector = env.objc.lookup_selector("timerFireMethod:").unwrap();
 
     let repeats = interval > 0.0;
-    msg_class![env; NSTimer timerWithTimeInterval:interval
-                                           target:target
-                                         selector:selector
-                                         userInfo:nil
-                                          repeats:repeats]
+    let timer: id = msg_class![env; NSTimer timerWithTimeInterval:interval
+                                                            target:target
+                                                          selector:selector
+                                                          userInfo:nil
+                                                           repeats:repeats];
+    // CFRunLoopTimerCreate() is a "Create" function: the caller owns the
+    // timer and will CFRelease() it. The NSTimer above is autoreleased, and
+    // apps keep the reference (and e.g. call CFRunLoopTimerIsValid() on it)
+    // long after the autorelease pool is drained.
+    crate::objc::retain(env, timer);
+    timer
 }
 
 fn CFRunLoopAddTimer(
@@ -96,6 +102,25 @@ fn CFRunLoopAddTimer(
     () = msg![env; run_loop addTimer:timer forMode:mode];
 }
 
+/// Re-arm a timer. Apps (e.g. PAC-MAN Remix) use this to drive their main loop.
+fn CFRunLoopTimerSetNextFireDate(
+    env: &mut Environment,
+    timer: CFRunLoopTimerRef,
+    fire_date: CFAbsoluteTime,
+) {
+    let now = crate::frameworks::core_foundation::time::CFAbsoluteTimeGetCurrent(env);
+    crate::frameworks::foundation::ns_timer::set_due_in(env, timer, fire_date - now);
+}
+
+fn CFRunLoopTimerIsValid(env: &mut Environment, timer: CFRunLoopTimerRef) -> bool {
+    // Anything that is not a live object (NULL, a freed timer, or a class
+    // object that a stale reference now points at) is not a valid timer.
+    if timer.is_null() || !crate::frameworks::foundation::ns_timer::is_timer(env, timer) {
+        return false;
+    }
+    msg![env; timer isValid]
+}
+
 fn CFRunLoopTimerInvalidate(env: &mut Environment, timer: CFRunLoopTimerRef) {
     () = msg![env; timer invalidate];
 }
@@ -104,6 +129,8 @@ pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(CFRunLoopTimerCreate(_, _, _, _, _, _, _)),
     export_c_func!(CFRunLoopAddTimer(_, _, _)),
     export_c_func!(CFRunLoopTimerInvalidate(_)),
+    export_c_func!(CFRunLoopTimerIsValid(_)),
+    export_c_func!(CFRunLoopTimerSetNextFireDate(_, _)),
 ];
 
 /// Belongs to _touchHLE_CFTimerTarget

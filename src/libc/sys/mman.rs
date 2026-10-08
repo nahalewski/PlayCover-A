@@ -50,6 +50,12 @@ fn mmap(
         offset
     );
 
+    // A zero-length mapping is an error (e.g. mapping an empty file).
+    if len == 0 {
+        set_errno(env, EINVAL);
+        return crate::mem::Ptr::from_bits(u32::MAX); // MAP_FAILED
+    }
+
     assert_eq!(offset, 0);
     let ptr = if addr.is_null() {
         env.mem.vm_alloc(None, len).unwrap()

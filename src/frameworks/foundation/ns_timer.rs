@@ -166,6 +166,23 @@ pub fn set_time_interval(env: &mut Environment, timer: id, interval: NSTimeInter
     host_object.rust_interval = Duration::from_secs_f64(interval);
 }
 
+/// Whether `object` is a live `NSTimer` instance (not NULL, freed, or a class).
+pub fn is_timer(env: &Environment, object: id) -> bool {
+    env.objc
+        .get_host_object(object)
+        .is_some_and(|host| host.as_any().is::<NSTimerHostObject>())
+}
+
+/// For use by `CFRunLoopTimerSetNextFireDate()`: make a valid timer fire
+/// `seconds` from now (immediately if negative). Invalidated timers stay so.
+pub fn set_due_in(env: &mut Environment, timer: id, seconds: NSTimeInterval) {
+    let host_object = env.objc.borrow_mut::<NSTimerHostObject>(timer);
+    if host_object.due_by.is_some() {
+        let delay = Duration::from_secs_f64(seconds.clamp(0.0, 60.0 * 60.0 * 24.0 * 365.0));
+        host_object.due_by = Instant::now().checked_add(delay);
+    }
+}
+
 /// For use by `NSRunLoop`
 pub(super) fn set_run_loop(env: &mut Environment, timer: id, run_loop: id) {
     let host_object = env.objc.borrow_mut::<NSTimerHostObject>(timer);

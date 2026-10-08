@@ -216,7 +216,7 @@ pub const CLASSES: ClassExports = objc_classes! {
     })});
     let new_orientation = env.window().current_rotation();
     if prev_orientation != new_orientation {
-        if !env.bundle.declares_interface_orientation() {
+        if env.options.landscape_view_adaptation && !env.bundle.declares_interface_orientation() {
             adapt_root_views_to_landscape(env, new_orientation);
         }
         generate_device_orientation_notification(env);

@@ -31,9 +31,20 @@ pub struct State {
 // an allocation for any of these, so presumably iPhone OS does too.
 // (touchHLE's allocator will round up allocations to at least 16 bytes.)
 
+/// Requests this large (e.g. a failed size computation that wrapped to -1)
+/// can never succeed in a 32-bit address space; like a real `malloc()`, fail
+/// with `ENOMEM` and a NULL pointer instead of crashing the allocator.
+const IMPOSSIBLE_ALLOCATION_SIZE: GuestUSize = 0x8000_0000;
+
 fn malloc(env: &mut Environment, size: GuestUSize) -> MutVoidPtr {
     // TODO: handle errno properly
     set_errno(env, 0);
+
+    if size >= IMPOSSIBLE_ALLOCATION_SIZE {
+        log!("Warning: malloc({:#x}) can't be satisfied, returning NULL", size);
+        set_errno(env, crate::libc::errno::ENOMEM);
+        return Ptr::null();
+    }
 
     env.mem.alloc(size)
 }
@@ -46,7 +57,14 @@ fn calloc(env: &mut Environment, count: GuestUSize, size: GuestUSize) -> MutVoid
     // TODO: handle errno properly
     set_errno(env, 0);
 
-    let total = size.checked_mul(count).unwrap();
+    let total = match size.checked_mul(count) {
+        Some(total) if total < IMPOSSIBLE_ALLOCATION_SIZE => total,
+        _ => {
+            log!("Warning: calloc({:#x}, {:#x}) can't be satisfied, returning NULL", count, size);
+            set_errno(env, crate::libc::errno::ENOMEM);
+            return Ptr::null();
+        }
+    };
     env.mem.calloc(total)
 }
 

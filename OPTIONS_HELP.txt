@@ -270,6 +270,14 @@ Other options:
         they present frames; increasing the limit will not increase their
         framerate, but may make it less consistent.
 
+    --no-landscape-view-adaptation
+        Apps that declare no interface orientation but call
+        -[UIApplication setStatusBarOrientation:] to go landscape normally get
+        their full-screen views resized to landscape bounds (some apps, e.g.
+        Secret of Mana, expect this). Apps that instead rotate their own
+        content and keep drawing into a portrait-sized view (e.g. PAC-MAN
+        Remix) look wrong that way; this option turns the resizing off.
+
     --force-composition
         Forces presentation of renderbuffer as if no fullscreen EAGL layer is
         present, i.e. renderbuffer will go through the compositor.
