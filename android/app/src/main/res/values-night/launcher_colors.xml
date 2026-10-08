@@ -1,0 +1,11 @@
+<resources>
+    <color name="launcher_background">#080C1B</color>
+    <color name="launcher_surface">#171C2C</color>
+    <color name="launcher_primary">#FFB866</color>
+    <color name="launcher_on_primary">#382000</color>
+    <color name="launcher_text">#FFF1E6</color>
+    <color name="launcher_muted">#C7BDB5</color>
+    <color name="launcher_primary_container">#613B10</color>
+    <color name="launcher_on_primary_container">#FFE0B5</color>
+    <color name="launcher_outline">#978779</color>
+</resources>

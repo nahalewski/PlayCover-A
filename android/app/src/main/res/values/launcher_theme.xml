@@ -1,0 +1,20 @@
+<resources>
+    <style name="Theme.Anastasis" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/launcher_primary</item>
+        <item name="colorOnPrimary">@color/launcher_on_primary</item>
+        <item name="colorPrimaryContainer">@color/launcher_primary_container</item>
+        <item name="colorOnPrimaryContainer">@color/launcher_on_primary_container</item>
+        <item name="colorSecondary">@color/launcher_primary</item>
+        <item name="colorOnSecondary">@color/launcher_on_primary</item>
+        <item name="colorSecondaryContainer">@color/launcher_primary_container</item>
+        <item name="colorOnSecondaryContainer">@color/launcher_on_primary_container</item>
+        <item name="colorSurface">@color/launcher_surface</item>
+        <item name="colorOnSurface">@color/launcher_text</item>
+        <item name="colorOnSurfaceVariant">@color/launcher_muted</item>
+        <item name="colorOutline">@color/launcher_outline</item>
+        <item name="android:colorBackground">@color/launcher_background</item>
+        <item name="android:windowBackground">@color/launcher_background</item>
+        <item name="android:fontFamily">sans</item>
+        <item name="android:windowActionModeOverlay">true</item>
+    </style>
+</resources>

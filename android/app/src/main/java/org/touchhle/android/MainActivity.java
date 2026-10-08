@@ -429,7 +429,7 @@ public class MainActivity extends SDLActivity {
         String[] settings = getIntent().getStringArrayExtra(EXTRA_RUNTIME_OPTIONS);
         if (settings != null) {
             for (String setting : settings) {
-                if (setting != null && (setting.matches("--scale-hack=[1-4]") ||
+                if (setting != null && (setting.matches("--scale-hack=[1-4]") || setting.matches("--fps-limit=[0-9]{1,3}") ||
                     setting.equals("--upside-down") || setting.equals("--landscape-left") ||
                     setting.equals("--landscape-right") || setting.equals("--allow-network-access") ||
                     setting.equals("--disable-analog-stick-tilt-controls") || validReportedIosVersion(setting))) {

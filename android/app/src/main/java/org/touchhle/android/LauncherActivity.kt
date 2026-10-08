@@ -5,9 +5,24 @@
  */
 package org.touchhle.android
 
-import android.app.Activity
+import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
+import androidx.core.view.WindowCompat
+import android.content.res.ColorStateList
+import com.google.android.material.button.MaterialButton
+import com.google.android.material.button.MaterialButtonToggleGroup
+import com.google.android.material.bottomnavigation.BottomNavigationView
+import com.google.android.material.navigation.NavigationBarView
+import com.google.android.material.appbar.MaterialToolbar
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import com.google.android.material.materialswitch.MaterialSwitch
+import com.google.android.material.chip.Chip
+import com.google.android.material.textfield.TextInputLayout
+import com.google.android.material.textfield.TextInputEditText
+import com.google.android.material.progressindicator.LinearProgressIndicator
 import android.app.AlertDialog
-import android.app.ProgressDialog
+import androidx.appcompat.app.AlertDialog as MaterialDialog
+import com.google.android.material.card.MaterialCardView
 import android.content.Intent
 import android.graphics.Color
 import android.graphics.Bitmap
@@ -34,6 +49,7 @@ import android.widget.TextView
 import android.widget.Toast
 import android.widget.EditText
 import android.widget.ListView
+import android.widget.GridView
 import android.widget.ImageView
 import android.widget.ArrayAdapter
 import android.text.TextWatcher
@@ -50,7 +66,7 @@ import java.io.File
  * Android's file picker. Tapping an app starts it in [MainActivity], which
  * hosts the emulator.
  */
-class LauncherActivity : Activity() {
+class LauncherActivity : AppCompatActivity() {
     private lateinit var appsDir: File
     private val apps = ArrayList<File>()
     private var downloadJobs: List<IpaDownloads.Job> = emptyList()
@@ -61,9 +77,11 @@ class LauncherActivity : Activity() {
     private lateinit var adapter: AppAdapter
     private lateinit var emptyView: View
     private lateinit var installedList: ListView
+    private lateinit var installedGrid: GridView
+    private val gridMode get() = prefs.getBoolean("library_grid", false)
     private val repositoryWorker = Executors.newSingleThreadExecutor()
     private var repositoryTransfer: RepoSources.Transfer? = null
-    private var repositoryProgress: ProgressDialog? = null
+    private var repositoryProgress: MaterialDialog? = null
     private lateinit var libraryPage: View
     private var repositoryPage = "library"
     private var repositorySourceURL: String? = null
@@ -91,6 +109,11 @@ class LauncherActivity : Activity() {
         super.onCreate(savedInstanceState)
         window.statusBarColor = BACKGROUND
         window.navigationBarColor = BACKGROUND
+        val light = resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK != android.content.res.Configuration.UI_MODE_NIGHT_YES
+        WindowCompat.getInsetsController(window, window.decorView).apply {
+            isAppearanceLightStatusBars = light
+            isAppearanceLightNavigationBars = light
+        }
 
         appsDir = File(getExternalFilesDir(null), "touchHLE_apps").also { it.mkdirs() }
         getExternalFilesDir(null)?.let { ScanCache.init(it) }
@@ -106,12 +129,33 @@ class LauncherActivity : Activity() {
             setPadding(dp(20), dp(24), dp(20), dp(12))
         }
         header.addView(TextView(this).apply {
-            text = "Anastasis"; textSize = 30f; setTextColor(Color.WHITE)
+            text = "Anastasis"; textSize = 30f; setTextColor(TEXT_PRIMARY)
             typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
         }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         header.addView(actionButton("＋ Add IPA") { pickIpa() })
         root.addView(header)
-        root.addView(sectionLabel("INSTALLED IPAS"))
+        root.addView(LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            addView(sectionLabel("INSTALLED IPAS"), LinearLayout.LayoutParams(0, -2, 1f))
+            addView(MaterialButtonToggleGroup(this@LauncherActivity).apply {
+                isSingleSelection = true; isSelectionRequired = true
+                addView(MaterialButton(context, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+                    id = View.generateViewId(); text = "List"; isAllCaps = false
+                    setIconResource(R.drawable.ic_nav_library)
+                })
+                addView(MaterialButton(context, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+                    id = View.generateViewId(); text = "Grid"; isAllCaps = false
+                    setIconResource(R.drawable.ic_nav_repositories)
+                })
+                check(getChildAt(if (gridMode) 1 else 0).id)
+                addOnButtonCheckedListener { group, checkedId, checked ->
+                    if (checked) {
+                        prefs.edit().putBoolean("library_grid", checkedId == group.getChildAt(1).id).apply()
+                        updateLibraryVisibility()
+                    }
+                }
+            }, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(16) })
+        })
         val content = FrameLayout(this)
         adapter = AppAdapter()
         installedList = ListView(this).apply {
@@ -128,11 +172,20 @@ class LauncherActivity : Activity() {
             }
         }
         content.addView(installedList)
+        installedGrid = GridView(this).apply {
+            numColumns = GridView.AUTO_FIT; columnWidth = dp(144)
+            horizontalSpacing = dp(12); verticalSpacing = dp(12)
+            stretchMode = GridView.STRETCH_COLUMN_WIDTH
+            setPadding(dp(16), dp(8), dp(16), dp(16)); clipToPadding = false
+            selector = rounded(Color.TRANSPARENT, 0)
+            adapter = this@LauncherActivity.adapter
+        }
+        content.addView(installedGrid)
         emptyView = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER
             setPadding(dp(32), dp(32), dp(32), dp(32))
             addView(TextView(context).apply {
-                text = "No installed IPAs"; textSize = 22f; setTextColor(Color.WHITE)
+                text = "No installed IPAs"; textSize = 22f; setTextColor(TEXT_PRIMARY)
                 gravity = Gravity.CENTER
             })
             addView(TextView(context).apply {
@@ -160,7 +213,6 @@ class LauncherActivity : Activity() {
             when (savedInstanceState?.getString("repository_page")) {
                 "sources" -> showRepositories()
                 "settings" -> showSettings()
-                "store" -> showAppleStore() 
                 "apps" -> {
                     showRepositories()
                     repositoryQuery = savedInstanceState?.getString("repository_query", "") ?: ""
@@ -240,14 +292,14 @@ class LauncherActivity : Activity() {
                 sources.map { "${it.name}\n${it.url}" }) {
                 override fun getView(position: Int, convertView: View?, parent: ViewGroup): View =
                     (super.getView(position, convertView, parent) as TextView).apply {
-                        setTextColor(Color.WHITE); textSize = 15f; background = rounded(CARD, 14)
+                        setTextColor(TEXT_PRIMARY); textSize = 15f; background = rounded(CARD, 14)
                         setPadding(dp(16), dp(18), dp(16), dp(18))
                     }
             }
             setOnItemClickListener { _, _, position, _ -> repositoryQuery = ""; fetchRepository(sources[position].url) }
             setOnItemLongClickListener { _, _, position, _ ->
                 val source = sources[position]
-                AlertDialog.Builder(this@LauncherActivity).setTitle("Remove ${source.name}?")
+                MaterialAlertDialogBuilder(this@LauncherActivity).setTitle("Remove ${source.name}?")
                     .setPositiveButton("Remove") { _, _ -> saveRepositories(sources.filter { it.url != source.url }); showRepositories() }
                     .setNegativeButton("Cancel", null).show()
                 true
@@ -262,13 +314,13 @@ class LauncherActivity : Activity() {
             orientation = LinearLayout.VERTICAL; setBackgroundColor(BACKGROUND); fitsSystemWindows = true
             setPadding(dp(16), dp(12), dp(16), dp(12))
         }
-        page.addView(Button(this).apply {
-            text = "‹ Back"; isAllCaps = false; setTextColor(ACCENT); background = rounded(CARD, 12); setOnClickListener { back() }
-        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(44)))
-        page.addView(TextView(this).apply {
-            text = title; setTextColor(Color.WHITE); textSize = 24f
-            setPadding(dp(4), dp(12), dp(4), dp(16))
-        })
+        page.addView(MaterialToolbar(this).apply {
+            this.title = title
+            setTitleTextColor(TEXT_PRIMARY)
+            setNavigationIcon(R.drawable.ic_nav_back)
+            navigationContentDescription = "Back"
+            setNavigationOnClickListener { back() }
+        }, LinearLayout.LayoutParams(-1, dp(64)))
         return page
     }
 
@@ -284,7 +336,7 @@ class LauncherActivity : Activity() {
     override fun onBackPressed() {
         when (repositoryPage) {
             "apps" -> { repositoryTransfer?.cancel(); showRepositories() }
-            "sources", "settings", "store" -> showLibrary()
+            "sources", "settings" -> showLibrary()
             else -> super.onBackPressed()
         }
     }
@@ -304,7 +356,7 @@ class LauncherActivity : Activity() {
             isSingleLine = true
             hint = "HTTPS source URL or AltStore source link"
         }
-        val dialog = AlertDialog.Builder(this).setTitle("Add repository")
+        val dialog = MaterialAlertDialogBuilder(this).setTitle("Add repository")
             .setView(input).setPositiveButton("Add", null).setNegativeButton("Cancel", null).create()
         dialog.setOnShowListener {
             dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
@@ -319,7 +371,7 @@ class LauncherActivity : Activity() {
     }
 
     private fun repositoryError(error: Exception) {
-        if (!isFinishing && !isDestroyed) AlertDialog.Builder(this)
+        if (!isFinishing && !isDestroyed) MaterialAlertDialogBuilder(this)
             .setTitle("Repository error").setMessage(error.message ?: "Request failed")
             .setPositiveButton("OK", null).show()
     }
@@ -331,12 +383,11 @@ class LauncherActivity : Activity() {
         }
         val transfer = RepoSources.Transfer()
         repositoryTransfer = transfer
-        repositoryProgress = ProgressDialog(this).apply {
-            setTitle(title); setMessage("Connecting…"); setCancelable(true)
-            setOnCancelListener { transfer.cancel() }
-            setButton(ProgressDialog.BUTTON_NEGATIVE, "Cancel") { _, _ -> transfer.cancel() }
-            show()
-        }
+        repositoryProgress = MaterialAlertDialogBuilder(this)
+            .setTitle(title).setMessage("Connecting…")
+            .setView(LinearProgressIndicator(this).apply { isIndeterminate = true })
+            .setNegativeButton("Cancel") { _, _ -> transfer.cancel() }
+            .setOnCancelListener { transfer.cancel() }.show()
         return transfer
     }
 
@@ -374,11 +425,13 @@ class LauncherActivity : Activity() {
         repositoryPage = "apps"
         repositorySourceURL = url
         val layout = repositoryPageView(feed.name) { showRepositories() }
-        val search = EditText(this).apply {
-            hint = "Search apps"; isSingleLine = true; setTextColor(Color.WHITE); setHintTextColor(TEXT_DIM)
-            background = rounded(CARD, 14); setPadding(dp(16), dp(12), dp(16), dp(12))
-        }
-        layout.addView(search)
+        val search = TextInputEditText(this).apply { isSingleLine = true }
+        layout.addView(TextInputLayout(this).apply {
+            hint = "Search apps"
+            boxBackgroundMode = TextInputLayout.BOX_BACKGROUND_FILLED
+            setBoxCornerRadii(dp(20).toFloat(), dp(20).toFloat(), dp(20).toFloat(), dp(20).toFloat())
+            addView(search, LinearLayout.LayoutParams(-1, -2))
+        })
         if (feed.skipped > 0) layout.addView(TextView(this).apply {
             text = "${feed.skipped} listings have no supported HTTPS download."
         })
@@ -388,7 +441,7 @@ class LauncherActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
             setPadding(0, dp(8), 0, dp(8))
         }
-        val filterButtons = ArrayList<Pair<RepoSources.Category?, Button>>()
+        val filterButtons = ArrayList<Pair<RepoSources.Category?, Chip>>()
         fun refreshResults() {
             val query = repositoryQuery.trim()
             visible.clear()
@@ -399,15 +452,14 @@ class LauncherActivity : Activity() {
             rows.notifyDataSetChanged()
             filterButtons.forEach { (category, button) ->
                 val selected = category == repositoryCategory
-                button.isSelected = selected
-                button.setTextColor(if (selected) Color.BLACK else Color.WHITE)
-                button.background = rounded(if (selected) ACCENT else CARD, 18)
+                button.isChecked = selected
                 button.contentDescription = "${button.text} filter${if (selected) ", selected" else ""}"
             }
         }
         val categories: List<RepoSources.Category?> = listOf(null) + RepoSources.Category.values().toList()
         categories.forEach { category ->
-            val button = Button(this).apply {
+            val button = Chip(this).apply {
+                isCheckable = true
                 text = category?.label ?: "All"
                 isAllCaps = false
                 textSize = 14f
@@ -448,7 +500,7 @@ class LauncherActivity : Activity() {
         })
         list.setOnItemClickListener { _, _, position, _ ->
             val app = visible[position]
-            AlertDialog.Builder(this).setTitle(app.name)
+            MaterialAlertDialogBuilder(this).setTitle(app.name)
                 .setMessage("Version ${app.version}\n${app.identifier}\n${app.downloadURL}\n\nDownload the IPA to your library. Compatibility depends on the app.")
                 .setPositiveButton("Download") { _, _ -> downloadRepositoryApp(app) }
                 .setNegativeButton("Cancel", null).show()
@@ -463,13 +515,13 @@ class LauncherActivity : Activity() {
         override fun getItem(position: Int) = rows[position]
         override fun getItemId(position: Int) = position.toLong()
         override fun getView(position: Int, convertView: View?, parent: ViewGroup?): View {
-            val row = convertView as? LinearLayout ?: LinearLayout(this@LauncherActivity).apply {
+            val row = (convertView as? MaterialCardView)?.getChildAt(0) as? LinearLayout ?: LinearLayout(this@LauncherActivity).apply {
                 orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
                 setPadding(dp(12), dp(12), dp(12), dp(12)); background = rounded(CARD, 14)
                 addView(ImageView(this@LauncherActivity).apply { scaleType = ImageView.ScaleType.CENTER_CROP },
                     LinearLayout.LayoutParams(dp(56), dp(56)))
                 addView(TextView(this@LauncherActivity).apply {
-                    id = android.R.id.text1; setTextColor(Color.WHITE); textSize = 16f
+                    id = android.R.id.text1; setTextColor(TEXT_PRIMARY); textSize = 16f
                     setPadding(dp(14), 0, 0, 0)
                 }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
             }
@@ -511,7 +563,7 @@ class LauncherActivity : Activity() {
                     }
                 }
             }
-            return row
+            return materialCard(row)
         }
     }
 
@@ -548,9 +600,14 @@ class LauncherActivity : Activity() {
             ?.sortedBy { it.name.lowercase() }
             ?.let { apps.addAll(it) }
         adapter.notifyDataSetChanged()
+        updateLibraryVisibility()
+    }
+
+    private fun updateLibraryVisibility() {
         val empty = apps.isEmpty() && downloadJobs.isEmpty()
         emptyView.visibility = if (empty) View.VISIBLE else View.GONE
-        installedList.visibility = if (empty) View.GONE else View.VISIBLE
+        installedList.visibility = if (!empty && !gridMode) View.VISIBLE else View.GONE
+        installedGrid.visibility = if (!empty && gridMode) View.VISIBLE else View.GONE
     }
 
     // --- Crash report ------------------------------------------------------
@@ -592,7 +649,7 @@ class LauncherActivity : Activity() {
             typeface = Typeface.MONOSPACE; setTextIsSelectable(true)
             setPadding(dp(20), dp(8), dp(20), dp(8))
         }
-        val dialog = AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+        val dialog = MaterialAlertDialogBuilder(this)
             .setTitle("$game stopped unexpectedly")
             .setView(ScrollView(this).apply { addView(body) })
             .setPositiveButton("Copy report") { _, _ ->
@@ -628,7 +685,7 @@ class LauncherActivity : Activity() {
                 if (scan.serious > sample.size) append("\n   …and ${scan.serious - sample.size} more")
             }
         }
-        AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+        MaterialAlertDialogBuilder(this)
             .setTitle(info?.displayName ?: prettyName(app))
             .setMessage(text)
             .setPositiveButton("Mark…") { _, _ -> markCompatibility(app) }
@@ -639,7 +696,7 @@ class LauncherActivity : Activity() {
     private fun markCompatibility(app: File) {
         val options = listOf("Works" to CompatStore.Status.WORKS, "Partial" to CompatStore.Status.PARTIAL,
             "Broken" to CompatStore.Status.BROKEN, "Clear my mark" to null)
-        AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+        MaterialAlertDialogBuilder(this)
             .setTitle("Mark ${prettyName(app)} as")
             .setItems(options.map { it.first }.toTypedArray()) { _, which ->
                 compat.mark(app.name, options[which].second)
@@ -678,6 +735,7 @@ class LauncherActivity : Activity() {
         prefs.edit().putString("last_launch_name", app.name).putLong("last_launch_time", System.currentTimeMillis()).apply()
         val runtimeOptions = currentEmulatorSettings().runtimeArguments().toMutableList()
         infoCache[key]?.minimumIosVersion?.let { runtimeOptions.add("--reported-ios-version=$it") }
+        prefs.getInt(fpsKey(app), 0).takeIf { it in 1..240 }?.let { runtimeOptions.add("--fps-limit=$it") }
         startActivity(Intent(this, MainActivity::class.java).apply {
             putExtra(MainActivity.EXTRA_APP_PATH, app.absolutePath)
             putExtra(MainActivity.EXTRA_COMPAT, prefs.getBoolean(PREF_COMPAT, true))
@@ -693,7 +751,7 @@ class LauncherActivity : Activity() {
         }
         // The emulator can only run one app per process, so a game that is
         // already running has to be quit before another one can start.
-        AlertDialog.Builder(this)
+        MaterialAlertDialogBuilder(this)
             .setTitle("A game is already running")
             .setMessage("Switch back to it, or quit it and start ${prettyName(app)}?")
             .setPositiveButton("Switch back") { _, _ ->
@@ -712,7 +770,7 @@ class LauncherActivity : Activity() {
     }
 
     private fun confirmRemove(app: File) {
-        AlertDialog.Builder(this)
+        MaterialAlertDialogBuilder(this)
             .setTitle("Remove ${prettyName(app)}?")
             .setMessage("This deletes the file from Anastasis's storage. The original you picked is not touched.")
             .setPositiveButton("Remove") { _, _ ->
@@ -769,13 +827,10 @@ class LauncherActivity : Activity() {
 
     private fun importUris(uris: List<Uri>) {
         @Suppress("DEPRECATION")
-        val progress = ProgressDialog(this).apply {
-            setTitle("Adding apps")
-            setMessage("Copying…")
-            isIndeterminate = true
-            setCancelable(false)
-            show()
-        }
+        val progress = MaterialAlertDialogBuilder(this)
+            .setTitle("Adding apps").setMessage("Copying…")
+            .setView(LinearProgressIndicator(this).apply { isIndeterminate = true })
+            .setCancelable(false).show()
         Thread {
             val added = ArrayList<String>()
             val skipped = ArrayList<String>()
@@ -841,9 +896,23 @@ class LauncherActivity : Activity() {
     }
 
     private fun installedActions(app: File) {
-        AlertDialog.Builder(this).setTitle(infoFor(app)?.displayName ?: prettyName(app))
-            .setItems(arrayOf("Launch", "Compatibility details", "Add to home screen", "Remove")) { _, which ->
-                when (which) { 0 -> launch(app); 1 -> showCompatibilityDetails(app); 2 -> addHomeShortcut(app); 3 -> confirmRemove(app) }
+        MaterialAlertDialogBuilder(this).setTitle(infoFor(app)?.displayName ?: prettyName(app))
+            .setItems(arrayOf("Launch", "Frame rate limit…", "Compatibility details", "Add to home screen", "Remove")) { _, which ->
+                when (which) { 0 -> launch(app); 1 -> chooseFrameRate(app); 2 -> showCompatibilityDetails(app); 3 -> addHomeShortcut(app); 4 -> confirmRemove(app) }
+            }.setNegativeButton("Cancel", null).show()
+    }
+
+    private fun fpsKey(app: File) = "fps_limit:${app.name}"
+
+    /** Per-game frame rate cap. Frame-locked games run too fast if they present faster than they were written for. */
+    private fun chooseFrameRate(app: File) {
+        val labels = arrayOf("Default (built-in setting for this game)", "60 fps", "30 fps", "24 fps", "20 fps", "15 fps", "12 fps", "10 fps")
+        val values = intArrayOf(0, 60, 30, 24, 20, 15, 12, 10)
+        val selected = values.indexOf(prefs.getInt(fpsKey(app), 0)).coerceAtLeast(0)
+        MaterialAlertDialogBuilder(this).setTitle("Frame rate limit")
+            .setSingleChoiceItems(labels, selected) { dialog, which ->
+                prefs.edit().putInt(fpsKey(app), values[which]).apply()
+                dialog.dismiss()
             }.setNegativeButton("Cancel", null).show()
     }
 
@@ -851,10 +920,24 @@ class LauncherActivity : Activity() {
         HomeShortcuts.pin(this, app, prettyName(app), infoFor(app)?.icon)
     }
 
-    private fun actionButton(label: String, action: () -> Unit): Button = Button(this).apply {
-        text = label; isAllCaps = false; setTextColor(Color.WHITE)
-        background = rounded(ACCENT, 14); setPadding(dp(16), dp(8), dp(16), dp(8))
-        stateListAnimator = null; setOnClickListener { action() }
+    private fun materialCard(content: View): MaterialCardView {
+        (content.parent as? MaterialCardView)?.let { return it }
+        return MaterialCardView(this).apply {
+            radius = dp(20).toFloat()
+            cardElevation = 0f
+            strokeWidth = dp(1)
+            strokeColor = ContextCompat.getColor(this@LauncherActivity, R.color.launcher_outline)
+            setCardBackgroundColor(CARD)
+            content.background = null
+            addView(content, ViewGroup.LayoutParams(-1, -2))
+        }
+    }
+
+    private fun actionButton(label: String, action: () -> Unit): Button = MaterialButton(this).apply {
+        text = label; isAllCaps = false; setTextColor(ON_PRIMARY)
+        backgroundTintList = ColorStateList.valueOf(ACCENT)
+        cornerRadius = dp(24); minHeight = dp(48)
+        setOnClickListener { action() }
     }
 
     private fun sectionLabel(label: String): TextView = TextView(this).apply {
@@ -862,18 +945,16 @@ class LauncherActivity : Activity() {
         setPadding(dp(20), dp(12), dp(20), dp(10))
     }
 
-    private fun bottomTabs(selected: String): View = LinearLayout(this).apply {
-        orientation = LinearLayout.HORIZONTAL; background = rounded(CARD, 0)
-        setPadding(dp(4), dp(8), dp(4), dp(8))
-        listOf("library" to "Installed IPAs", "sources" to "Repositories", "store" to "App Store", "settings" to "Settings").forEach { (key, label) ->
-            addView(TextView(this@LauncherActivity).apply {
-                text = label; textSize = 13f; gravity = Gravity.CENTER; minHeight = dp(48)
-                setTextColor(if (key == selected) ACCENT else TEXT_DIM)
-                typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-                setOnClickListener {
-                    when (key) { "library" -> showLibrary(); "sources" -> showRepositories(); "store" -> showAppleStore(); else -> showSettings() }
-                }
-            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+    private fun bottomTabs(selected: String): View = BottomNavigationView(this).apply {
+        setBackgroundColor(CARD)
+        labelVisibilityMode = NavigationBarView.LABEL_VISIBILITY_LABELED
+        menu.add(0, 1, 0, "Installed IPAs").setIcon(R.drawable.ic_nav_library)
+        menu.add(0, 2, 1, "Repositories").setIcon(R.drawable.ic_nav_repositories)
+        menu.add(0, 3, 2, "Settings").setIcon(R.drawable.ic_nav_settings)
+        selectedItemId = when (selected) { "sources" -> 2; "settings" -> 3; else -> 1 }
+        setOnItemSelectedListener { item ->
+            when (item.itemId) { 1 -> showLibrary(); 2 -> showRepositories(); 3 -> showSettings() }
+            true
         }
     }
 
@@ -887,10 +968,6 @@ class LauncherActivity : Activity() {
     }
 
 
-    private fun showAppleStore() {
-        repositoryTransfer?.cancel()
-        startActivity(Intent(this, AppleStoreActivity::class.java))
-    }
 
     private fun showSettings() {
         repositoryTransfer?.cancel(); repositoryPage = "settings"; repositorySourceURL = null
@@ -902,10 +979,6 @@ class LauncherActivity : Activity() {
             text = "Changes apply the next time you launch an app. Default keeps each app's own settings. Android always uses full screen."
             setTextColor(TEXT_DIM); textSize = 13f
             setPadding(dp(4), 0, dp(4), dp(12))
-        })
-        content.addView(sectionLabel("APP STORE"))
-        content.addView(actionButton("Apple account and connection") {
-            startActivity(Intent(this, AppleStoreActivity::class.java).putExtra("settings", true))
         })
         content.addView(sectionLabel("DISPLAY"))
         addSettingChoice(content, "Internal resolution", "Higher resolutions may reduce performance or break some apps.",
@@ -925,13 +998,13 @@ class LauncherActivity : Activity() {
         }
         row.addView(TextView(this).apply {
             text = "Compatibility mode\nContinue past unsupported calls. This can hide app errors and does not guarantee compatibility."
-            textSize = 14f; setTextColor(Color.WHITE)
+            textSize = 14f; setTextColor(TEXT_PRIMARY)
         }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        row.addView(Switch(this).apply {
+        row.addView(MaterialSwitch(this).apply {
             contentDescription = "Compatibility mode"; isChecked = prefs.getBoolean(PREF_COMPAT, true)
             setOnCheckedChangeListener { _, checked -> prefs.edit().putBoolean(PREF_COMPAT, checked).apply() }
         })
-        content.addView(row)
+        content.addView(materialCard(row))
         content.addView(sectionLabel("Anastasis · powered by touchHLE"))
         displayPage(page, "settings")
     }
@@ -945,10 +1018,10 @@ class LauncherActivity : Activity() {
 
     private fun addSettingChoice(parent: LinearLayout, title: String, detail: String,
                                  key: String, choices: List<Pair<String, String>>) {
-        val button = Button(this).apply {
+        val button = MaterialButton(this).apply {
             isAllCaps = false; gravity = Gravity.START or Gravity.CENTER_VERTICAL
-            setTextColor(Color.WHITE); textSize = 14f
-            setPadding(dp(16), dp(12), dp(16), dp(12)); background = rounded(CARD, 14)
+            setTextColor(TEXT_PRIMARY); textSize = 14f
+            setPadding(dp(16), dp(12), dp(16), dp(12)); backgroundTintList = ColorStateList.valueOf(CARD); cornerRadius = dp(16)
         }
         fun updateLabel() {
             val choice = choices.firstOrNull { it.second == prefs.getString(key, "default") } ?: choices.first()
@@ -958,7 +1031,7 @@ class LauncherActivity : Activity() {
         updateLabel()
         button.setOnClickListener {
             val selected = choices.indexOfFirst { it.second == prefs.getString(key, "default") }.coerceAtLeast(0)
-            AlertDialog.Builder(this).setTitle(title)
+            MaterialAlertDialogBuilder(this).setTitle(title)
                 .setSingleChoiceItems(choices.map { it.first }.toTypedArray(), selected) { dialog, which ->
                     prefs.edit().putString(key, choices[which].second).apply()
                     updateLabel(); dialog.dismiss()
@@ -974,13 +1047,13 @@ class LauncherActivity : Activity() {
             background = rounded(CARD, 14); setPadding(dp(16), dp(16), dp(16), dp(16))
         }
         row.addView(TextView(this).apply {
-            text = "$title\n$detail"; textSize = 14f; setTextColor(Color.WHITE)
+            text = "$title\n$detail"; textSize = 14f; setTextColor(TEXT_PRIMARY)
         }, LinearLayout.LayoutParams(0, -2, 1f))
-        row.addView(Switch(this).apply {
+        row.addView(MaterialSwitch(this).apply {
             contentDescription = title; isChecked = prefs.getBoolean(key, default)
             setOnCheckedChangeListener { _, checked -> prefs.edit().putBoolean(key, checked).apply() }
         })
-        parent.addView(row, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(8) })
+        parent.addView(materialCard(row), LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(8) })
     }
 
     private inner class AppAdapter : BaseAdapter() {
@@ -991,24 +1064,25 @@ class LauncherActivity : Activity() {
         override fun getViewTypeCount() = 2
         override fun getItemViewType(position: Int) = if (position < downloadJobs.size) 1 else 0
         override fun getView(position: Int, convertView: View?, parent: ViewGroup?): View {
+            if (parent is GridView) return gridTile(position, convertView)
             if (position < downloadJobs.size) return downloadRow(downloadJobs[position], convertView)
             val app = apps[position - downloadJobs.size]
             val info = infoFor(app)
             val name = info?.displayName ?: prettyName(app)
-            val row = convertView as? LinearLayout ?: LinearLayout(this@LauncherActivity).apply {
+            val row = (convertView as? MaterialCardView)?.getChildAt(0) as? LinearLayout ?: LinearLayout(this@LauncherActivity).apply {
                 orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
                 background = rounded(CARD, 16); setPadding(dp(14), dp(14), dp(14), dp(14))
                 addView(FrameLayout(this@LauncherActivity).apply {
                     background = rounded(ACCENT, 13); clipToOutline = true
                     addView(TextView(context).apply {
-                        gravity = Gravity.CENTER; setTextColor(Color.WHITE); textSize = 28f
+                        gravity = Gravity.CENTER; setTextColor(ON_PRIMARY); textSize = 28f
                     }, FrameLayout.LayoutParams(-1, -1))
                     addView(ImageView(context).apply { scaleType = ImageView.ScaleType.CENTER_CROP }, FrameLayout.LayoutParams(-1, -1))
                 }, LinearLayout.LayoutParams(dp(60), dp(60)))
                 addView(LinearLayout(this@LauncherActivity).apply {
                     orientation = LinearLayout.VERTICAL; setPadding(dp(14), 0, dp(8), 0)
                     addView(TextView(context).apply {
-                        id = android.R.id.text1; textSize = 17f; setTextColor(Color.WHITE); maxLines = 2
+                        id = android.R.id.text1; textSize = 17f; setTextColor(TEXT_PRIMARY); maxLines = 2
                         typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
                     })
                     addView(TextView(context).apply {
@@ -1067,17 +1141,99 @@ class LauncherActivity : Activity() {
                 contentDescription = "Compatibility: ${badge.status.label}" + (badge.note?.let { ". $it" } ?: "")
                 setOnClickListener { showCompatibilityDetails(app) }
             }
-            return row
+            return materialCard(row)
+        }
+
+        private fun gridTile(position: Int, convertView: View?): View {
+            val tile = convertView as? LinearLayout ?: LinearLayout(this@LauncherActivity).apply {
+                orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL
+                setPadding(dp(8), dp(8), dp(8), dp(8))
+                addView(FrameLayout(context).apply {
+                    background = rounded(ACCENT, 20); clipToOutline = true
+                    addView(TextView(context).apply {
+                        gravity = Gravity.CENTER; textSize = 32f; setTextColor(ON_PRIMARY)
+                    }, FrameLayout.LayoutParams(-1, -1))
+                    addView(ImageView(context).apply { scaleType = ImageView.ScaleType.CENTER_CROP },
+                        FrameLayout.LayoutParams(-1, -1))
+                }, LinearLayout.LayoutParams(dp(80), dp(80)))
+                addView(TextView(context).apply {
+                    gravity = Gravity.CENTER; textSize = 14f; maxLines = 2
+                    ellipsize = android.text.TextUtils.TruncateAt.END; setTextColor(TEXT_PRIMARY)
+                    typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+                    setPadding(0, dp(8), 0, 0)
+                }, LinearLayout.LayoutParams(-1, dp(48)))
+                addView(LinearProgressIndicator(context).apply { max = 1000 },
+                    LinearLayout.LayoutParams(-1, dp(8)))
+                addView(LinearLayout(context).apply {
+                    orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+                    addView(TextView(context).apply {
+                        gravity = Gravity.CENTER; textSize = 11f; maxLines = 2
+                        ellipsize = android.text.TextUtils.TruncateAt.END; setTextColor(TEXT_DIM)
+                    }, LinearLayout.LayoutParams(0, -2, 1f))
+                    addView(TextView(context).apply {
+                        text = "⋮"; gravity = Gravity.CENTER; textSize = 24f; setTextColor(ACCENT)
+                        isClickable = true; isFocusable = true
+                    }, LinearLayout.LayoutParams(dp(48), dp(48)))
+                }, LinearLayout.LayoutParams(-1, dp(48)))
+            }
+            val frame = tile.getChildAt(0) as FrameLayout
+            val title = tile.getChildAt(1) as TextView
+            val progress = tile.getChildAt(2) as LinearProgressIndicator
+            val footer = tile.getChildAt(3) as LinearLayout
+            val detail = footer.getChildAt(0) as TextView
+            val menu = footer.getChildAt(1) as TextView
+            val image = frame.getChildAt(1) as ImageView
+            val name: String
+            if (position < downloadJobs.size) {
+                val job = downloadJobs[position]
+                name = job.name
+                bindDownloadIcon(image, job.iconURL, name)
+                progress.visibility = View.VISIBLE
+                val active = job.status == "RUNNING" || job.status == "QUEUED"
+                progress.isIndeterminate = active && (job.total <= 0 || job.status == "QUEUED" || job.error != null)
+                if (!progress.isIndeterminate) progress.setProgressCompat(
+                    if (job.total > 0) ((job.received.toDouble() / job.total) * 1000).toInt().coerceIn(0, 1000) else 0, active)
+                detail.text = when (job.status) {
+                    "RUNNING" -> if (job.error != null) "Reconnecting…" else "Downloading"
+                    "QUEUED" -> "Queued"
+                    "PAUSED" -> "Paused"
+                    "FAILED" -> "Download failed"
+                    else -> job.status
+                }
+                progress.contentDescription = "$name: ${detail.text}, ${Formatter.formatFileSize(this@LauncherActivity, job.received)} downloaded"
+                tile.setOnClickListener { downloadActions(job) }
+                tile.setOnLongClickListener { downloadActions(job); true }
+                menu.setOnClickListener { downloadActions(job) }
+            } else {
+                val app = apps[position - downloadJobs.size]
+                val info = infoFor(app)
+                name = info?.displayName ?: prettyName(app)
+                image.setImageBitmap(info?.icon)
+                image.visibility = if (info?.icon != null) View.VISIBLE else View.INVISIBLE
+                image.contentDescription = "$name icon"
+                progress.visibility = View.INVISIBLE
+                detail.text = listOf(when (info?.is64Bit) { true -> "64-bit"; false -> "32-bit"; null -> "Scanning" },
+                    compat.badge(app.name).status.label).joinToString(" · ")
+                tile.setOnClickListener { launch(app) }
+                tile.setOnLongClickListener { addHomeShortcut(app); true }
+                menu.setOnClickListener { installedActions(app) }
+            }
+            title.text = name
+            (frame.getChildAt(0) as TextView).text = name.firstOrNull { it.isLetterOrDigit() }?.uppercase() ?: "?"
+            menu.contentDescription = "$name actions"
+            tile.isFocusable = true
+            tile.descendantFocusability = ViewGroup.FOCUS_BEFORE_DESCENDANTS
+            return tile
         }
 
         private fun downloadRow(job: IpaDownloads.Job, convertView: View?): View {
-            val row = convertView as? LinearLayout ?: LinearLayout(this@LauncherActivity).apply {
+            val row = (convertView as? MaterialCardView)?.getChildAt(0) as? LinearLayout ?: LinearLayout(this@LauncherActivity).apply {
                 orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
                 background = rounded(CARD, 16); setPadding(dp(14), dp(14), dp(14), dp(14))
                 addView(FrameLayout(context).apply {
                     background = rounded(ACCENT, 13); clipToOutline = true
                     addView(TextView(context).apply {
-                        gravity = Gravity.CENTER; setTextColor(Color.WHITE); textSize = 28f
+                        gravity = Gravity.CENTER; setTextColor(ON_PRIMARY); textSize = 28f
                     }, FrameLayout.LayoutParams(-1, -1))
                     addView(ImageView(context).apply { scaleType = ImageView.ScaleType.CENTER_CROP },
                         FrameLayout.LayoutParams(-1, -1))
@@ -1085,14 +1241,14 @@ class LauncherActivity : Activity() {
                 addView(LinearLayout(context).apply {
                     orientation = LinearLayout.VERTICAL; setPadding(dp(14), 0, dp(8), 0)
                     addView(TextView(context).apply {
-                        setTextColor(Color.WHITE); textSize = 17f; maxLines = 2
+                        setTextColor(TEXT_PRIMARY); textSize = 17f; maxLines = 2
                         typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
                     })
                     addView(TextView(context).apply {
                         setTextColor(TEXT_DIM); textSize = 12f; maxLines = 3
                         setPadding(0, dp(4), 0, dp(6))
                     })
-                    addView(ProgressBar(context, null, android.R.attr.progressBarStyleHorizontal).apply {
+                    addView(LinearProgressIndicator(context).apply {
                         max = 1000
                         progressTintList = android.content.res.ColorStateList.valueOf(ACCENT)
                         indeterminateTintList = android.content.res.ColorStateList.valueOf(ACCENT)
@@ -1135,14 +1291,14 @@ class LauncherActivity : Activity() {
                 contentDescription = "${job.name} download actions"
                 setOnClickListener { downloadActions(job) }
             }
-            return row
+            return materialCard(row)
         }
     }
 
     private fun downloadActions(job: IpaDownloads.Job) {
         val active = job.status == "RUNNING" || job.status == "QUEUED"
         val action = if (active) "Pause download" else if (job.status == "FAILED") "Retry download" else "Resume download"
-        AlertDialog.Builder(this).setTitle(job.name).setMessage(job.error ?: "Downloaded " +
+        MaterialAlertDialogBuilder(this).setTitle(job.name).setMessage(job.error ?: "Downloaded " +
             Formatter.formatFileSize(this, job.received))
             .setPositiveButton(action) { _, _ ->
                 if (active) IpaDownloads.cancel(this, job.id) else IpaDownloads.retry(this, job.id)
@@ -1180,22 +1336,17 @@ class LauncherActivity : Activity() {
         }
     }
 
+    private val BACKGROUND get() = ContextCompat.getColor(this, R.color.launcher_background)
+    private val CARD get() = ContextCompat.getColor(this, R.color.launcher_surface)
+    private val ACCENT get() = ContextCompat.getColor(this, R.color.launcher_primary)
+    private val TEXT_DIM get() = ContextCompat.getColor(this, R.color.launcher_muted)
+    private val TEXT_PRIMARY get() = ContextCompat.getColor(this, R.color.launcher_text)
+    private val ON_PRIMARY get() = ContextCompat.getColor(this, R.color.launcher_on_primary)
+
     companion object {
         private const val REQUEST_PICK_IPA = 1
         private const val PREF_COMPAT = "compat_mode"
 
-        private val BACKGROUND = Color.parseColor("#0E1014")
-        private val CARD = Color.parseColor("#1A1D24")
-        private val ACCENT = Color.parseColor("#7C5CFF")
-        private val TEXT_DIM = Color.parseColor("#8B909C")
 
-        private val PALETTE = arrayOf(
-            intArrayOf(Color.parseColor("#7C5CFF"), Color.parseColor("#C25CFF")),
-            intArrayOf(Color.parseColor("#FF6B6B"), Color.parseColor("#FFA86B")),
-            intArrayOf(Color.parseColor("#1FB6A6"), Color.parseColor("#3EA0FF")),
-            intArrayOf(Color.parseColor("#F5B83D"), Color.parseColor("#F06A3D")),
-            intArrayOf(Color.parseColor("#4CC76A"), Color.parseColor("#17A2A2")),
-            intArrayOf(Color.parseColor("#3D7BFF"), Color.parseColor("#5C3DFF")),
-        )
     }
 }

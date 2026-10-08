@@ -39,7 +39,7 @@ fun join(prefix: String, separator: String, branding: String): String {
 
 android {
     ndkVersion = "25.2.9519653"
-    compileSdk = 31
+    compileSdk = 34
     buildFeatures {
         buildConfig = true
     }
@@ -175,6 +175,7 @@ cargoNdk {
 }
 
 dependencies {
+    implementation("com.google.android.material:material:1.12.0")
     testImplementation("junit:junit:4.13.2")
     // Android org.json is a stub on the host; use the real parser for JVM tests.
     testImplementation("org.json:json:20240303")
