@@ -229,6 +229,19 @@ pub const CLASSES: ClassExports = objc_classes! {
 - (bool)becomeFirstResponder {
     log_dbg!("becomeFirstResponder");
 
+    // Zenonia 5 uses a full-screen UITextField (painted opaque white) only to
+    // receive keyboard input while it draws its own dialog art underneath.
+    // Keep that art visible and show the typed text in white on top of it.
+    if env.bundle.bundle_identifier() == "com.gamevil.zenonia5free" {
+        let clear: id = msg_class![env; UIColor clearColor];
+        () = msg![env; this setOpaque:false];
+        () = msg![env; this setBackgroundColor:clear];
+        let text_label = env.objc.borrow::<UITextFieldHostObject>(this).text_label;
+        () = msg![env; text_label setBackgroundColor:clear];
+        let white: id = msg_class![env; UIColor whiteColor];
+        () = msg![env; text_label setTextColor:white];
+    }
+
     if env.objc.borrow::<UITextFieldHostObject>(this).editing {
         return true;
     }
