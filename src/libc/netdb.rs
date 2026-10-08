@@ -21,9 +21,17 @@ const EAI_FAIL: i32 = 4;
 #[allow(non_camel_case_types)]
 pub type socklen_t = u32;
 
-// TODO: struct definition
 #[allow(non_camel_case_types)]
-struct hostent {}
+#[derive(Copy, Clone)]
+#[repr(C, packed)]
+struct hostent {
+    h_name: MutPtr<u8>,
+    h_aliases: MutPtr<MutPtr<u8>>,
+    h_addrtype: i32,
+    h_length: i32,
+    h_addr_list: MutPtr<MutPtr<u8>>,
+}
+unsafe impl SafeRead for hostent {}
 
 #[derive(Copy, Clone, Debug)]
 #[repr(C, packed)]
@@ -100,13 +108,47 @@ fn freeaddrinfo(env: &mut Environment, addrinfo: MutPtr<addrinfo>) {
 }
 
 fn gethostbyname(env: &mut Environment, name: ConstPtr<u8>) -> MutPtr<hostent> {
-    log!(
-        "TODO: gethostbyname({:?} \"{}\") => NULL",
-        name,
-        env.mem.cstr_at_utf8(name).unwrap()
-    );
-    // TODO: set h_errno
-    Ptr::null()
+    let host = env.mem.cstr_at_utf8(name).unwrap().to_string();
+    if !env.options.network_access {
+        log!("gethostbyname(\"{}\") => NULL (network access is disabled)", host);
+        // TODO: set h_errno
+        return Ptr::null();
+    }
+    use std::net::{IpAddr, ToSocketAddrs};
+    let ipv4 = (host.as_str(), 0u16)
+        .to_socket_addrs()
+        .ok()
+        .and_then(|mut addrs| {
+            addrs.find_map(|a| match a.ip() {
+                IpAddr::V4(v4) => Some(v4),
+                IpAddr::V6(_) => None,
+            })
+        });
+    let Some(ipv4) = ipv4 else {
+        log!("gethostbyname(\"{}\") => NULL (lookup failed)", host);
+        // TODO: set h_errno
+        return Ptr::null();
+    };
+    log!("gethostbyname(\"{}\") => {}", host, ipv4);
+    // The result is a per-call allocation that is never freed: apps only keep
+    // it briefly and it is tiny.
+    let name_copy = env.mem.alloc_and_write_cstr(host.as_bytes());
+    let addr_bytes: MutPtr<u8> = env.mem.alloc(4).cast();
+    for (i, b) in ipv4.octets().iter().enumerate() {
+        env.mem.write(addr_bytes + i as u32, *b);
+    }
+    let addr_list: MutPtr<MutPtr<u8>> = env.mem.alloc(8).cast();
+    env.mem.write(addr_list, addr_bytes);
+    env.mem.write(addr_list + 1, Ptr::null());
+    let aliases: MutPtr<MutPtr<u8>> = env.mem.alloc(4).cast();
+    env.mem.write(aliases, Ptr::null());
+    env.mem.alloc_and_write(hostent {
+        h_name: name_copy,
+        h_aliases: aliases,
+        h_addrtype: AF_INET,
+        h_length: 4,
+        h_addr_list: addr_list,
+    })
 }
 
 fn gethostent(_env: &mut Environment) -> MutPtr<hostent> {

@@ -136,12 +136,16 @@ fn SCNetworkReachabilityGetFlags(
             return true;
         }
     }
-    log!(
-        "TODO: SCNetworkReachabilityGetFlags({:?}, {:?}) -> false",
+    // Network access was explicitly enabled for this app, so report the
+    // target as reachable (the actual connection attempt will still fail
+    // normally if the host is down). TODO: actually check connectivity.
+    log_dbg!(
+        "SCNetworkReachabilityGetFlags({:?}, {:?}) -> true (network access enabled)",
         target,
         flags
     );
-    false
+    env.mem.write(flags, kSCNetworkReachabilityFlagsReachable);
+    true
 }
 
 fn SCNetworkReachabilitySetCallback(

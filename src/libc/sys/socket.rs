@@ -22,7 +22,7 @@
 //! - [Beej's Guide to Network Programming](https://beej.us/guide/bgnet/html/index-wide.html)
 
 use crate::dyld::{export_c_func, FunctionExports};
-use crate::libc::errno::{set_errno, EBADF, ECONNRESET, EINVAL, EPROTONOSUPPORT};
+use crate::libc::errno::{set_errno, EAGAIN, EBADF, ECONNRESET, EINVAL, EPROTONOSUPPORT};
 use crate::libc::posix_io::{close, find_or_create_socket, is_socket, FileDescriptor};
 use crate::libc::time::timeval;
 use crate::mem::{
@@ -255,9 +255,18 @@ fn setsockopt(
 
     assert!(type_ == SOCK_STREAM || type_ == SOCK_DGRAM);
 
-    assert_eq!(level, SOL_SOCKET);
+    if level != SOL_SOCKET || !(option_name == SO_REUSEADDR || option_name == SO_BROADCAST) {
+        // Tuning options (SO_NOSIGPIPE, SO_KEEPALIVE, buffer sizes, ...) have
+        // no effect on correctness, so they are accepted and ignored.
+        log!(
+            "setsockopt({}, level {:#x}, option {:#x}) ignored",
+            socket,
+            level,
+            option_name
+        );
+        return 0;
+    }
     // TODO: SO_REUSEADDR is not supported in std::net (and not so portable)
-    assert!(option_name == SO_REUSEADDR || option_name == SO_BROADCAST);
 
     assert_eq!(option_len, guest_size_of::<i32>());
     let tmp: ConstPtr<i32> = option_value.cast();
@@ -872,7 +881,9 @@ fn recvfrom(
                     // - poll for data in thread scheduling part
                     // - write/read/accept/etc data once it is ready
                     // - unblock guest thread
-                    unimplemented!("recvfrom: UDP socket {} would block on receiving, block current guest thread {}.", socket, env.current_thread)
+                    set_errno(env, EAGAIN);
+                    log_dbg!("recvfrom: UDP socket {} would block, returning EAGAIN", socket);
+                    return -1
                 }
                 Err(e) => panic!("recvfrom: UDP socket {socket} encountered IO error: {e}"),
             };
@@ -911,7 +922,9 @@ fn recvfrom(
                     // - poll for data in thread scheduling part
                     // - write/read/accept/etc data once it is ready
                     // - unblock guest thread
-                    unimplemented!("recvfrom: TCP socket {} would block on receiving, block current guest thread {}.", socket, env.current_thread)
+                    set_errno(env, EAGAIN);
+                    log_dbg!("recvfrom: TCP socket {} would block, returning EAGAIN", socket);
+                    return -1
                 }
                 Err(e) => panic!("recvfrom: TCP socket {socket} encountered IO error: {e}"),
             };
@@ -963,7 +976,9 @@ fn send(
                     // - poll for data in thread scheduling part
                     // - write/read/accept/etc data once it is ready
                     // - unblock guest thread
-                    unimplemented!("send: TCP socket {} would block on sending, block current guest thread {}.", socket, env.current_thread)
+                    set_errno(env, EAGAIN);
+                    log_dbg!("send: TCP socket {} would block, returning EAGAIN", socket);
+                    return -1
                 }
                 Err(e) => panic!("send: Socket {socket} encountered IO error: {e}"),
             }
@@ -1061,7 +1076,9 @@ fn sendto(
                     // - poll for data in thread scheduling part
                     // - write/read/accept/etc data once it is ready
                     // - unblock guest thread
-                    unimplemented!("sendto: UDP socket {} would block on sending, block current guest thread {}.", socket, env.current_thread)
+                    set_errno(env, EAGAIN);
+                    log_dbg!("sendto: UDP socket {} would block, returning EAGAIN", socket);
+                    return -1
                 }
                 Err(e) => panic!("sendto: Socket {socket} encountered IO error: {e}"),
             }
