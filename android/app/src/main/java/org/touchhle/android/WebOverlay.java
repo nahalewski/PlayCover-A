@@ -100,11 +100,37 @@ final class WebOverlay {
             web = new WebView(activity);
             WebSettings s = web.getSettings();
             s.setJavaScriptEnabled(true);
+            // The game's web pages pick their native bridge from the browser
+            // type; the emulated app is an iPhone app, so look like one.
+            s.setUserAgentString("Mozilla/5.0 (iPhone; CPU iPhone OS 4_3 like Mac OS X) AppleWebKit/533.17.9 (KHTML, like Gecko) Version/5.0.2 Mobile/8F190 Safari/6533.18.5");
             s.setDomStorageEnabled(true);
             s.setLoadWithOverviewMode(true);
             s.setUseWideViewPort(true);
             s.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
-            web.setWebViewClient(new WebViewClient());
+            web.setWebViewClient(new WebViewClient() {
+                @Override
+                public android.webkit.WebResourceResponse shouldInterceptRequest(WebView v, android.webkit.WebResourceRequest req) {
+                    Log.i(TAG, "request: " + req.getUrl() + " mainFrame=" + req.isForMainFrame());
+                    return null;
+                }
+                @Override
+                public boolean shouldOverrideUrlLoading(WebView v, android.webkit.WebResourceRequest req) {
+                    String url = req.getUrl().toString();
+                    String scheme = req.getUrl().getScheme();
+                    Log.i(TAG, "navigation: " + url);
+                    if ("http".equals(scheme) || "https".equals(scheme)) return false;
+                    // Custom schemes are for the emulated app (e.g. a close button).
+                    reportNavigation(url);
+                    return true;
+                }
+            });
+            web.setWebChromeClient(new android.webkit.WebChromeClient() {
+                @Override
+                public boolean onConsoleMessage(android.webkit.ConsoleMessage m) {
+                    Log.i(TAG, "console: " + m.message() + " @" + m.sourceId() + ":" + m.lineNumber());
+                    return true;
+                }
+            });
             web.setBackgroundColor(0xFFFFFFFF);
             layout.addView(web, params(x, y, w, h));
         } else {
@@ -118,6 +144,19 @@ final class WebOverlay {
         p.leftMargin = x;
         p.topMargin = y;
         return p;
+    }
+
+    private void reportNavigation(String url) {
+        if (file == null) return;
+        try {
+            File tmp = new File(file.getParentFile(), "webview_evt.tmp");
+            try (java.io.FileOutputStream out = new java.io.FileOutputStream(tmp)) {
+                out.write((System.nanoTime() + "\n" + url).getBytes("UTF-8"));
+            }
+            tmp.renameTo(new File(file.getParentFile(), "webview_evt.txt"));
+        } catch (Exception e) {
+            Log.w(TAG, "couldn't report navigation", e);
+        }
     }
 
     private void hide() {

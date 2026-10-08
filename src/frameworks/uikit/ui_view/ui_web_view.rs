@@ -40,8 +40,13 @@ impl Default for UIWebViewHostObject {
 /// laid over the game's surface. The two sides talk through a small command
 /// file (`webview_cmd.txt`, see `WebOverlay.java`): sequence number, command
 /// (`show`/`html`/`hide`), physical pixel rectangle, base URL, payload.
+/// The UIWebView currently shown by the overlay (guest object address).
+static ACTIVE_WEBVIEW: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static LAST_EVENT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 fn send_web_command(env: &mut Environment, view: id, command: &str, base_url: &str, payload: &str) {
     use std::sync::atomic::{AtomicU64, Ordering};
+    ACTIVE_WEBVIEW.store(if command == "hide" { 0 } else { view.to_bits() }, Ordering::Relaxed);
     static SEQ: AtomicU64 = AtomicU64::new(1);
     let rect = if command == "hide" {
         (0.0, 0.0, 0.0, 0.0)
@@ -71,6 +76,48 @@ fn send_web_command(env: &mut Environment, view: id, command: &str, base_url: &s
         log!("UIWebView: couldn't write the web overlay command file");
     }
     log!("UIWebView: {} {:?} -> {:?}", command, payload.chars().take(80).collect::<String>(), rect);
+}
+
+/// Pages in the overlay navigate to links the app wants to see (custom URL
+/// schemes such as a page's "close" button). Java reports them in
+/// `webview_evt.txt`; they are handed to the delegate like on iOS.
+pub fn poll_events(env: &mut Environment) {
+    use std::sync::atomic::Ordering;
+    let view_bits = ACTIVE_WEBVIEW.load(Ordering::Relaxed);
+    if view_bits == 0 {
+        return;
+    }
+    let path = crate::paths::user_data_base_path().join("webview_evt.txt");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let mut lines = text.splitn(2, '\n');
+    let Some(seq) = lines.next().and_then(|l| l.trim().parse::<u64>().ok()) else {
+        return;
+    };
+    let Some(url) = lines.next().map(|u| u.trim().to_string()) else {
+        return;
+    };
+    if seq == LAST_EVENT_SEQ.load(Ordering::Relaxed) {
+        return;
+    }
+    LAST_EVENT_SEQ.store(seq, Ordering::Relaxed);
+    let view: id = crate::mem::Ptr::from_bits(view_bits);
+    log!("UIWebView: page navigated to {:?}", url);
+    let delegate = env.objc.borrow::<UIWebViewHostObject>(view).delegate;
+    if delegate == nil {
+        return;
+    }
+    let url_string = crate::frameworks::foundation::ns_string::from_rust_string(env, url);
+    let ns_url: id = crate::objc::msg_class![env; NSURL URLWithString:url_string];
+    let request: id = crate::objc::msg_class![env; NSURLRequest requestWithURL:ns_url];
+    let sel = env
+        .objc
+        .register_host_selector("webView:shouldStartLoadWithRequest:navigationType:".to_string(), &mut env.mem);
+    let responds: bool = msg![env; delegate respondsToSelector:sel];
+    if responds {
+        let _: bool = crate::objc::msg_send_no_type_checking(env, (delegate, sel, view, request, 0i32));
+    }
 }
 
 /// Tell the delegate the page finished loading (the real load happens in the
