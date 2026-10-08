@@ -380,6 +380,33 @@ pub trait GLES {
         unimplemented!()
     }
 
+    // OES_matrix_palette: only the native ES 1.1 backend passes these through;
+    // other backends ignore them (skinned geometry will not render correctly).
+    unsafe fn CurrentPaletteMatrixOES(&mut self, _index: GLuint) {
+        log_once!("Warning: OES_matrix_palette is not supported by this GLES backend");
+    }
+    unsafe fn LoadPaletteFromModelViewMatrixOES(&mut self) {
+        log_once!("Warning: OES_matrix_palette is not supported by this GLES backend");
+    }
+    unsafe fn MatrixIndexPointerOES(
+        &mut self,
+        _size: GLint,
+        _type_: GLenum,
+        _stride: GLsizei,
+        _pointer: *const GLvoid,
+    ) {
+        log_once!("Warning: OES_matrix_palette is not supported by this GLES backend");
+    }
+    unsafe fn WeightPointerOES(
+        &mut self,
+        _size: GLint,
+        _type_: GLenum,
+        _stride: GLsizei,
+        _pointer: *const GLvoid,
+    ) {
+        log_once!("Warning: OES_matrix_palette is not supported by this GLES backend");
+    }
+
     // Drawing
     unsafe fn DrawArrays(&mut self, mode: GLenum, first: GLint, count: GLsizei) {
         unimplemented!()

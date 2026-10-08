@@ -139,22 +139,9 @@ fn panic_on_gl_errors(gles: &mut dyn GLES) {
 // Generic state manipulation
 fn glGetError(env: &mut Environment) -> GLenum {
     let ignore_gl_errors = env.options.ignore_gl_errors;
-    let thread = env.current_thread;
     with_ctx_and_mem(env, |gles, _mem| {
         let err = unsafe { gles.GetError() };
         if err != 0 {
-            {
-                use std::sync::atomic::{AtomicU32, Ordering};
-                static N: AtomicU32 = AtomicU32::new(0);
-                if N.fetch_add(1, Ordering::Relaxed) < 6 {
-                    let (fb, status) = unsafe {
-                        let mut fb = 0;
-                        gles.GetIntegerv(gles11::FRAMEBUFFER_BINDING_OES, &mut fb);
-                        (fb, gles.CheckFramebufferStatusOES(gles11::FRAMEBUFFER_OES))
-                    };
-                    log!("glGetError {:#x} on thread {}: bound framebuffer {}, status {:#x}", err, thread, fb, status);
-                }
-            }
             if ignore_gl_errors {
                 log_once!(
                     "Warning: Guest error reporting is ignored for glGetError(), returning 0."
@@ -726,6 +713,40 @@ fn glVertexPointer(
         let pointer =
             translate_pointer_or_offset_to_host(gles, mem, pointer, gles11::ARRAY_BUFFER_BINDING);
         gles.VertexPointer(size, type_, stride, pointer)
+    })
+}
+
+// OES_matrix_palette (skinning)
+fn glCurrentPaletteMatrixOES(env: &mut Environment, index: GLuint) {
+    with_ctx_and_mem(env, |gles, _mem| unsafe { gles.CurrentPaletteMatrixOES(index) })
+}
+fn glLoadPaletteFromModelViewMatrixOES(env: &mut Environment) {
+    with_ctx_and_mem(env, |gles, _mem| unsafe { gles.LoadPaletteFromModelViewMatrixOES() })
+}
+fn glMatrixIndexPointerOES(
+    env: &mut Environment,
+    size: GLint,
+    type_: GLenum,
+    stride: GLsizei,
+    pointer: ConstVoidPtr,
+) {
+    with_ctx_and_mem(env, |gles, mem| unsafe {
+        let pointer =
+            translate_pointer_or_offset_to_host(gles, mem, pointer, gles11::ARRAY_BUFFER_BINDING);
+        gles.MatrixIndexPointerOES(size, type_, stride, pointer)
+    })
+}
+fn glWeightPointerOES(
+    env: &mut Environment,
+    size: GLint,
+    type_: GLenum,
+    stride: GLsizei,
+    pointer: ConstVoidPtr,
+) {
+    with_ctx_and_mem(env, |gles, mem| unsafe {
+        let pointer =
+            translate_pointer_or_offset_to_host(gles, mem, pointer, gles11::ARRAY_BUFFER_BINDING);
+        gles.WeightPointerOES(size, type_, stride, pointer)
     })
 }
 
@@ -1321,12 +1342,6 @@ fn glBindRenderbufferOES(env: &mut Environment, target: GLenum, renderbuffer: GL
         gles.BindRenderbufferOES(target, renderbuffer)
     })
 }
-/// Diagnostic: bounded logging of framebuffer-object setup calls.
-fn fbo_log_allowed() -> bool {
-    use std::sync::atomic::{AtomicU32, Ordering};
-    static N: AtomicU32 = AtomicU32::new(0);
-    N.fetch_add(1, Ordering::Relaxed) < 200
-}
 
 fn glRenderbufferStorageOES(
     env: &mut Environment,
@@ -1338,13 +1353,8 @@ fn glRenderbufferStorageOES(
     // apply scale hack: give the app a larger framebuffer than it asked for
     let factor = env.options.scale_hack.get() as GLsizei;
     let (width, height) = (width * factor, height * factor);
-    let log_it = fbo_log_allowed();
     with_ctx_and_mem(env, |gles, _mem| unsafe {
         gles.RenderbufferStorageOES(target, internalformat, width, height);
-        if log_it {
-            let err = gles.GetError();
-            log!("FBO glRenderbufferStorageOES(target {:#x}, fmt {:#x}, {}x{}) => err {:#x}", target, internalformat, width, height, err);
-        }
     })
 }
 /// Remember what is attached to framebuffer `framebuffer` (see
@@ -1379,13 +1389,8 @@ fn glFramebufferRenderbufferOES(
     renderbuffertarget: GLenum,
     renderbuffer: GLuint,
 ) {
-    let log_it = fbo_log_allowed();
     let bound: GLuint = with_ctx_and_mem(env, |gles, _mem| unsafe {
         gles.FramebufferRenderbufferOES(target, attachment, renderbuffertarget, renderbuffer);
-        if log_it {
-            let err = gles.GetError();
-            log!("FBO glFramebufferRenderbufferOES(target {:#x}, attachment {:#x}, rb {}) => err {:#x}", target, attachment, renderbuffer, err);
-        }
         let mut fb = 0;
         gles.GetIntegerv(gles11::FRAMEBUFFER_BINDING_OES, &mut fb);
         fb as GLuint
@@ -1400,13 +1405,8 @@ fn glFramebufferTexture2DOES(
     texture: GLuint,
     level: i32,
 ) {
-    let log_it = fbo_log_allowed();
     let bound: GLuint = with_ctx_and_mem(env, |gles, _mem| unsafe {
         gles.FramebufferTexture2DOES(target, attachment, textarget, texture, level);
-        if log_it {
-            let err = gles.GetError();
-            log!("FBO glFramebufferTexture2DOES(target {:#x}, attachment {:#x}, tex {}, level {}) => err {:#x}", target, attachment, texture, level, err);
-        }
         let mut fb = 0;
         gles.GetIntegerv(gles11::FRAMEBUFFER_BINDING_OES, &mut fb);
         fb as GLuint
@@ -1443,12 +1443,8 @@ fn glGetRenderbufferParameterivOES(
     })
 }
 fn glCheckFramebufferStatusOES(env: &mut Environment, target: GLenum) -> GLenum {
-    let log_it = fbo_log_allowed();
     with_ctx_and_mem(env, |gles, _mem| unsafe {
         let status = gles.CheckFramebufferStatusOES(target);
-        if log_it {
-            log!("FBO glCheckFramebufferStatusOES({:#x}) => {:#x}", target, status);
-        }
         status
     })
 }
@@ -1686,6 +1682,10 @@ pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(glNormalPointer(_, _, _)),
     export_c_func!(glTexCoordPointer(_, _, _, _)),
     export_c_func!(glVertexPointer(_, _, _, _)),
+    export_c_func!(glCurrentPaletteMatrixOES(_)),
+    export_c_func!(glLoadPaletteFromModelViewMatrixOES()),
+    export_c_func!(glMatrixIndexPointerOES(_, _, _, _)),
+    export_c_func!(glWeightPointerOES(_, _, _, _)),
     // Drawing
     export_c_func!(glDrawArrays(_, _, _)),
     export_c_func!(glDrawElements(_, _, _, _)),

@@ -314,16 +314,13 @@ pub const CLASSES: ClassExports = objc_classes! {
     }
 }
 - (bool)isPreparedToPlay {
-    log!("[(MPMoviePlayerController*){:?} isPreparedToPlay]", this);
     true
 }
 - (NSInteger)loadState {
-    log!("[(MPMoviePlayerController*){:?} loadState]", this);
     3
 }
 
 - (MPMoviePlaybackState)playbackState {
-    log!("[(MPMoviePlayerController*){:?} playbackState]", this);
     MPMoviePlaybackStateStopped // TODO
 }
 
@@ -422,7 +419,7 @@ pub(super) fn handle_players(env: &mut Environment) {
         }
     }
     for (name_str, object) in notifs_to_run {
-        log!("Posting movie player notification {} for {:?}", name_str, object);
+        log_dbg!("Posting movie player notification {} for {:?}", name_str, object);
         let name = ns_string::get_static_str(env, name_str);
         let center: id = msg_class![env; NSNotificationCenter defaultCenter];
         if name_str == MPMoviePlayerPlaybackDidFinishNotification {
