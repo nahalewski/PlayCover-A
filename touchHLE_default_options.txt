@@ -253,4 +253,4 @@ com.gamevil.zenonia2: --fps-limit=15
 com.gamevil.zenonia3: --fps-limit=15
 # Zenonia 4: universal binary that lays itself out for the iPad (1024x768); the iPhone layout is cropped
 com.gamevil.zenonia4: --device-family=ipad --fps-limit=15
-com.gamevil.zenonia5free: --landscape-left --fps-limit=30 --allow-network-access
+com.gamevil.zenonia5free: --landscape-left --fps-limit=20 --allow-network-access

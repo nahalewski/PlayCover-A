@@ -620,6 +620,11 @@ impl Environment {
                 env.with_yielder(yielder, move |env| {
                     echo!("CPU emulation begins now.");
                     install_guest_probes(env);
+                    if env.bundle.bundle_identifier() == "com.gamevil.Zenonia" {
+                        // Zenonia 1 v1.7: the same dead profile server; the
+                        // game relies on an exception being caught here.
+                        objc::install_skipped_method(env, "Logo", "sendProfileData");
+                    }
                     if env.bundle.bundle_identifier() == "com.gamevil.zenonia2" {
                         objc::install_skipped_method(env, "MainTitleUIController", "sendProfileData");
                     }
