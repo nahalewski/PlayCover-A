@@ -247,3 +247,5 @@ com.ea.nfshp.ipad.inc: --force-composition
 com.namconetworks.yellow: --no-landscape-view-adaptation
 # Zenonia: game logic is frame-locked and was designed for a low iPhone-era frame rate
 com.gamevil.Zenonia: --fps-limit=20
+# Zenonia 2: same engine, frame-locked logic
+com.gamevil.zenonia2: --fps-limit=15

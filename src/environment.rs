@@ -620,6 +620,9 @@ impl Environment {
                 env.with_yielder(yielder, move |env| {
                     echo!("CPU emulation begins now.");
                     install_guest_probes(env);
+                    if env.bundle.bundle_identifier() == "com.gamevil.zenonia2" {
+                        objc::install_skipped_method(env, "MainTitleUIController", "sendProfileData");
+                    }
                     // Some apps use the stack inside the static initializer.
                     // While properly behaving apps should be fine, some app
                     // will try to poke the top of the stack, so we'll give

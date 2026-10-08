@@ -1180,6 +1180,39 @@ pub(super) fn class_replaceMethod(
     existing
 }
 
+fn skipped_method(env: &mut Environment, _this: id, cmd: SEL) {
+    log!(
+        "Network unavailable: skipping {} for this app",
+        cmd.as_str(&env.mem)
+    );
+}
+static SKIPPED_METHOD: fn(&mut Environment, id, SEL) = skipped_method;
+
+/// Replace a method of an app's class with one that does nothing, for
+/// per-game workarounds (e.g. a profile upload to a server that no longer
+/// exists, which the app can only survive by catching an Objective-C
+/// exception that touchHLE can't unwind yet). Does nothing if the class or
+/// selector doesn't exist.
+pub fn install_skipped_method(env: &mut Environment, class_name: &str, selector: &str) {
+    let Some(class) = env.objc.get_class(class_name, false, &mut env.mem) else {
+        return;
+    };
+    let Some(sel) = env.objc.lookup_selector(selector) else {
+        return;
+    };
+    let Some(host_object) = try_class_host_object(&env.objc, class) else {
+        return;
+    };
+    if !host_object.methods.contains_key(&sel) {
+        return;
+    }
+    log!("Applying game-specific workaround: [{} {}] does nothing", class_name, selector);
+    env.objc
+        .borrow_mut::<ClassHostObject>(class)
+        .methods
+        .insert(sel, IMP::Host(&SKIPPED_METHOD));
+}
+
 /// Make an IMP safe to hand to guest code. Host methods get a small guest
 /// stub that traps into the host method, so a guest that swizzles a method
 /// implemented by touchHLE can still call the original.

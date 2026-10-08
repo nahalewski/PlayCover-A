@@ -15,6 +15,7 @@ pub mod ui_label;
 pub mod ui_navigation_bar;
 pub mod ui_page_control;
 pub mod ui_picker_view;
+pub mod ui_progress_view;
 pub mod ui_scroll_view;
 pub mod ui_table_view;
 pub mod ui_table_view_cell;
@@ -376,6 +377,9 @@ pub const CLASSES: ClassExports = objc_classes! {
     let key_ns_string = get_static_str(env, "UIMultipleTouchEnabled");
     let multi_touch_enabled: bool = msg![env; coder decodeBoolForKey:key_ns_string];
 
+    let key_ns_string = get_static_str(env, "UIUserInteractionDisabled");
+    let user_interaction_disabled: bool = msg![env; coder decodeBoolForKey:key_ns_string];
+
     let key_ns_string = get_static_str(env, "UISubviews");
     let subviews: id = msg![env; coder decodeObjectForKey:key_ns_string];
     let subview_count: NSUInteger = msg![env; subviews count];
@@ -401,6 +405,9 @@ pub const CLASSES: ClassExports = objc_classes! {
     () = msg![env; this setBackgroundColor:bg_color];
     () = msg![env; this setTag:tag];
     () = msg![env; this setMultipleTouchEnabled:multi_touch_enabled];
+    if user_interaction_disabled {
+        () = msg![env; this setUserInteractionEnabled:false];
+    }
 
     for i in 0..subview_count {
         let subview: id = msg![env; subviews objectAtIndex:i];

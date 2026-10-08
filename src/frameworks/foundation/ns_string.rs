@@ -995,6 +995,16 @@ pub const CLASSES: ClassExports = objc_classes! {
     }
 }
 
+- (id)stringByReplacingCharactersInRange:(NSRange)range
+                              withString:(id)replacement { // NSString*
+    let length: NSUInteger = msg![env; this length];
+    assert!(range.location <= length && range.length <= length - range.location);
+    let prefix: id = msg![env; this substringToIndex:(range.location)];
+    let suffix: id = msg![env; this substringFromIndex:(range.location + range.length)];
+    let prefix_and_replacement: id = msg![env; prefix stringByAppendingString:replacement];
+    msg![env; prefix_and_replacement stringByAppendingString:suffix]
+}
+
 - (id)stringByReplacingOccurrencesOfString:(id)target // NSString*
                                 withString:(id)replacement { // NSString*
     let length: NSUInteger = msg![env; this length];

@@ -68,6 +68,7 @@ pub const DYLIB: crate::dyld::HostDylib = crate::dyld::HostDylib {
         ui_navigation_item::CLASSES,
         ui_view::ui_page_control::CLASSES,
         ui_view::ui_picker_view::CLASSES,
+        ui_view::ui_progress_view::CLASSES,
         ui_view::ui_scroll_view::CLASSES,
         ui_view::ui_table_view::CLASSES,
         ui_view::ui_table_view_cell::CLASSES,

@@ -38,6 +38,9 @@ pub const CLASSES: ClassExports = objc_classes! {
     // Not sure if UIImageView does this unconditionally, or only for images
     // with alpha channels.
     () = msg![env; this setOpaque:false];
+    // Unlike other views, image views ignore touches by default, so that
+    // decorative images drawn over buttons don't swallow their events.
+    () = msg![env; this setUserInteractionEnabled:false];
     this
 }
 
@@ -73,6 +76,7 @@ pub const CLASSES: ClassExports = objc_classes! {
     // Not sure if UIImageView does this unconditionally, or only for images
     // with alpha channels.
     () = msg![env; this setOpaque:false];
+    () = msg![env; this setUserInteractionEnabled:false];
     this
 }
 
