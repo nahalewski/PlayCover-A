@@ -626,6 +626,20 @@ impl Environment {
                     if env.bundle.bundle_identifier() == "com.gamevil.zenonia4" {
                         // Same dead Gamevil profile server as Zenonia 2/3.
                         objc::install_skipped_method(env, "Zenonia4_iPhoneAppDelegate", "sendProfile");
+                        // Owner-approved offline workaround: Gamevil's online
+                        // certification servers are gone, so make
+                        // `CGsCertification::Update()` report "finished" (2). Only applied if the Thumb function
+                        // still has the expected prologue (Zenonia 4 1.1.3).
+                        let addr = 0xa77c0;
+                        let ptr: mem::MutPtr<u32> = mem::Ptr::from_bits(addr);
+                        if env.mem.read(ptr) == 0xaf03_b5f0 {
+                            // movs r0, #0x2 ; bx lr
+                            env.mem.write(ptr, 0x4770_2002);
+                            env.cpu.invalidate_cache_range(addr, 4);
+                            log!("Offline workaround: Zenonia 4 certification check finished (Update() returns 2)");
+                        } else {
+                            log!("Zenonia 4 certification patch skipped: unexpected code at {:#x}", addr);
+                        }
                     }
                     if env.bundle.bundle_identifier() == "com.gamevil.zenonia5free" {
                         // The Twitter sharing helper dereferences classes of the
