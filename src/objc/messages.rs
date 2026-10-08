@@ -290,7 +290,27 @@ fn objc_msgSend_inner(
             );
         }
 
-        let host_object = env.objc.get_host_object(class).unwrap();
+        let Some(host_object) = env.objc.get_host_object(class) else {
+            // The receiver's class pointer is garbage (a stale or corrupt
+            // object). With --ignore-unknown-selectors treat it like a message
+            // to nil instead of crashing.
+            if env.options.ignore_unknown_selectors {
+                log!(
+                    "Ignoring message \"{}\" sent to {:?}, which has an invalid class {:?}",
+                    selector.as_str(&env.mem),
+                    receiver,
+                    class
+                );
+                env.cpu.regs_mut()[0..2].fill(0);
+                return;
+            }
+            panic!(
+                "Message \"{}\" sent to {:?}, which has an invalid class {:?}",
+                selector.as_str(&env.mem),
+                receiver,
+                class
+            );
+        };
 
         if let Some(&super::ClassHostObject {
             superclass,
