@@ -1540,7 +1540,10 @@ pub const CLASSES: ClassExports = objc_classes! {
     // TODO: avoid copy?
     let path = to_rust_string(env, path);
     let Ok(bytes) = env.fs.read(GuestPath::new(&path)) else {
-        assert!(error.is_null()); // TODO: error handling
+        // TODO: create an NSError; apps see nil plus a NULL error for now
+        if !error.is_null() {
+            env.mem.write(error, nil);
+        }
         release(env, this);
         return nil;
     };
@@ -1556,7 +1559,10 @@ pub const CLASSES: ClassExports = objc_classes! {
                        error:(MutPtr<id>)error { // NSError**
     let data: id = msg_class![env; NSData dataWithContentsOfURL:url];
     if data == nil {
-        assert!(error.is_null()); // TODO: error handling
+        // TODO: create an NSError; apps see nil plus a NULL error for now
+        if !error.is_null() {
+            env.mem.write(error, nil);
+        }
         release(env, this);
         return nil;
     }

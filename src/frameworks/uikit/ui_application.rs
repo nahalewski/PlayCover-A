@@ -22,6 +22,10 @@ pub struct State {
     /// [UIApplication sharedApplication]
     shared_application: Option<id>,
     pub(super) status_bar_hidden: bool,
+    /// Set once the window's root views were turned into landscape views
+    /// (see `adapt_root_views_to_landscape()`), so that views the app creates
+    /// later without a frame get landscape bounds too.
+    pub landscape_adapted: bool,
 }
 
 struct UIApplicationHostObject {
@@ -98,6 +102,7 @@ fn adapt_root_views_to_landscape(env: &mut Environment, rotation: DeviceOrientat
                 continue;
             }
             log!("Rotating root view {:?} to landscape bounds {:?}", view, new);
+            env.framework_state.uikit.ui_application.landscape_adapted = true;
             let bounds = CGRect {
                 origin: CGPoint { x: 0.0, y: 0.0 },
                 size: new,

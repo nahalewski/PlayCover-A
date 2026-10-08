@@ -143,7 +143,18 @@ pub const CLASSES: ClassExports = objc_classes! {
     // but testing reveals that frame matches the screen one
     // (at least on the simulator)
     let screen: id = msg_class![env; UIScreen mainScreen];
-    let app_frame: CGRect = msg![env; screen applicationFrame];
+    let mut app_frame: CGRect = msg![env; screen applicationFrame];
+    if env.framework_state.uikit.ui_application.landscape_adapted {
+        // The window's root views were already turned into landscape views.
+        let screen_bounds: CGRect = msg![env; screen bounds];
+        app_frame = CGRect {
+            origin: crate::frameworks::core_graphics::CGPoint { x: 0.0, y: 0.0 },
+            size: crate::frameworks::core_graphics::CGSize {
+                width: screen_bounds.size.height,
+                height: screen_bounds.size.width,
+            },
+        };
+    }
     let view: id = msg![env; view initWithFrame:app_frame];
     () = msg![env; this setView:view];
 }

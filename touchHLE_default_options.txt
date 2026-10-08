@@ -249,3 +249,5 @@ com.namconetworks.yellow: --no-landscape-view-adaptation
 com.gamevil.Zenonia: --fps-limit=20
 # Zenonia 2: same engine, frame-locked logic
 com.gamevil.zenonia2: --fps-limit=15
+# Zenonia 3: same engine, frame-locked logic
+com.gamevil.zenonia3: --fps-limit=15

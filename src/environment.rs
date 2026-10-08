@@ -623,6 +623,10 @@ impl Environment {
                     if env.bundle.bundle_identifier() == "com.gamevil.zenonia2" {
                         objc::install_skipped_method(env, "MainTitleUIController", "sendProfileData");
                     }
+                    if env.bundle.bundle_identifier() == "com.gamevil.zenonia3" {
+                        // Same dead Gamevil profile server as Zenonia 2.
+                        objc::install_skipped_method(env, "RootController", "uploadDeviceInfo");
+                    }
                     // Some apps use the stack inside the static initializer.
                     // While properly behaving apps should be fine, some app
                     // will try to poke the top of the stack, so we'll give
