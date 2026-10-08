@@ -48,6 +48,7 @@ pub const NSMacOSRomanStringEncoding: NSUInteger = 30;
 /// CF Korean encodings (EUC-KR 0x0940, DOS Korean / CP949 0x0422) as NSStringEncoding
 /// values (0x80000000 | CFStringEncoding); both decode as Windows-949.
 pub const NSKoreanStringEncoding: NSUInteger = 0x80000940;
+pub const NSDOSKoreanStringEncoding: NSUInteger = 0x80000422;
 pub const NSUTF16StringEncoding: NSUInteger = NSUnicodeStringEncoding;
 pub const NSUTF16BigEndianStringEncoding: NSUInteger = 0x90000100;
 pub const NSUTF16LittleEndianStringEncoding: NSUInteger = 0x94000100;
@@ -68,6 +69,7 @@ const C_STRING_FRIENDLY_ENCODINGS: &[NSStringEncoding] = &[
     NSMacOSRomanStringEncoding,
     NSISOLatin1StringEncoding,
     NSKoreanStringEncoding,
+    NSDOSKoreanStringEncoding,
 ];
 
 pub const NSMaximumStringLength: NSUInteger = (i32::MAX - 1) as _;
@@ -126,7 +128,7 @@ impl StringHostObject {
                 let (cow, _, _) = MACINTOSH.decode(&bytes);
                 StringHostObject::Utf8(Cow::Owned(cow.into_owned()))
             }
-            NSKoreanStringEncoding => {
+            NSKoreanStringEncoding | NSDOSKoreanStringEncoding => {
                 // WHATWG "euc-kr" is Windows-949, a superset of both.
                 let (cow, _, _) = EUC_KR.decode(&bytes);
                 StringHostObject::Utf8(Cow::Owned(cow.into_owned()))
@@ -513,8 +515,14 @@ pub const CLASSES: ClassExports = objc_classes! {
 - (NSUInteger)lengthOfBytesUsingEncoding:(NSStringEncoding)encoding {
     if C_STRING_FRIENDLY_ENCODINGS.contains(&encoding) {
         let string = to_rust_string(env, this);
-        assert!(string.as_bytes().iter().all(|byte| byte.is_ascii())); // TODO
-        string.len().try_into().unwrap()
+        if string.as_bytes().iter().all(|byte| byte.is_ascii()) {
+            string.len().try_into().unwrap()
+        } else if encoding == NSKoreanStringEncoding || encoding == NSDOSKoreanStringEncoding {
+            let (bytes, _, _) = EUC_KR.encode(&string);
+            bytes.len().try_into().unwrap()
+        } else {
+            unimplemented!("lengthOfBytesUsingEncoding: non-ASCII string with encoding {}", encoding) // TODO
+        }
     } else {
         unimplemented!("lengthOfBytesUsingEncoding: {}", encoding)
     }
@@ -1839,6 +1847,13 @@ fn data_using_encoding_lossy_inner(
             for unit in string.encode_utf16() {
                 bytes.extend_from_slice(&if big_endian { unit.to_be_bytes() } else { unit.to_le_bytes() });
             }
+            let length: NSUInteger = bytes.len().try_into().unwrap();
+            let buffer = env.mem.alloc(length.max(1));
+            env.mem.bytes_at_mut(buffer.cast(), length).copy_from_slice(&bytes);
+            return msg_class![env; NSData dataWithBytesNoCopy:buffer length:length];
+        }
+        NSKoreanStringEncoding | NSDOSKoreanStringEncoding => {
+            let (bytes, _, _) = EUC_KR.encode(&string);
             let length: NSUInteger = bytes.len().try_into().unwrap();
             let buffer = env.mem.alloc(length.max(1));
             env.mem.bytes_at_mut(buffer.cast(), length).copy_from_slice(&bytes);
