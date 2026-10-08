@@ -177,6 +177,19 @@ fn CFStringCreateWithCString(
     msg![env; ns_string initWithCString:c_string encoding:encoding]
 }
 
+fn CFStringCreateWithCharactersNoCopy(
+    env: &mut Environment,
+    allocator: CFAllocatorRef,
+    chars: ConstPtr<u16>,
+    num_chars: CFIndex,
+    _contents_deallocator: CFAllocatorRef,
+) -> CFStringRef {
+    assert!(allocator.is_null() || allocator == kCFAllocatorDefault || env.mem.read(allocator).is_system_default()); // unimplemented
+    // The characters are copied, which the docs allow.
+    let ns_string: id = msg_class![env; NSString alloc];
+    msg![env; ns_string initWithCharacters:chars length:(num_chars as NSUInteger)]
+}
+
 fn CFStringCreateWithCStringNoCopy(
     env: &mut Environment,
     allocator: CFAllocatorRef,
@@ -479,6 +492,7 @@ pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(CFStringCreateWithBytes(_, _, _, _, _)),
     export_c_func!(CFStringCreateWithCString(_, _, _)),
     export_c_func!(CFStringCreateWithCStringNoCopy(_, _, _, _)),
+    export_c_func!(CFStringCreateWithCharactersNoCopy(_, _, _, _)),
     export_c_func!(CFStringCreateWithFormat(_, _, _, _)),
     export_c_func!(CFStringCreateWithFormatAndArguments(_, _, _, _)),
     export_c_func!(CFStringCreateWithSubstring(_, _, _)),

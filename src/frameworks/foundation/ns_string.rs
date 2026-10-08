@@ -1102,6 +1102,33 @@ pub const CLASSES: ClassExports = objc_classes! {
     msg![env; file_manager fileSystemRepresentationWithPath:this]
 }
 
+- (id)stringByReplacingPercentEscapesUsingEncoding:(NSStringEncoding)_encoding {
+    // TODO: other encodings than UTF-8
+    let string = to_rust_string(env, this).to_string();
+    let bytes = string.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = bytes.get(i + 1..i + 3).and_then(|h| std::str::from_utf8(h).ok());
+            let Some(value) = hex.and_then(|h| u8::from_str_radix(h, 16).ok()) else {
+                // Invalid escape sequence
+                return nil;
+            };
+            out.push(value);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    let Ok(decoded) = String::from_utf8(out) else {
+        return nil;
+    };
+    let res = from_rust_string(env, decoded);
+    autorelease(env, res)
+}
+
 - (id)stringByAddingPercentEscapesUsingEncoding:(NSStringEncoding)encoding {
     assert!(encoding == NSASCIIStringEncoding || encoding == NSUTF8StringEncoding); // TODO: other encodings
     // Leave unreserved and reserved URL characters alone; escape everything

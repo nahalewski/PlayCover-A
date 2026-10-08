@@ -6,7 +6,7 @@
 //! `UIScreen`.
 
 use crate::frameworks::core_graphics::{CGFloat, CGPoint, CGRect, CGSize};
-use crate::objc::{id, msg, msg_class, objc_classes, ClassExports, TrivialHostObject};
+use crate::objc::{autorelease, id, msg, msg_class, objc_classes, ClassExports, TrivialHostObject};
 
 #[derive(Default)]
 pub struct State {
@@ -71,6 +71,33 @@ pub const CLASSES: ClassExports = objc_classes! {
 
 - (CGFloat)scale {
     // TODO: support retina
+    1.0
+}
+
+// Apps use the current mode's size to detect the screen resolution.
+- (id)currentMode {
+    let new: id = msg_class![env; UIScreenMode alloc];
+    let new: id = msg![env; new init];
+    autorelease(env, new)
+}
+- (id)preferredMode {
+    msg![env; this currentMode]
+}
+- (id)availableModes {
+    let mode: id = msg![env; this currentMode];
+    msg_class![env; NSArray arrayWithObject:mode]
+}
+
+@end
+
+@implementation UIScreenMode: NSObject
+
+- (CGSize)size {
+    let (width, height) = env.window().device_family().portrait_size();
+    CGSize { width: width as f32, height: height as f32 }
+}
+
+- (CGFloat)pixelAspectRatio {
     1.0
 }
 

@@ -13,7 +13,7 @@ use crate::frameworks::core_graphics::cg_color_space::{
     kCGColorSpaceGenericRGB, CGColorSpaceHostObject, CGColorSpaceRef,
 };
 use crate::frameworks::core_graphics::CGFloat;
-use crate::mem::MutPtr;
+use crate::mem::{GuestUSize, MutPtr};
 use crate::objc::{objc_classes, ClassExports, HostObject, ObjC};
 use crate::Environment;
 
@@ -110,6 +110,26 @@ fn CGColorCreate(
     from_rgba(env, (r, g, b, a))
 }
 
+fn CGColorGetNumberOfComponents(_env: &mut Environment, _color: CGColorRef) -> GuestUSize {
+    4 // RGBA, the only supported color space
+}
+
+/// The returned array is owned by the color on a real device; here it is a
+/// small leaked allocation per call.
+fn CGColorGetComponents(env: &mut Environment, color: CGColorRef) -> MutPtr<CGFloat> {
+    let (r, g, b, a) = to_rgba(&env.objc, color);
+    let components: MutPtr<CGFloat> = env.mem.alloc(16).cast();
+    env.mem.write(components, r);
+    env.mem.write(components + 1, g);
+    env.mem.write(components + 2, b);
+    env.mem.write(components + 3, a);
+    components
+}
+
+fn CGColorGetAlpha(env: &mut Environment, color: CGColorRef) -> CGFloat {
+    to_rgba(&env.objc, color).3
+}
+
 fn CGColorCreateGenericRGB(
     env: &mut Environment,
     r: CGFloat,
@@ -130,6 +150,9 @@ pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(CGColorCreate(_, _)),
     export_c_func!(CGColorCreateGenericRGB(_, _, _, _)),
     export_c_func!(CGColorEqualToColor(_, _)),
+    export_c_func!(CGColorGetNumberOfComponents(_)),
+    export_c_func!(CGColorGetComponents(_)),
+    export_c_func!(CGColorGetAlpha(_)),
 ];
 
 /// Shortcut for use by `UIColor`: directly construct a `CGColor` instance from

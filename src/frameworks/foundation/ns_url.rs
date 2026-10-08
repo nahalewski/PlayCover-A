@@ -99,7 +99,23 @@ pub const CLASSES: ClassExports = objc_classes! {
     }
 
     // FIXME: this should parse the URL
-    assert!(!to_rust_string(env, url).starts_with("file:")); // TODO
+    let url_string = to_rust_string(env, url).to_string();
+    if let Some(rest) = url_string.strip_prefix("file:") {
+        // file:///path, file://localhost/path or file:/path
+        let path = rest
+            .strip_prefix("//localhost")
+            .or_else(|| rest.strip_prefix("//"))
+            .unwrap_or(rest);
+        let path = from_rust_string(env, path.to_string());
+        // 4 == NSUTF8StringEncoding
+        let path: id = msg![env; path stringByReplacingPercentEscapesUsingEncoding:4u32];
+        let path: id = msg![env; path copy];
+        *env.objc.borrow_mut(this) = NSURLHostObject::FileURL {
+            ns_string: path,
+            working_directory: env.fs.working_directory().into(),
+        };
+        return this;
+    }
     let url: id = msg![env; url copy];
     *env.objc.borrow_mut(this) = NSURLHostObject::OtherURL { ns_string: url };
     this

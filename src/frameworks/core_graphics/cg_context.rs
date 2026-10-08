@@ -348,6 +348,8 @@ fn CGContextSetAllowsAntialiasing(env: &mut Environment, context: CGContextRef, 
         .allows_antialias = allow;
 }
 
+fn CGContextSetAllowsFontSmoothing(_env: &mut Environment, _context: CGContextRef, _allows: bool) {}
+
 fn CGContextSetShouldSmoothFonts(_env: &mut Environment, context: CGContextRef, should: bool) {
     log!(
         "TODO: CGContextSetShouldSmoothFonts({:?}, {})",
@@ -494,5 +496,6 @@ pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(CGContextSetTextDrawingMode(_, _)),
     export_c_func!(CGContextSetTextMatrix(_, _)),
     export_c_func!(CGContextShowGlyphsAtPoint(_, _, _, _, _)),
+    export_c_func!(CGContextSetAllowsFontSmoothing(_, _)),
     export_c_func!(CGContextShowGlyphsAtPositions(_, _, _, _)),
 ];
