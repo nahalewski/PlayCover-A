@@ -49,8 +49,8 @@ android {
         if (!branding.isEmpty()) {
             applicationIdSuffix = branding.lowercase()
         }
-        resValue("string", "app_name", join("PlayCover-A", " ", branding))
-        buildConfigField("String", "APP_NAME", "\"${join("PlayCover-A", " ", branding)}\"")
+        resValue("string", "app_name", join("Anastasis", " ", branding))
+        buildConfigField("String", "APP_NAME", "\"${join("Anastasis", " ", branding)}\"")
         manifestPlaceholders["icon"] = "@mipmap/ic_launcher"
         buildConfigField("int", "APP_ICON", join("R.drawable.icon", "_", branding.lowercase()))
         versionName = join(getTouchHLEVersionName(), " ", branding)

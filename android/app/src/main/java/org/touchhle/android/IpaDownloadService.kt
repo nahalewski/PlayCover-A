@@ -35,7 +35,7 @@ class IpaDownloadService : Service() {
         val launch = PendingIntent.getActivity(this, 0, Intent(this, LauncherActivity::class.java),
             PendingIntent.FLAG_UPDATE_CURRENT or if (Build.VERSION.SDK_INT >= 23) PendingIntent.FLAG_IMMUTABLE else 0)
         val builder = if (Build.VERSION.SDK_INT >= 26) Notification.Builder(this, CHANNEL) else Notification.Builder(this)
-        return builder.setSmallIcon(android.R.drawable.stat_sys_download).setContentTitle("PlayCover-A downloads")
+        return builder.setSmallIcon(android.R.drawable.stat_sys_download).setContentTitle("Anastasis downloads")
             .setContentText(text).setContentIntent(launch).setOngoing(true).setOnlyAlertOnce(true).build()
     }
     private fun refresh() {

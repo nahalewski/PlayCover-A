@@ -273,7 +273,7 @@ public class MainActivity extends SDLActivity {
             enterPictureInPictureMode(new android.app.PictureInPictureParams.Builder()
                 .setAspectRatio(pipAspectRatio()).build());
         } catch (RuntimeException e) {
-            android.util.Log.w("PlayCoverPiP", "enterPictureInPictureMode failed", e);
+            android.util.Log.w("AnastasisPiP", "enterPictureInPictureMode failed", e);
             // Not allowed right now (e.g. already in PiP): just background.
         }
     }
@@ -325,7 +325,7 @@ public class MainActivity extends SDLActivity {
             new Thread(() -> {
                 android.os.SystemClock.sleep(250);
                 android.os.Process.killProcess(gamePID);
-            }, "PlayCover-exit-IPA").start();
+            }, "Anastasis-exit-IPA").start();
         } else {
             finish();
         }
@@ -359,7 +359,7 @@ public class MainActivity extends SDLActivity {
             final String appName = name;
             final String log = recent;
             runOnUiThread(() -> showCrashDialog(args, appName, log));
-        }, "PlayCover-crash-log").start();
+        }, "Anastasis-crash-log").start();
     }
 
     private void showCrashDialog(android.os.Bundle args, String appName, String log) {
@@ -375,7 +375,7 @@ public class MainActivity extends SDLActivity {
         name.setText(appName); name.setTextSize(18);
         content.addView(name);
         android.widget.TextView details = new android.widget.TextView(this);
-        details.setText(args.getString("message", "").replace("touchHLE crashed", "PlayCover-A crashed") +
+        details.setText(args.getString("message", "").replace("touchHLE crashed", "Anastasis crashed") +
             "\n\nRecent runtime log\n\n" + log);
         details.setTypeface(android.graphics.Typeface.MONOSPACE);
         details.setTextSize(12); details.setTextIsSelectable(true);
@@ -384,7 +384,7 @@ public class MainActivity extends SDLActivity {
         content.addView(scroll, new android.widget.LinearLayout.LayoutParams(-1,
             (int) (getResources().getDisplayMetrics().heightPixels * 0.5f)));
         android.app.AlertDialog dialog = new android.app.AlertDialog.Builder(this)
-            .setTitle("PlayCover-A crashed").setView(content).create();
+            .setTitle("Anastasis crashed").setView(content).create();
         dialog.setCancelable(false);
         dialog.setButton(android.app.AlertDialog.BUTTON_POSITIVE, "Close", (unused, which) -> messageboxSelection[0] = 1);
         dialog.setButton(android.app.AlertDialog.BUTTON_NEUTRAL, "Open log directory", (unused, which) -> messageboxSelection[0] = 0);

@@ -106,7 +106,7 @@ class LauncherActivity : Activity() {
             setPadding(dp(20), dp(24), dp(20), dp(12))
         }
         header.addView(TextView(this).apply {
-            text = "PlayCover-A"; textSize = 30f; setTextColor(Color.WHITE)
+            text = "Anastasis"; textSize = 30f; setTextColor(Color.WHITE)
             typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
         }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         header.addView(actionButton("＋ Add IPA") { pickIpa() })
@@ -597,7 +597,7 @@ class LauncherActivity : Activity() {
             .setView(ScrollView(this).apply { addView(body) })
             .setPositiveButton("Copy report") { _, _ ->
                 val clipboard = getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
-                clipboard.setPrimaryClip(android.content.ClipData.newPlainText("PlayCover-A crash report", report))
+                clipboard.setPrimaryClip(android.content.ClipData.newPlainText("Anastasis crash report", report))
                 android.widget.Toast.makeText(this, "Report copied", android.widget.Toast.LENGTH_SHORT).show()
             }
             .setNegativeButton("Dismiss", null)
@@ -714,7 +714,7 @@ class LauncherActivity : Activity() {
     private fun confirmRemove(app: File) {
         AlertDialog.Builder(this)
             .setTitle("Remove ${prettyName(app)}?")
-            .setMessage("This deletes the file from PlayCover-A's storage. The original you picked is not touched.")
+            .setMessage("This deletes the file from Anastasis's storage. The original you picked is not touched.")
             .setPositiveButton("Remove") { _, _ ->
                 if (app.isDirectory) app.deleteRecursively() else app.delete()
                 reload()
@@ -932,7 +932,7 @@ class LauncherActivity : Activity() {
             setOnCheckedChangeListener { _, checked -> prefs.edit().putBoolean(PREF_COMPAT, checked).apply() }
         })
         content.addView(row)
-        content.addView(sectionLabel("PlayCover-A · powered by touchHLE"))
+        content.addView(sectionLabel("Anastasis · powered by touchHLE"))
         displayPage(page, "settings")
     }
 

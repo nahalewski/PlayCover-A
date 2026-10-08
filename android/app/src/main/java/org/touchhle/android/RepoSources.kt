@@ -146,7 +146,7 @@ object RepoSources {
             connection.instanceFollowRedirects = false
             connection.connectTimeout = 15000
             connection.readTimeout = 15000
-            connection.setRequestProperty("User-Agent", "PlayCover-A/Repositories")
+            connection.setRequestProperty("User-Agent", "Anastasis/Repositories")
             connection.setRequestProperty("Accept-Encoding", "identity")
             transfer.attach(connection)
             try {
