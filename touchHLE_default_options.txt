@@ -254,3 +254,5 @@ com.gamevil.zenonia3: --fps-limit=15
 # Zenonia 4: universal binary that lays itself out for the iPad (1024x768); the iPhone layout is cropped
 com.gamevil.zenonia4: --device-family=ipad --fps-limit=15
 com.gamevil.zenonia5free: --landscape-left --fps-limit=15 --allow-network-access
+# Scribblenauts Remix: lays out a widescreen UI for the 4-inch iPhone screen; on 320x480 the corner buttons are cropped
+com.wb.Scribblenauts: --tall-screen

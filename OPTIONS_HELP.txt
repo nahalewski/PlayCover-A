@@ -33,6 +33,11 @@ View options:
         This is a natural number that is at least 1.
 
 Device options:
+    --tall-screen
+        Emulates the 4-inch iPhone 5 screen (320x568 points) instead of the
+        original 320x480. Some apps lay out a widescreen UI when they see it
+        and clip it on a 3:2 screen. Only applies to the iPhone family.
+
     --device-family=...
         Specifies which device family should be emulated: iPhone or iPad.
         This only work if running app does support selected family

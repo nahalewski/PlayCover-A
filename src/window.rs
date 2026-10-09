@@ -40,6 +40,14 @@ impl std::fmt::Display for DeviceFamily {
         std::fmt::Debug::fmt(self, f)
     }
 }
+/// Portrait screen size, honouring `--tall-screen` (4-inch iPhone: 320x568).
+pub fn portrait_size_for(family: DeviceFamily, tall_screen: bool) -> (u32, u32) {
+    if tall_screen && family == DeviceFamily::iPhone {
+        (320, 568)
+    } else {
+        family.portrait_size()
+    }
+}
 impl DeviceFamily {
     pub fn portrait_size(&self) -> (u32, u32) {
         match self {
@@ -174,10 +182,11 @@ fn android_forced_orientation() -> Option<DeviceOrientation> {
 }
 fn size_for_orientation(
     family: DeviceFamily,
+    tall_screen: bool,
     orientation: DeviceOrientation,
     scale_hack: NonZeroU32,
 ) -> (u32, u32) {
-    let (width, height) = family.portrait_size();
+    let (width, height) = portrait_size_for(family, tall_screen);
     let scale_hack = scale_hack.get();
     match orientation {
         DeviceOrientation::Portrait => (width * scale_hack, height * scale_hack),
@@ -343,6 +352,7 @@ pub struct Window {
     internal_gl_ins: Option<Box<dyn GLESContext>>,
     splash_image: Option<Image>,
     device_family: DeviceFamily,
+    tall_screen: bool,
     device_orientation: DeviceOrientation,
     controller_ctx: sdl2::GameControllerSubsystem,
     controllers: Vec<sdl2::controller::GameController>,
@@ -432,7 +442,7 @@ impl Window {
             window
         } else {
             let (width, height) =
-                size_for_orientation(device_family, device_orientation, scale_hack);
+                size_for_orientation(device_family, options.tall_screen, device_orientation, scale_hack);
             let window = video_ctx
                 .window(title, width, height)
                 .position_centered()
@@ -493,6 +503,7 @@ impl Window {
             internal_gl_ins: None,
             splash_image: launch_image,
             device_family,
+            tall_screen: options.tall_screen,
             device_orientation,
             controller_ctx,
             controllers: Vec::new(),
@@ -559,6 +570,7 @@ impl Window {
             let (vx, vy, vw, vh) = if independent_of_viewport {
                 let (width, height) = size_for_orientation(
                     window.device_family,
+                    window.tall_screen,
                     window.device_orientation,
                     NonZeroU32::new(1).unwrap(),
                 );
@@ -1449,7 +1461,7 @@ impl Window {
                 set_sdl2_orientation(new_orientation);
                 rotate_fullscreen_size(new_orientation, self.window.size())
             } else {
-                size_for_orientation(self.device_family, new_orientation, self.scale_hack)
+                size_for_orientation(self.device_family, self.tall_screen, new_orientation, self.scale_hack)
             };
 
             // macOS quirk: when resizing the window, the new framebuffer's size
@@ -1500,6 +1512,10 @@ impl Window {
     pub fn device_family(&self) -> DeviceFamily {
         self.device_family
     }
+    /// Portrait screen size the guest app sees.
+    pub fn portrait_size(&self) -> (u32, u32) {
+        portrait_size_for(self.device_family, self.tall_screen)
+    }
 
     /// Returns the current device orientation
     pub fn current_rotation(&self) -> DeviceOrientation {
@@ -1513,6 +1529,7 @@ impl Window {
     pub fn size_unrotated_unscaled(&self) -> (u32, u32) {
         size_for_orientation(
             self.device_family,
+            self.tall_screen,
             DeviceOrientation::Portrait,
             NonZeroU32::new(1).unwrap(),
         )
@@ -1525,7 +1542,7 @@ impl Window {
     /// the world, but the scale and orientation might not.
     pub fn viewport(&self) -> (u32, u32, u32, u32) {
         let (app_width, app_height) =
-            size_for_orientation(self.device_family, self.device_orientation, self.scale_hack);
+            size_for_orientation(self.device_family, self.tall_screen, self.device_orientation, self.scale_hack);
         if !self.fullscreen && !Self::rotatable_fullscreen() {
             return (0, 0, app_width, app_height);
         }

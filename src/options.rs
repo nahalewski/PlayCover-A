@@ -36,6 +36,8 @@ pub enum Button {
 pub struct Options {
     pub fullscreen: bool,
     pub device_family: Option<DeviceFamily>,
+    /// Emulate the 4-inch iPhone screen (320x568) instead of 320x480.
+    pub tall_screen: bool,
     pub initial_orientation: DeviceOrientation,
     pub scale_hack: NonZeroU32,
     pub deadzone: f32,
@@ -76,6 +78,7 @@ impl Default for Options {
         Options {
             fullscreen: false,
             device_family: None,
+            tall_screen: false,
             initial_orientation: DeviceOrientation::Portrait,
             scale_hack: NonZeroU32::new(1).unwrap(),
             analog_stick_tilt_controls: true,
@@ -139,6 +142,8 @@ impl Options {
             self.initial_orientation = DeviceOrientation::LandscapeLeft;
         } else if arg == "--landscape-right" {
             self.initial_orientation = DeviceOrientation::LandscapeRight;
+        } else if arg == "--tall-screen" {
+            self.tall_screen = true;
         } else if let Some(value) = arg.strip_prefix("--device-family=") {
             let parsed =
                 DeviceFamily::try_from(value).map_err(|_| "Invalid device family".to_string())?;
