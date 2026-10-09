@@ -314,7 +314,9 @@ fn AudioUnitSetProperty(
             assert_eq!(in_scope, kAudioUnitScope_Global);
             assert_eq!(in_data_size, guest_size_of::<AURenderCallbackStruct>());
             let render_callback = env.mem.read(in_data.cast::<AURenderCallbackStruct>());
-            host_object.render_callback = Some(render_callback);
+            // A NULL inputProc removes the render callback.
+            host_object.render_callback =
+                (render_callback.input_proc.addr_with_thumb_bit() != 0).then_some(render_callback);
             result = 0;
             log_dbg!("AudioUnitSetProperty({:?}, kAudioUnitProperty_SetRenderCallback, {:?}, {:?}, {:?}, {:?}) -> {:?}", in_unit, in_scope, in_element, render_callback, in_data_size, result);
         }
@@ -906,7 +908,13 @@ fn mixer_set_property(
         }
         kAudioUnitProperty_SetRenderCallback => {
             let callback = env.mem.read(data.cast::<AURenderCallbackStruct>());
-            host_object.bus_callbacks.insert(element, callback);
+            // A NULL inputProc disconnects the bus (Bejeweled 2 does this
+            // when a sound stops).
+            if callback.input_proc.addr_with_thumb_bit() == 0 {
+                host_object.bus_callbacks.remove(&element);
+            } else {
+                host_object.bus_callbacks.insert(element, callback);
+            }
         }
         kAudioUnitProperty_MaximumFramesPerSlice => {
             host_object.maximum_frames_per_slice = env.mem.read(data.cast::<u32>());
@@ -1134,6 +1142,9 @@ fn mix_mixer_buses(
         env.mem.free(scratch);
     }
 
+    if mix.iter().any(|&s| s != 0) {
+        log_once!("Mixer unit: first non-silent mix of its input buses");
+    }
     let out = env.mem.bytes_at_mut(out_data.cast::<u8>(), (out_samples * 2) as u32);
     for (i, sample) in mix.iter().enumerate() {
         let clamped = (*sample).clamp(i16::MIN as i32, i16::MAX as i32) as i16;

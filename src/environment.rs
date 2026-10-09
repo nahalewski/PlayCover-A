@@ -1931,6 +1931,16 @@ impl Environment {
                                 self.threads[thread_id].blocked_by = ThreadBlock::NotBlocked;
                                 self.relock_unblocked_mutex_for_thread(thread_id, mutex);
                                 return thread_id;
+                            } else {
+                                // pthread_cond_timedwait: wake up for the
+                                // deadline even if nothing else will run
+                                // before then (Bejeweled 2's main and audio
+                                // threads both wait with timeouts).
+                                let wake_at = Instant::now() + (deadline - time);
+                                next_awakening = match next_awakening {
+                                    None => Some(wake_at),
+                                    Some(other) => Some(other.min(wake_at)),
+                                };
                             }
                         }
                     }
@@ -1986,7 +1996,6 @@ impl Environment {
                 // This should hopefully not happen, but if a thread is
                 // blocked on another thread waiting for a deferred return,
                 // it could.
-                // TODO: handle a thread waiting on condition with a timeout
                 panic!("No active threads, program has deadlocked!");
             }
         }
