@@ -324,9 +324,17 @@ pub const CLASSES: ClassExports = objc_classes! {
 }
 
 - (MutVoidPtr)mutableBytes {
-    let host_obj = env.objc.borrow_mut::<NSDataHostObject>(this);
-    assert!(host_obj.length != 0);
-    host_obj.bytes
+    // An empty NSMutableData still hands out a usable (non-NULL) buffer on
+    // iOS; callers commonly take the pointer first and grow the data later.
+    // Give empty data a small allocation of its own so later
+    // setLength:/increaseLengthBy: realloc it as usual.
+    let bytes = env.objc.borrow::<NSDataHostObject>(this).bytes;
+    if bytes.is_null() {
+        let new_bytes = env.mem.alloc(16);
+        env.objc.borrow_mut::<NSDataHostObject>(this).bytes = new_bytes;
+        return new_bytes;
+    }
+    bytes
 }
 
 - (())setLength:(NSUInteger)new_length {

@@ -31,6 +31,7 @@ const KERN_OSREV: i32 = 3;
 const KERN_VERSION: i32 = 4;
 const KERN_HOSTNAME: i32 = 10;
 const KERN_PROC: i32 = 14;
+const KERN_BOOTTIME: i32 = 21;
 const KERN_OSVERSION: i32 = 65;
 
 // KERN_PROC
@@ -138,6 +139,9 @@ fn sysctl(
     match name_len {
         2 => {
             let (name0, name1) = (env.mem.read(name), env.mem.read(name + 1));
+            if (name0, name1) == (CTL_KERN, KERN_BOOTTIME) {
+                return sysctl_boottime(env, oldp, oldlenp);
+            }
             sysctl_generic(
                 env,
                 |_| {
@@ -230,6 +234,35 @@ fn sysctl(
     }
 }
 
+/// `kern.boottime`: a `struct timeval` (two 32-bit fields on armv7) holding
+/// the wall-clock time at which the emulated device "booted". touchHLE's
+/// uptime (`mach_absolute_time`, `systemUptime`) counts from emulator
+/// startup, so the boot time is now minus that uptime.
+fn sysctl_boottime(env: &mut Environment, oldp: MutVoidPtr, oldlenp: MutPtr<GuestUSize>) -> i32 {
+    const TIMEVAL_SIZE: GuestUSize = 8;
+    if oldlenp.is_null() {
+        return 0;
+    }
+    let available = env.mem.read(oldlenp);
+    env.mem.write(oldlenp, TIMEVAL_SIZE);
+    if oldp.is_null() {
+        return 0;
+    }
+    if available < TIMEVAL_SIZE {
+        set_errno(env, 12); // ENOMEM
+        return -1;
+    }
+    let uptime = std::time::Instant::now().duration_since(env.startup_time);
+    let boot = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .saturating_sub(uptime);
+    let buf = env.mem.bytes_at_mut(oldp.cast(), TIMEVAL_SIZE);
+    buf[0..4].copy_from_slice(&(boot.as_secs() as i32).to_le_bytes()); // tv_sec
+    buf[4..8].copy_from_slice(&(boot.subsec_micros() as i32).to_le_bytes()); // tv_usec
+    0
+}
+
 /// Answers the "interface list" routing query for the one interface touchHLE
 /// pretends to have (`en0`), with iOS's placeholder MAC address
 /// 02:00:00:00:00:00 (what iOS 7+ reports to apps). Apps use this to derive a
@@ -302,6 +335,9 @@ fn sysctlbyname(
         newp,
         newlen
     );
+    if name_str == "kern.boottime" {
+        return sysctl_boottime(env, oldp, oldlenp);
+    }
     sysctl_generic(
         env,
         |env| {

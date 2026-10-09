@@ -40,6 +40,21 @@ pub const CONSTANTS: ConstantExports = &[
         "_vm_page_size",
         HostConstant::Custom(|env| env.mem.alloc_and_write(PAGE_SIZE).cast_void().cast_const()),
     ),
+    // `mach/ndr.h`: the NDR (Network Data Representation) record that MIG
+    // stubs copy into every message. On ARM: mig_vers/if_vers/reserved1/
+    // mig_encoding = 0, int_rep = NDR_INT_LITTLE_ENDIAN (1), char_rep =
+    // NDR_CHAR_ASCII (0), float_rep = NDR_FLOAT_IEEE (0), reserved2 = 0.
+    // (Crashlytics' exception server copies it into its reply messages.)
+    (
+        "_NDR_record",
+        HostConstant::Custom(|env| {
+            let bytes: [u8; 8] = [0, 0, 0, 0, 1, 0, 0, 0];
+            env.mem
+                .alloc_and_write(u64::from_le_bytes(bytes))
+                .cast_void()
+                .cast_const()
+        }),
+    ),
 ];
 
 pub const FUNCTIONS: FunctionExports = &[

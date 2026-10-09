@@ -41,9 +41,14 @@ type mach_msg_option_t = integer_t;
 type mach_msg_size_t = natural_t;
 type mach_msg_timeout_t = natural_t;
 
+const MACH_SEND_MSG: mach_msg_option_t = 0x00000001;
+const MACH_RCV_MSG: mach_msg_option_t = 0x00000002;
+const MACH_RCV_TIMEOUT: mach_msg_option_t = 0x00000100;
+const MACH_RCV_TIMED_OUT: mach_msg_return_t = 0x10004003;
+
 #[allow(clippy::too_many_arguments)]
 fn mach_msg(
-    _env: &mut Environment,
+    env: &mut Environment,
     msg: MutVoidPtr, // TODO: use MutPtr<mach_msg_header_t>,
     option: mach_msg_option_t,
     send_size: mach_msg_size_t,
@@ -53,10 +58,6 @@ fn mach_msg(
     notify: mach_port_name_t,
 ) -> mach_msg_return_t {
     log_once!("TODO: mach_msg send/rcv");
-    // Performance note: Even with the stub, in the case of running in the
-    // exception thread (Unity's case), this would become a busy loop.
-    // Possibly, some performance optimization could be done here.
-    // TODO: optimize perf if needed
     log_dbg!(
         "TODO: mach_msg({:?}, {}, {}, {}, {}, {}, {})",
         msg,
@@ -67,6 +68,28 @@ fn mach_msg(
         timeout,
         notify
     );
+    // A receive-only call waits for a message to arrive on `rcv_name`.
+    // There is a single task here and nothing in touchHLE ever sends Mach
+    // messages to an app-allocated port (exception ports in particular only
+    // get messages when the kernel reports a crash), so no message will ever
+    // arrive: block like the real kernel would, until the timeout if one was
+    // requested, otherwise forever. Returning success here instead hands the
+    // caller an unfilled "message" (Crashlytics' exception server thread then
+    // processes garbage and crashes).
+    if option & MACH_RCV_MSG != 0 && option & MACH_SEND_MSG == 0 {
+        if option & MACH_RCV_TIMEOUT != 0 {
+            env.sleep(std::time::Duration::from_millis(timeout.into()));
+            return MACH_RCV_TIMED_OUT;
+        }
+        log!(
+            "mach_msg: receive on port {:#x} with no possible sender, blocking thread {} forever",
+            rcv_name,
+            env.current_thread
+        );
+        loop {
+            env.sleep(std::time::Duration::from_secs(3600));
+        }
+    }
     // Note: Because Unity _do_ check the return value of this function
     // with an assert, we must return a success here.
     // (See [mini-darwin.c](https://github.com/mono/mono/blob/62121afbb28f0b62f100ec9a942d10c5e0f4814f/mono/mini/mini-darwin.c#L139))

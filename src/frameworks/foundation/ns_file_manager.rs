@@ -249,20 +249,39 @@ pub const CLASSES: ClassExports = objc_classes! {
                    error:(MutPtr<id>)out_error { // NSError**
     // TODO: call delegate
     let path = ns_string::to_rust_string(env, path); // TODO: avoid copy
-    match env.fs.remove(GuestPath::new(&path)) {
+    // Like Foundation, a directory is removed together with its contents.
+    // enumerate_recursive lists parents before their children, so removing
+    // in reverse order empties every directory before removing it.
+    let mut result = Ok(());
+    if env.fs.is_dir(GuestPath::new(&path)) {
+        let children = env.fs.enumerate_recursive(GuestPath::new(&path)).unwrap_or_default();
+        for child in children.iter().rev() {
+            let child_path = format!("{}/{}", path.trim_end_matches('/'), child.as_str());
+            if let Err(err) = env.fs.remove(GuestPath::new(&child_path)) {
+                result = Err(err);
+                break;
+            }
+        }
+    }
+    if result.is_ok() {
+        result = env.fs.remove(GuestPath::new(&path));
+    }
+    match result {
         Ok(()) => true,
         Err(err) => {
+            log!("removeItemAtPath: failed to remove {:?}: {:?}", path, err);
             if !out_error.is_null() {
-                match err {
-                    FsError::DoesNotExist => {
-                        let domain = get_static_str(env, NSCocoaErrorDomain);
-                        let error = msg_class![env; NSError alloc];
-                        let error = msg![env; error initWithDomain:domain code:NSFileReadNoSuchFileError userInfo:nil];
-                        autorelease(env, error);
-                        env.mem.write(out_error, error);
-                    }
-                    _ => unimplemented!()
-                }
+                // Cocoa error codes from FoundationErrors.h.
+                let code: super::NSInteger = match err {
+                    FsError::DoesNotExist | FsError::NonexistentParentDir => NSFileReadNoSuchFileError,
+                    FsError::AccessDenied | FsError::ReadonlyParentDir => 513, // NSFileWriteNoPermissionError
+                    _ => 512, // NSFileWriteUnknownError
+                };
+                let domain = get_static_str(env, NSCocoaErrorDomain);
+                let error = msg_class![env; NSError alloc];
+                let error = msg![env; error initWithDomain:domain code:code userInfo:nil];
+                autorelease(env, error);
+                env.mem.write(out_error, error);
             }
             false
         }

@@ -238,9 +238,23 @@ fn objc_msgSend_inner(
     // Traverse the chain of superclasses to find the method implementation.
 
     let mut class = orig_class;
+    let mut resolve_attempted = false;
     loop {
         if class == nil {
             assert!(class != orig_class);
+
+            // Dynamic method resolution, as in Apple's runtime: give the class
+            // one chance to add the method (+resolveInstanceMethod: /
+            // +resolveClassMethod:, typically via class_addMethod), then retry
+            // the lookup. Protocol Buffers' GPBMessage synthesizes its
+            // property accessors this way.
+            if !resolve_attempted {
+                resolve_attempted = true;
+                if try_resolve_method(env, receiver, orig_class, selector) {
+                    class = orig_class;
+                    continue;
+                }
+            }
 
             if env.options.ignore_unknown_selectors {
                 // Debugging aid (--ignore-unknown-selectors): behave as if the
@@ -411,6 +425,66 @@ Type mismatch when sending message {} to {:?}!
             );
         }
     }
+}
+
+/// Send `+resolveInstanceMethod:` (or `+resolveClassMethod:` when `class` is
+/// a metaclass) for `selector`, if the app's class implements it. Returns
+/// true if the method was resolved, i.e. `class` now has `selector`.
+/// Guest registers are preserved so the original message can still be
+/// dispatched with its arguments.
+fn try_resolve_method(env: &mut Environment, receiver: id, class: Class, selector: SEL) -> bool {
+    use super::msg;
+    let Some(&super::ClassHostObject { is_metaclass, .. }) = env
+        .objc
+        .get_host_object(class)
+        .and_then(|h| h.as_any().downcast_ref::<super::ClassHostObject>())
+    else {
+        return false;
+    };
+    let sel_name = selector.as_str(&env.mem).to_string();
+    if sel_name == "resolveInstanceMethod:" || sel_name == "resolveClassMethod:" {
+        return false;
+    }
+    // The resolver is a class method: it is sent to the class object, whose
+    // own isa is the metaclass that must implement it.
+    let (class_object, metaclass, resolver) = if is_metaclass {
+        (receiver, class, "resolveClassMethod:")
+    } else {
+        (class, ObjC::read_isa(class, &env.mem), "resolveInstanceMethod:")
+    };
+    // Walk the metaclass chain without panicking on placeholder classes.
+    let Some(resolver_sel) = env.objc.lookup_selector(resolver) else {
+        return false;
+    };
+    let mut c = metaclass;
+    let mut has_resolver = false;
+    while c != nil {
+        let Some(h) = env
+            .objc
+            .get_host_object(c)
+            .and_then(|h| h.as_any().downcast_ref::<super::ClassHostObject>())
+        else {
+            return false;
+        };
+        if h.methods.contains_key(&resolver_sel) {
+            has_resolver = true;
+            break;
+        }
+        c = h.superclass;
+    }
+    if !has_resolver {
+        return false;
+    }
+    let saved_regs = *env.cpu.regs();
+    let saved_cpsr = env.cpu.cpsr();
+    let resolved: bool = if is_metaclass {
+        msg![env; class_object resolveClassMethod:selector]
+    } else {
+        msg![env; class_object resolveInstanceMethod:selector]
+    };
+    *env.cpu.regs_mut() = saved_regs;
+    env.cpu.set_cpsr(saved_cpsr);
+    resolved
 }
 
 /// Standard variant of `objc_msgSend`. See [objc_msgSend_inner].

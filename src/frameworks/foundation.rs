@@ -223,14 +223,13 @@ fn NSAllocateObject(
     extra_bytes: NSUInteger,
     _zone: MutVoidPtr,
 ) -> id {
-    if extra_bytes != 0 {
-        log!(
-            "TODO: NSAllocateObject() extra bytes ({}) are ignored",
-            extra_bytes
-        );
-    }
-    env.objc
-        .alloc_object(class, Box::new(TrivialHostObject), &mut env.mem)
+    // Extra bytes are part of the same allocation, right after the ivars.
+    env.objc.alloc_object_with_extra_bytes(
+        class,
+        extra_bytes,
+        Box::new(TrivialHostObject),
+        &mut env.mem,
+    )
 }
 
 fn NSDeallocateObject(env: &mut Environment, object: id) {

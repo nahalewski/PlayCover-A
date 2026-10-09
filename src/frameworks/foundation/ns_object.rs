@@ -72,6 +72,15 @@ pub const CLASSES: ClassExports = objc_classes! {
     env.objc.class_has_method(this, selector)
 }
 
+// Dynamic method resolution hooks: NSObject itself resolves nothing.
+// Subclasses (e.g. GPBMessage) override them and call super as a fallback.
++ (bool)resolveInstanceMethod:(SEL)_selector {
+    false
+}
++ (bool)resolveClassMethod:(SEL)_selector {
+    false
+}
+
 + (())cancelPreviousPerformRequestsWithTarget:(id)target selector:(SEL)selector object:(id)arg {
     let run_loop: id = msg_class![env; NSRunLoop currentRunLoop];
     cancel_perform_requests(env, run_loop, target, selector, arg);

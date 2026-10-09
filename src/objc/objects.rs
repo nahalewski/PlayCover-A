@@ -200,6 +200,27 @@ impl super::ObjC {
         )
     }
 
+    /// Like [Self::alloc_object], but the guest allocation has `extra_bytes`
+    /// of zeroed storage after the instance variables (`NSAllocateObject`,
+    /// `class_createInstance`). Protocol Buffers' `GPBMessage` keeps its field
+    /// storage there.
+    pub fn alloc_object_with_extra_bytes(
+        &mut self,
+        isa: Class,
+        extra_bytes: GuestUSize,
+        host_object: Box<dyn AnyHostObject>,
+        mem: &mut Mem,
+    ) -> id {
+        let &ClassHostObject { instance_size, .. } = self.borrow(isa);
+        self.alloc_object_inner(
+            isa,
+            instance_size + extra_bytes,
+            host_object,
+            mem,
+            Some(NonZeroU32::new(1).unwrap()),
+        )
+    }
+
     /// Allocate a static-lifetime (guest) object (for example, a class) and
     /// associate it with its host object.
     ///
