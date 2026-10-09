@@ -276,6 +276,8 @@ impl Options {
             self.landscape_view_adaptation = false;
         } else if arg == "--force-composition" {
             self.force_composition = true;
+        } else if arg == "--allow-ads" {
+            crate::ad_blocklist::set_allow_ads(true);
         } else if arg == "--allow-network-access" {
             self.network_access = true;
         } else if arg == "--no-error-popup" {

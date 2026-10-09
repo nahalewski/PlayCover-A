@@ -182,6 +182,14 @@ fn single_request(
     body: &[u8],
     timeout: Duration,
 ) -> Result<HttpResponse, HttpError> {
+    if let Some((_, rest)) = url.split_once("://") {
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+        let host = authority.rsplit('@').next().unwrap_or(authority);
+        if crate::ad_blocklist::is_blocked_host(host) {
+            log!("Blocked advertising request to {:?}", host);
+            return Err(HttpError::CannotFindHost);
+        }
+    }
     let parsed = parse_url(url)?;
     let deadline = Instant::now() + timeout.max(Duration::from_secs(1));
 

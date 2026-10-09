@@ -30,6 +30,7 @@ mod log;
 #[cfg(feature = "a64")]
 mod a64;
 mod abi;
+pub mod ad_blocklist;
 mod audio;
 mod bundle;
 mod cpu;

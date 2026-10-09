@@ -46,6 +46,13 @@ static LAST_EVENT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU
 
 fn send_web_command(env: &mut Environment, view: id, command: &str, base_url: &str, payload: &str) {
     use std::sync::atomic::{AtomicU64, Ordering};
+    if command == "show" {
+        let authority = payload.split_once("://").map_or("", |(_, rest)| rest.split(['/', '?', '#']).next().unwrap_or(""));
+        if crate::ad_blocklist::is_blocked_host(authority.rsplit('@').next().unwrap_or(authority)) {
+            log!("UIWebView: blocked advertising page {:?}", payload.chars().take(80).collect::<String>());
+            return;
+        }
+    }
     ACTIVE_WEBVIEW.store(if command == "hide" { 0 } else { view.to_bits() }, Ordering::Relaxed);
     static SEQ: AtomicU64 = AtomicU64::new(1);
     let rect = if command == "hide" {

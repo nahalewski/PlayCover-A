@@ -114,6 +114,14 @@ fn getaddrinfo(
     if node_name.is_null() && serv_name.is_null() {
         return EAI_NONAME;
     }
+    if !node_name.is_null() {
+        if let Ok(node) = env.mem.cstr_at_utf8(node_name) {
+            if crate::ad_blocklist::is_blocked_host(node) {
+                log!("Blocked advertising lookup of {:?}", node);
+                return EAI_NONAME;
+            }
+        }
+    }
 
     let port = if serv_name.is_null() {
         0
@@ -225,6 +233,10 @@ fn gethostbyname(env: &mut Environment, name: ConstPtr<u8>) -> MutPtr<hostent> {
     if !env.options.network_access {
         log!("gethostbyname(\"{}\") => NULL (network access is disabled)", host);
         // TODO: set h_errno
+        return Ptr::null();
+    }
+    if crate::ad_blocklist::is_blocked_host(&host) {
+        log!("Blocked advertising lookup of {:?}", host);
         return Ptr::null();
     }
     use std::net::{IpAddr, ToSocketAddrs};
