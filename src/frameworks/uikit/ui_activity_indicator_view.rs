@@ -11,7 +11,18 @@ use crate::objc::{
     NSZonePtr,
 };
 
+use std::sync::atomic::{AtomicU32, Ordering};
+
 type UIActivityIndicatorViewStyle = NSInteger;
+
+/// Number of activity indicators currently animating. Apps show one while
+/// loading, so the frame limiter is lifted then (see `eagl.rs`): loading is
+/// often paced per frame and a low gameplay cap makes it needlessly slow.
+static ANIMATING_COUNT: AtomicU32 = AtomicU32::new(0);
+
+pub fn any_animating() -> bool {
+    ANIMATING_COUNT.load(Ordering::Relaxed) > 0
+}
 
 pub struct UIActivityIndicatorViewHostObject {
     superclass: super::ui_view::UIViewHostObject,
@@ -44,11 +55,19 @@ pub const CLASSES: ClassExports = objc_classes! {
 
 - (())startAnimating {
     log!("TODO: [(UIActivityIndicatorView *){:?} startAnimating]", this);
-    env.objc.borrow_mut::<UIActivityIndicatorViewHostObject>(this).animating = true;
+    let host_object = env.objc.borrow_mut::<UIActivityIndicatorViewHostObject>(this);
+    if !host_object.animating {
+        host_object.animating = true;
+        ANIMATING_COUNT.fetch_add(1, Ordering::Relaxed);
+    }
 }
 - (())stopAnimating {
     log!("TODO: [(UIActivityIndicatorView *){:?} stopAnimating]", this);
-    env.objc.borrow_mut::<UIActivityIndicatorViewHostObject>(this).animating = false;
+    let host_object = env.objc.borrow_mut::<UIActivityIndicatorViewHostObject>(this);
+    if host_object.animating {
+        host_object.animating = false;
+        ANIMATING_COUNT.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 - (bool)isAnimating {

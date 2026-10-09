@@ -295,6 +295,12 @@ pub const CLASSES: ClassExports = objc_classes! {
     // The presented frame should be displayed ASAP, but the next one must be
     // delayed, so this needs to be checked before returning.
     let sleep_for = limit_framerate(&mut env.objc.borrow_mut::<EAGLContextHostObject>(this).next_frame_due, &env.options);
+    // Loading screens (activity indicator shown) run uncapped.
+    let sleep_for = if crate::frameworks::uikit::ui_activity_indicator_view::any_animating() {
+        None
+    } else {
+        sleep_for
+    };
 
     if env.options.print_fps {
         env
