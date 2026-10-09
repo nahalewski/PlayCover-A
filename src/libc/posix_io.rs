@@ -1014,7 +1014,7 @@ pub const FUNCTIONS: FunctionExports = &[
 
 /// Whether a `read()` on `fd` would return right away: [None] if `fd` is not
 /// the read end of a pipe.
-fn pipe_read_ready(env: &mut Environment, fd: FileDescriptor) -> Option<bool> {
+pub(crate) fn pipe_read_ready(env: &mut Environment, fd: FileDescriptor) -> Option<bool> {
     let file = env.libc_state.posix_io.file_for_fd(fd)?;
     match &file.file {
         GuestFile::Pipe {
@@ -1026,6 +1026,44 @@ fn pipe_read_ready(env: &mut Environment, fd: FileDescriptor) -> Option<bool> {
         }
         _ => None,
     }
+}
+
+/// `poll()` readiness for a file descriptor that is not a socket: the `revents`
+/// bits for `events`, or [None] if `fd` is not an open file.
+pub(crate) fn fd_poll_ready(env: &mut Environment, fd: FileDescriptor, events: i16) -> Option<i16> {
+    const POLLIN: i16 = 0x1;
+    const POLLOUT: i16 = 0x4;
+    const POLLHUP: i16 = 0x10;
+    if fd < NORMAL_FILENO_BASE {
+        // stdin never has input, stdout and stderr can be written to.
+        return Some(events & POLLOUT);
+    }
+    let file = env.libc_state.posix_io.file_for_fd(fd)?;
+    let mut revents = 0;
+    match &file.file {
+        GuestFile::Pipe {
+            buffer,
+            is_write_end,
+        } => {
+            let pipe = buffer.lock().unwrap();
+            if *is_write_end {
+                revents |= events & POLLOUT;
+                if pipe.read_end_closed {
+                    revents |= POLLHUP;
+                }
+            } else {
+                if !pipe.data.is_empty() {
+                    revents |= events & POLLIN;
+                }
+                if pipe.write_end_closed {
+                    revents |= POLLHUP;
+                }
+            }
+        }
+        // Regular files and the like are always ready.
+        _ => revents |= events & (POLLIN | POLLOUT),
+    }
+    Some(revents)
 }
 
 fn new_pipe_end(buffer: crate::fs::PipeRef, is_write_end: bool) -> PosixFileHostObject {

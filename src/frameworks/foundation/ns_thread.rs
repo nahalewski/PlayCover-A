@@ -109,7 +109,8 @@ pub const CLASSES: ClassExports = objc_classes! {
 }
 + (())sleepUntilDate:(id)date { // NSDate *
     let ti: NSTimeInterval = msg![env; date timeIntervalSinceNow];
-    assert!(ti >= 0.0); // TODO
+    // A date in the past means no sleeping, like on iOS.
+    let ti: NSTimeInterval = ti.max(0.0);
     msg![env; this sleepForTimeInterval:ti]
 }
 

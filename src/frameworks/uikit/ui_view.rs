@@ -913,8 +913,21 @@ pub const CLASSES: ClassExports = objc_classes! {
 - (CGRect)convertRect:(CGRect)rect
              fromView:(id)other { // UIView*
     if other == nil {
-        let window: id = msg![env; this window];
-        assert!(window != nil);
+        let mut window: id = msg![env; this window];
+        if window == nil {
+            // Not in a window: use the root of the superview chain instead.
+            window = this;
+            loop {
+                let parent: id = msg![env; window superview];
+                if parent == nil {
+                    break;
+                }
+                window = parent;
+            }
+            if window == this {
+                return rect;
+            }
+        }
         return msg![env; this convertRect:rect fromView:window]
     }
     let this_layer = env.objc.borrow::<UIViewHostObject>(this).layer;
@@ -924,8 +937,21 @@ pub const CLASSES: ClassExports = objc_classes! {
 - (CGRect)convertRect:(CGRect)rect
                toView:(id)other { // UIView*
     if other == nil {
-        let window: id = msg![env; this window];
-        assert!(window != nil);
+        let mut window: id = msg![env; this window];
+        if window == nil {
+            // Not in a window: use the root of the superview chain instead.
+            window = this;
+            loop {
+                let parent: id = msg![env; window superview];
+                if parent == nil {
+                    break;
+                }
+                window = parent;
+            }
+            if window == this {
+                return rect;
+            }
+        }
         return msg![env; this convertRect:rect toView:window]
     }
     let this_layer = env.objc.borrow::<UIViewHostObject>(this).layer;

@@ -161,8 +161,20 @@ impl Parser<'_> {
         }
         let value = self.parse_value(env, 0)?;
         self.skip_whitespace();
+        // Apps often pass the terminating NUL of a C string along with the
+        // text, which iOS accepts.
+        while self.peek() == Some(0) {
+            self.pos += 1;
+            self.skip_whitespace();
+        }
         if self.pos != self.bytes.len() {
-            return Err(self.error("Garbage after JSON text"));
+            let rest = &self.bytes[self.pos..self.bytes.len().min(self.pos + 16)];
+            return Err(self.error(&format!(
+                "Garbage after JSON text ({} of {} bytes used, next bytes {:02x?})",
+                self.pos,
+                self.bytes.len(),
+                rest
+            )));
         }
         Ok(value)
     }

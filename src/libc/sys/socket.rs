@@ -22,7 +22,10 @@
 //! - [Beej's Guide to Network Programming](https://beej.us/guide/bgnet/html/index-wide.html)
 
 use crate::dyld::{export_c_func, FunctionExports};
-use crate::libc::errno::{set_errno, EAGAIN, EBADF, ECONNRESET, EINVAL, EPROTONOSUPPORT};
+use crate::libc::errno::{
+    set_errno, EAGAIN, EBADF, ECONNABORTED, ECONNREFUSED, ECONNRESET, EHOSTUNREACH, EINTR, EINVAL,
+    EIO, EISCONN, ENETUNREACH, ENOTCONN, ENOTTY, EPIPE, EPROTONOSUPPORT, ETIMEDOUT,
+};
 use crate::libc::posix_io::{close, find_or_create_socket, is_socket, FileDescriptor};
 use crate::libc::time::timeval;
 use crate::mem::{
@@ -178,10 +181,25 @@ fn socket(env: &mut Environment, domain: i32, type_: i32, protocol: i32) -> File
     fd
 }
 
+/// `FIONBIO`: set or clear non-blocking mode. touchHLE's host sockets are
+/// always non-blocking (operations that would block fail with `EAGAIN`).
+const FIONBIO: u32 = 0x8004667e;
+const SO_TYPE: i32 = 0x1008;
+
 fn ioctl(env: &mut Environment, fd: i32, request: u32, _args: DotDotDot) -> i32 {
-    assert!(is_socket(env, fd));
-    log!("TODO: ioctl({} (socket), {:#x?}, ...) => -1", fd, request);
-    -1
+    set_errno(env, 0);
+    if !State::get(env).sockets.contains_key(&fd) {
+        set_errno(env, ENOTTY);
+        return -1;
+    }
+    match request {
+        FIONBIO => 0,
+        _ => {
+            log!("TODO: ioctl({} (socket), {:#x?}, ...) => -1", fd, request);
+            set_errno(env, ENOTTY);
+            -1
+        }
+    }
 }
 
 fn getsockopt(
@@ -204,15 +222,26 @@ fn getsockopt(
         option_len
     );
 
-    assert_eq!(level, SOL_SOCKET);
-    // TODO: support other options
-    assert_eq!(option_name, SO_ERROR);
-
-    let option_len_val = env.mem.read(option_len);
-    assert_eq!(option_len_val, 4);
-
-    let option_value: MutPtr<i32> = option_value.cast();
-    env.mem.write(option_value, 0); // no errors
+    let Some(host_object) = State::get(env).sockets.get(&socket) else {
+        set_errno(env, EBADF);
+        return -1;
+    };
+    let socket_type = host_object.type_;
+    // Only SO_ERROR (no pending error) and SO_TYPE carry information; the
+    // buffer sizes and other tuning options read as 0.
+    let value: i32 = if level == SOL_SOCKET && option_name == SO_TYPE {
+        socket_type
+    } else {
+        0
+    };
+    if !option_len.is_null() {
+        let option_len_val = env.mem.read(option_len);
+        if option_len_val >= 4 && !option_value.is_null() {
+            env.mem.write(option_value.cast::<i32>(), value);
+            env.mem.write(option_len, 4);
+        }
+    }
+    let _ = SO_ERROR;
 
     0 // Success
 }
@@ -309,11 +338,46 @@ fn getsockname(
             assert_eq!(env.mem.read(address_len), guest_size_of::<sockaddr>());
             env.mem.write(address, local_guest_addr);
         }
-        SOCK_STREAM => unimplemented!(),
+        SOCK_STREAM => {
+            let local = socket_host_object
+                .tcp_stream
+                .as_ref()
+                .and_then(|stream| stream.local_addr().ok());
+            let Some(socket_addr @ SocketAddr::V4(_)) = local else {
+                set_errno(env, ENOTCONN);
+                return -1;
+            };
+            env.mem.write(address, sockaddr::from_sockaddr_v4(&socket_addr));
+            env.mem.write(address_len, guest_size_of::<sockaddr>());
+        }
         _ => unreachable!(),
     }
 
     0 // Success
+}
+
+fn getpeername(
+    env: &mut Environment,
+    socket: i32,
+    address: MutPtr<sockaddr>,
+    address_len: MutPtr<socklen_t>,
+) -> i32 {
+    set_errno(env, 0);
+    let Some(socket_host_object) = State::get(env).sockets.get(&socket) else {
+        set_errno(env, EBADF);
+        return -1;
+    };
+    let peer = socket_host_object
+        .tcp_stream
+        .as_ref()
+        .and_then(|stream| stream.peer_addr().ok());
+    let Some(socket_addr @ SocketAddr::V4(_)) = peer else {
+        set_errno(env, ENOTCONN);
+        return -1;
+    };
+    env.mem.write(address, sockaddr::from_sockaddr_v4(&socket_addr));
+    env.mem.write(address_len, guest_size_of::<sockaddr>());
+    0
 }
 
 fn bind(
@@ -408,13 +472,34 @@ fn listen(env: &mut Environment, socket: i32, backlog: i32) -> i32 {
     0 // Success
 }
 
+/// Maps a host I/O error to the iOS `errno` value.
+fn io_error_to_errno(error: &io::Error) -> i32 {
+    match error.kind() {
+        io::ErrorKind::ConnectionRefused => ECONNREFUSED,
+        io::ErrorKind::ConnectionReset => ECONNRESET,
+        io::ErrorKind::ConnectionAborted => ECONNABORTED,
+        io::ErrorKind::NotConnected => ENOTCONN,
+        io::ErrorKind::BrokenPipe => EPIPE,
+        io::ErrorKind::TimedOut => ETIMEDOUT,
+        io::ErrorKind::WouldBlock => EAGAIN,
+        io::ErrorKind::AddrInUse => 48,
+        io::ErrorKind::AddrNotAvailable => 49,
+        io::ErrorKind::Interrupted => EINTR,
+        _ => match error.raw_os_error() {
+            Some(101) => ENETUNREACH,
+            Some(110) => ETIMEDOUT,
+            Some(113) => EHOSTUNREACH,
+            _ => EIO,
+        },
+    }
+}
+
 fn connect(
     env: &mut Environment,
     socket: i32,
     address: ConstPtr<sockaddr>,
     address_len: socklen_t,
 ) -> i32 {
-    // TODO: handle errno properly
     set_errno(env, 0);
 
     let Some(socket_host_object) = State::get(env).sockets.get(&socket) else {
@@ -423,29 +508,50 @@ fn connect(
     };
     let type_ = socket_host_object.type_;
     assert!(type_ == SOCK_STREAM);
+    if socket_host_object.tcp_stream.is_some() {
+        set_errno(env, EISCONN);
+        return -1;
+    }
 
-    assert_eq!(address_len, guest_size_of::<sockaddr>());
+    if address_len < guest_size_of::<sockaddr>() {
+        set_errno(env, EINVAL);
+        return -1;
+    }
     let sockaddr_val = env.mem.read(address);
+    let socket_address = sockaddr_val.to_sockaddr_v4();
     log_dbg!(
-        "connect({:?} ({:?}), {})",
+        "connect({:?} ({:?}), {}) => {:?}",
         address,
         sockaddr_val,
-        address_len
+        address_len,
+        socket_address
     );
 
-    let socket_address = sockaddr_val.to_sockaddr_v4();
-    log_dbg!("connect: socket address {:?}", socket_address);
-
-    assert!(State::get(env)
-        .sockets
-        .get(&socket)
-        .unwrap()
-        .tcp_stream
-        .is_none());
-    let host_stream = TcpStream::connect(socket_address).unwrap();
+    // The connection is made right away, so non-blocking apps never see
+    // EINPROGRESS. A host connection that can't be made fails with the
+    // matching errno instead of ending the emulator.
+    let host_stream = match TcpStream::connect_timeout(
+        &SocketAddr::V4(socket_address),
+        Duration::from_secs(15),
+    ) {
+        Ok(stream) => stream,
+        Err(error) => {
+            let errno = io_error_to_errno(&error);
+            log!(
+                "connect({}) to {} failed: {} => errno {}",
+                socket,
+                socket_address,
+                error,
+                errno
+            );
+            set_errno(env, errno);
+            return -1;
+        }
+    };
     // We set host socket as non-blocking in order to have
     // more control of how and when it's used
     host_stream.set_nonblocking(true).unwrap();
+    let _ = host_stream.set_nodelay(true);
     State::get_mut(env)
         .sockets
         .get_mut(&socket)
@@ -456,6 +562,50 @@ fn connect(
 }
 
 fn select(
+    env: &mut Environment,
+    n_fds: i32,
+    read_fds: MutPtr<fd_set>,
+    write_fds: MutPtr<fd_set>,
+    error_fds: MutPtr<fd_set>,
+    timeout: MutPtr<timeval>,
+) -> i32 {
+    // select() as a sleep and invalid arguments are handled by select_once().
+    let deadline = if timeout.is_null() {
+        None
+    } else {
+        let timeval = env.mem.read(timeout);
+        let (tv_sec, tv_usec) = (timeval.tv_sec, timeval.tv_usec);
+        if tv_sec == 0 && tv_usec == 0 || n_fds == 0 {
+            return select_once(env, n_fds, read_fds, write_fds, error_fds, timeout);
+        }
+        Some(
+            std::time::Instant::now()
+                + Duration::from_secs(tv_sec.max(0) as u64)
+                + Duration::from_micros(tv_usec.max(0) as u64),
+        )
+    };
+
+    // Wait until a descriptor is ready or the timeout is over: the sets are
+    // restored for every attempt, as select_once() clears the bits of
+    // descriptors that are not ready.
+    let saved: [Option<fd_set>; 3] = [read_fds, write_fds, error_fds]
+        .map(|ptr| if ptr.is_null() { None } else { Some(env.mem.read(ptr)) });
+    loop {
+        for (ptr, set) in [read_fds, write_fds, error_fds].into_iter().zip(saved) {
+            if let Some(set) = set {
+                env.mem.write(ptr, set);
+            }
+        }
+        let count = select_once(env, n_fds, read_fds, write_fds, error_fds, timeout);
+        if count != 0 || deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return count;
+        }
+        env.sleep(Duration::from_millis(1));
+    }
+}
+
+/// A single non-blocking check, see [select].
+fn select_once(
     env: &mut Environment,
     n_fds: i32,
     read_fds: MutPtr<fd_set>,
@@ -486,20 +636,8 @@ fn select(
         return 0;
     }
 
-    let should_block = if !timeout.is_null() {
-        let timeval = env.mem.read(timeout);
-        let tv_sec = timeval.tv_sec;
-        let tv_usec = timeval.tv_usec;
-        if tv_sec == 0 && tv_usec == 0 {
-            // Happy path, just polling once
-            false
-        } else {
-            log_dbg!("TODO: Ignore non-zero timeout {:?} in select()", timeval);
-            true
-        }
-    } else {
-        true
-    };
+    // Waiting for a timeout is done by select().
+    let should_block = false;
 
     let mut count = 0;
 
@@ -898,6 +1036,18 @@ fn recvfrom(
         SOCK_STREAM => {
             assert!(address.is_null());
             assert!(address_len.is_null());
+            if env
+                .libc_state
+                .socket
+                .sockets
+                .get(&socket)
+                .unwrap()
+                .tcp_stream
+                .is_none()
+            {
+                set_errno(env, ENOTCONN);
+                return -1;
+            }
             let mut tcp_stream = env
                 .libc_state
                 .socket
@@ -926,7 +1076,12 @@ fn recvfrom(
                     log_dbg!("recvfrom: TCP socket {} would block, returning EAGAIN", socket);
                     return -1
                 }
-                Err(e) => panic!("recvfrom: TCP socket {socket} encountered IO error: {e}"),
+                Err(e) => {
+                    let errno = io_error_to_errno(&e);
+                    log!("recvfrom: TCP socket {} IO error: {} => errno {}", socket, e, errno);
+                    set_errno(env, errno);
+                    return -1;
+                }
             };
             (read, tcp_stream.peer_addr())
         }
@@ -951,8 +1106,16 @@ fn send(
     // TODO: handle errno properly
     set_errno(env, 0);
 
-    let type_ = State::get(env).sockets.get(&socket).unwrap().type_;
+    let Some(socket_host_object) = State::get(env).sockets.get(&socket) else {
+        set_errno(env, EBADF);
+        return -1;
+    };
+    let type_ = socket_host_object.type_;
     assert!(type_ == SOCK_STREAM);
+    if socket_host_object.tcp_stream.is_none() {
+        set_errno(env, ENOTCONN);
+        return -1;
+    }
 
     assert_eq!(flags, 0); // TODO
 
@@ -980,7 +1143,12 @@ fn send(
                     log_dbg!("send: TCP socket {} would block, returning EAGAIN", socket);
                     return -1
                 }
-                Err(e) => panic!("send: Socket {socket} encountered IO error: {e}"),
+                Err(e) => {
+                    let errno = io_error_to_errno(&e);
+                    log!("send: TCP socket {} IO error: {} => errno {}", socket, e, errno);
+                    set_errno(env, errno);
+                    return -1;
+                }
             }
         }
         _ => unreachable!(),
@@ -1097,8 +1265,128 @@ fn sendto(
 const SHUT_RDWR: i32 = 2;
 fn shutdown(env: &mut Environment, socket: i32, how: i32) -> i32 {
     log_dbg!("shutdown({}, {})", socket, how);
-    assert_eq!(how, SHUT_RDWR);
-    close(env, socket)
+    set_errno(env, 0);
+    let Some(host_object) = State::get(env).sockets.get(&socket) else {
+        set_errno(env, EBADF);
+        return -1;
+    };
+    if how == SHUT_RDWR {
+        return close(env, socket);
+    }
+    // Shutting down only one direction: the descriptor stays open.
+    if let Some(stream) = host_object.tcp_stream.as_ref() {
+        let _ = stream.shutdown(match how {
+            0 => std::net::Shutdown::Read,
+            _ => std::net::Shutdown::Write,
+        });
+    }
+    0
+}
+
+/// Whether a read from the socket would not block (data, a connection to
+/// accept, end of stream or an error).
+fn socket_read_ready(env: &mut Environment, fd: i32) -> bool {
+    let Some(host_object) = State::get(env).sockets.get(&fd) else {
+        return false;
+    };
+    let mut buf = [0u8; 1];
+    match host_object.type_ {
+        SOCK_DGRAM => match host_object.udp_socket.as_ref() {
+            Some(udp_socket) => match udp_socket.peek(&mut buf) {
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => false,
+                _ => true,
+            },
+            None => false,
+        },
+        SOCK_STREAM => {
+            if let Some(stream) = host_object.tcp_stream.as_ref() {
+                !matches!(stream.peek(&mut buf), Err(ref e) if e.kind() == io::ErrorKind::WouldBlock)
+            } else if host_object.pending_tcp_stream.is_some() {
+                true
+            } else if let Some(listener) = host_object.tcp_listener.as_ref() {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        stream.set_nonblocking(true).unwrap();
+                        State::get_mut(env)
+                            .sockets
+                            .get_mut(&fd)
+                            .unwrap()
+                            .pending_tcp_stream = Some(stream);
+                        true
+                    }
+                    Err(_) => false,
+                }
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
+}
+
+/// Whether a write to the socket would not block.
+fn socket_write_ready(env: &mut Environment, fd: i32) -> bool {
+    let Some(host_object) = State::get(env).sockets.get(&fd) else {
+        return false;
+    };
+    match host_object.type_ {
+        SOCK_STREAM => host_object.tcp_stream.is_some(),
+        SOCK_DGRAM => host_object.udp_socket.is_some(),
+        _ => false,
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
+#[repr(C, packed)]
+#[allow(non_camel_case_types)]
+struct pollfd {
+    fd: i32,
+    events: i16,
+    revents: i16,
+}
+unsafe impl SafeRead for pollfd {}
+
+const POLLIN: i16 = 0x1;
+const POLLOUT: i16 = 0x4;
+const POLLNVAL: i16 = 0x20;
+const POLLRDNORM: i16 = 0x40;
+
+fn poll(env: &mut Environment, fds: MutPtr<pollfd>, n_fds: u32, timeout_ms: i32) -> i32 {
+    set_errno(env, 0);
+    let start = std::time::Instant::now();
+    loop {
+        let mut ready = 0;
+        for i in 0..n_fds {
+            let mut entry = env.mem.read(fds + i);
+            let (fd, events) = (entry.fd, entry.events);
+            let mut revents: i16 = 0;
+            if fd >= 0 {
+                if State::get(env).sockets.contains_key(&fd) {
+                    if events & (POLLIN | POLLRDNORM) != 0 && socket_read_ready(env, fd) {
+                        revents |= events & (POLLIN | POLLRDNORM);
+                    }
+                    if events & POLLOUT != 0 && socket_write_ready(env, fd) {
+                        revents |= POLLOUT;
+                    }
+                } else {
+                    revents = crate::libc::posix_io::fd_poll_ready(env, fd, events)
+                        .unwrap_or(POLLNVAL);
+                }
+            }
+            entry.revents = revents;
+            env.mem.write(fds + i, entry);
+            if revents != 0 {
+                ready += 1;
+            }
+        }
+        if ready > 0 || timeout_ms == 0 {
+            return ready;
+        }
+        if timeout_ms > 0 && start.elapsed() >= Duration::from_millis(timeout_ms as u64) {
+            return 0;
+        }
+        env.sleep(Duration::from_millis(1));
+    }
 }
 
 pub const FUNCTIONS: FunctionExports = &[
@@ -1107,6 +1395,8 @@ pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(getsockopt(_, _, _, _, _)),
     export_c_func!(setsockopt(_, _, _, _, _)),
     export_c_func!(getsockname(_, _, _)),
+    export_c_func!(getpeername(_, _, _)),
+    export_c_func!(poll(_, _, _)),
     export_c_func!(bind(_, _, _)),
     export_c_func!(listen(_, _)),
     export_c_func!(connect(_, _, _)),

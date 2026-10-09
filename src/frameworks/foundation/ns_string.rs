@@ -1380,6 +1380,27 @@ pub const CLASSES: ClassExports = objc_classes! {
     autorelease(env, res)
 }
 
+- (id)capitalizedString {
+    // Uppercase the first letter of each word and lowercase the rest.
+    let mut out = String::new();
+    let mut at_word_start = true;
+    for c in to_rust_string(env, this).chars() {
+        if c.is_alphanumeric() {
+            if at_word_start {
+                out.extend(c.to_uppercase());
+            } else {
+                out.extend(c.to_lowercase());
+            }
+            at_word_start = false;
+        } else {
+            out.push(c);
+            at_word_start = true;
+        }
+    }
+    let res = from_rust_string(env, out);
+    autorelease(env, res)
+}
+
 - (id)uppercaseString {
     // TODO: check if rust methods are consistent with ObjC one
     let str = to_rust_string(env, this).to_uppercase();
@@ -1867,7 +1888,8 @@ fn data_using_encoding_lossy_inner(
         assert!(string.as_bytes().iter().all(|byte| byte.is_ascii()));
     }
     let c_string = env.mem.alloc_and_write_cstr(string.as_bytes());
-    let length: NSUInteger = (string.len() + 1).try_into().unwrap();
+    // The data does not include a NUL terminator (the buffer still has one).
+    let length: NSUInteger = string.len().try_into().unwrap();
 
     msg_class![env; NSData dataWithBytesNoCopy:(c_string.cast_void()) length:length]
 }

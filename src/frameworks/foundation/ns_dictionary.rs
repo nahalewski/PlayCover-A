@@ -313,6 +313,12 @@ pub fn init_with_objects_and_keys(
 
 /// Helper function to share `initWithDictionary:` implementations
 fn init_with_dictionary_common(env: &mut Environment, this: id, other_dict: id) -> id {
+    if other_dict == nil {
+        // Apps pass nil when e.g. a plist could not be loaded: the result is
+        // an empty dictionary.
+        *env.objc.borrow_mut(this) = <DictionaryHostObject as Default>::default();
+        return this;
+    }
     let other_host_object: DictionaryHostObject = std::mem::take(env.objc.borrow_mut(other_dict));
 
     let mut host_object = <DictionaryHostObject as Default>::default();
@@ -335,7 +341,7 @@ fn init_with_dictionary_copy_items_common(
     other_dict: id,
     copy_items: bool,
 ) -> id {
-    if !copy_items {
+    if !copy_items || other_dict == nil {
         return init_with_dictionary_common(env, this, other_dict);
     }
     let other_host_object: DictionaryHostObject = std::mem::take(env.objc.borrow_mut(other_dict));

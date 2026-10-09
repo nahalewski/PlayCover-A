@@ -46,6 +46,7 @@ pub mod ns_notification_center;
 pub mod ns_null;
 pub mod ns_objc_runtime;
 pub mod ns_object;
+pub mod http_client;
 pub mod ns_json_serialization;
 pub mod ns_operation_queue;
 pub mod ns_process_info;
@@ -61,6 +62,8 @@ pub mod ns_url;
 pub mod ns_url_connection;
 pub mod ns_url_protocol;
 pub mod ns_url_request;
+pub mod ns_url_response;
+pub mod ns_url_session;
 pub mod ns_user_defaults;
 pub mod ns_value;
 pub mod ns_xml_parser;
@@ -111,12 +114,15 @@ pub const DYLIB: crate::dyld::HostDylib = crate::dyld::HostDylib {
         ns_url_connection::CLASSES,
         ns_url_protocol::CLASSES,
         ns_url_request::CLASSES,
+        ns_url_response::CLASSES,
+        ns_url_session::CLASSES,
         ns_user_defaults::CLASSES,
         ns_value::CLASSES,
         ns_xml_parser::CLASSES,
     ],
     constant_exports: &[
         ns_error::CONSTANTS,
+        ns_url_connection::CONSTANTS,
         ns_exception::CONSTANTS,
         ns_file_manager::CONSTANTS,
         ns_keyed_unarchiver::CONSTANTS,
@@ -144,6 +150,7 @@ pub struct State {
     ns_string: ns_string::State,
     ns_thread: ns_thread::State,
     ns_time_zone: ns_time_zone::State,
+    ns_url_connection: ns_url_connection::State,
     ns_user_defaults: ns_user_defaults::State,
 }
 

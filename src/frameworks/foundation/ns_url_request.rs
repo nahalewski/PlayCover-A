@@ -8,7 +8,7 @@
 use super::{ns_string, NSTimeInterval, NSUInteger};
 use crate::frameworks::foundation::ns_string::to_rust_string;
 use crate::objc::{
-    autorelease, id, nil, objc_classes, release, ClassExports, HostObject, NSZonePtr,
+    autorelease, id, nil, objc_classes, release, retain, ClassExports, HostObject, NSZonePtr,
 };
 use crate::{msg, msg_class, todo_objc_setter};
 
@@ -144,6 +144,53 @@ pub const CLASSES: ClassExports = objc_classes! {
 - (id)HTTPBody {
     env.objc.borrow::<NSURLRequestHostObject>(this).http_body
 }
+- (id)HTTPMethod {
+    env.objc.borrow::<NSURLRequestHostObject>(this).http_method
+}
+- (id)allHTTPHeaderFields {
+    env.objc.borrow::<NSURLRequestHostObject>(this).http_header_fields
+}
+- (NSTimeInterval)timeoutInterval {
+    env.objc.borrow::<NSURLRequestHostObject>(this).timeout_interval
+}
+- (NSUInteger)cachePolicy {
+    env.objc.borrow::<NSURLRequestHostObject>(this).cache_policy
+}
+- (id)valueForHTTPHeaderField:(id)field { // NSString *
+    let http_header_fields = env.objc.borrow::<NSURLRequestHostObject>(this).http_header_fields;
+    msg![env; http_header_fields objectForKey:field]
+}
+
+// Requests are not changed after creation unless they are mutable, so an
+// immutable copy can be shared.
+- (id)copyWithZone:(NSZonePtr)_zone {
+    retain(env, this)
+}
+- (id)mutableCopyWithZone:(NSZonePtr)_zone {
+    let new: id = msg_class![env; NSMutableURLRequest alloc];
+    let &NSURLRequestHostObject {
+        url,
+        cache_policy,
+        timeout_interval,
+        http_method,
+        http_body,
+        http_header_fields,
+    } = env.objc.borrow(this);
+    let url_copy: id = if url == nil { nil } else { msg![env; url copy] };
+    let method_copy: id = msg![env; http_method copy];
+    let body_copy: id = if http_body == nil { nil } else { msg![env; http_body copy] };
+    let headers_copy: id = msg![env; http_header_fields mutableCopy];
+    let host_object = env.objc.borrow_mut::<NSURLRequestHostObject>(new);
+    let old_method = std::mem::replace(&mut host_object.http_method, method_copy);
+    let old_headers = std::mem::replace(&mut host_object.http_header_fields, headers_copy);
+    host_object.url = url_copy;
+    host_object.cache_policy = cache_policy;
+    host_object.timeout_interval = timeout_interval;
+    host_object.http_body = body_copy;
+    release(env, old_method);
+    release(env, old_headers);
+    new
+}
 
 - (())dealloc {
     log_dbg!("[(NSURLRequest*){:?} dealloc]", this);
@@ -168,6 +215,23 @@ pub const CLASSES: ClassExports = objc_classes! {
 - (())setCachePolicy:(NSURLRequestCachePolicy)cache_policy {
     todo_objc_setter!(this, cache_policy);
 }
+
+- (())setTimeoutInterval:(NSTimeInterval)timeout_interval {
+    env.objc.borrow_mut::<NSURLRequestHostObject>(this).timeout_interval = timeout_interval;
+}
+
+- (())setAllHTTPHeaderFields:(id)fields { // NSDictionary *
+    let copy: id = if fields == nil {
+        msg_class![env; NSMutableDictionary new]
+    } else {
+        msg![env; fields mutableCopy]
+    };
+    let host_obj = env.objc.borrow_mut::<NSURLRequestHostObject>(this);
+    let old = std::mem::replace(&mut host_obj.http_header_fields, copy);
+    release(env, old);
+}
+
+- (())setHTTPShouldHandleCookies:(bool)_should {}
 
 - (())setHTTPMethod:(id)http_method { // NSString *
     let http_method_copy = msg![env; http_method copy];
@@ -208,8 +272,16 @@ pub const CLASSES: ClassExports = objc_classes! {
     log_dbg!("[(NSURLRequest*){:?} addValue:'{}' forHTTPHeaderField:'{}']", this, to_rust_string(env, value), to_rust_string(env, field));
     let http_header_fields = env.objc.borrow_mut::<NSURLRequestHostObject>(this).http_header_fields;
     let existing: id = msg![env; http_header_fields objectForKey:field];
-    assert_eq!(existing, nil); // TODO: append values with comma
-    () = msg![env; http_header_fields setObject:value forKey:field];
+    if existing == nil {
+        () = msg![env; http_header_fields setObject:value forKey:field];
+    } else {
+        // Values for the same field are combined with a comma.
+        let existing_string = to_rust_string(env, existing).into_owned();
+        let value_string = to_rust_string(env, value).into_owned();
+        let combined = ns_string::from_rust_string(env, format!("{}, {}", existing_string, value_string));
+        () = msg![env; http_header_fields setObject:combined forKey:field];
+        release(env, combined);
+    }
 }
 
 @end
