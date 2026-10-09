@@ -243,6 +243,9 @@ pub const CLASSES: ClassExports = objc_classes! {
     }
 
     if env.objc.borrow::<UITextFieldHostObject>(this).editing {
+        // Already editing: the on-screen keyboard may have been dismissed
+        // (back gesture, IME toggle), so tapping the field must bring it back.
+        env.on_parent_stack_in_coroutine(|window, _| window.start_text_input());
         return true;
     }
 

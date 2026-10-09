@@ -326,6 +326,8 @@ pub struct Window {
     event_pump: sdl2::EventPump,
     event_queue: VecDeque<Event>,
     last_polled: Instant,
+    /// Characters of an in-progress IME composition already sent to the app.
+    ime_composed_len: usize,
     /// Separate queue for extremely high-priority events (e.g. app about to
     /// terminate).
     high_priority_event: Option<Event>,
@@ -479,6 +481,7 @@ impl Window {
             event_pump,
             event_queue: VecDeque::new(),
             last_polled: Instant::now() - Duration::from_secs(1),
+            ime_composed_len: 0,
             high_priority_event: None,
             enable_event_polling: true,
             #[cfg(target_os = "macos")]
@@ -656,7 +659,7 @@ impl Window {
                 _ => {}
             }
 
-            self.event_queue.push_back(match event {
+            let translated = match event {
                 E::Quit { .. } => Event::Quit,
                 E::MouseButtonDown {
                     x,
@@ -959,12 +962,33 @@ impl Window {
                     log_dbg!("SDL TextInput Return");
                     Event::TextInput(TextInputEvent::Return)
                 }
+                E::TextEditing { text, .. } => {
+                    // Soft keyboards (Android) keep typed letters in an IME
+                    // composition until a space/suggestion commits them.
+                    // Show them live: replace the previously sent composition.
+                    for _ in 0..self.ime_composed_len {
+                        self.event_queue
+                            .push_back(Event::TextInput(TextInputEvent::Backspace));
+                    }
+                    self.ime_composed_len = text.chars().count();
+                    if !text.is_empty() {
+                        self.event_queue
+                            .push_back(Event::TextInput(TextInputEvent::Text(text)));
+                    }
+                    continue;
+                }
                 E::TextInput { text, .. } => {
+                    for _ in 0..self.ime_composed_len {
+                        self.event_queue
+                            .push_back(Event::TextInput(TextInputEvent::Backspace));
+                    }
+                    self.ime_composed_len = 0;
                     log_dbg!("SDL TextInput {}", text);
                     Event::TextInput(TextInputEvent::Text(text))
                 }
                 _ => continue,
-            })
+            };
+            self.event_queue.push_back(translated);
         }
 
         if controller_updated {
@@ -1006,6 +1030,14 @@ impl Window {
         let controller_name = controller.name();
         if env::consts::OS == "android" && controller_name.starts_with("uinput-") {
             log!("ignoring fingerprint device: {}", controller_name);
+            return;
+        }
+        // Keyboard covers (e.g. Samsung Book Cover Keyboard) show up as game
+        // controllers on Android. Their keys still arrive as normal keyboard
+        // events; treating them as a controller only adds a stray virtual
+        // cursor that fights the touchscreen.
+        if controller_name.to_lowercase().contains("keyboard") {
+            log!("ignoring keyboard device as a controller: {}", controller_name);
             return;
         }
         log!(
