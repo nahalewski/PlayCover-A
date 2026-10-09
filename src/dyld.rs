@@ -535,9 +535,16 @@ impl Dyld {
                     trampoline_ptr
                 );
                 trampoline_ptr
-            } else if search_host_dylibs(|dylib| dylib.constant_exports, name).is_some() {
-                // Skip the constants from DYLD_INFO because we already
-                // handle the consts when reading the __nl_symbol_ptr section
+            } else if let Some((_, template)) =
+                search_host_dylibs(|dylib| dylib.constant_exports, name)
+            {
+                // Binds of host constants. Those in __nl_symbol_ptr are also
+                // handled when reading that section (writing the same value
+                // twice is harmless), but others, e.g. the `isa` of a block
+                // literal pointing at `_NSConcreteGlobalBlock`, live in other
+                // sections and are only reachable here. Linking needs a
+                // `&mut Environment`, so it happens later.
+                self.constants_to_link_later.push((ptr_ptr, template));
                 continue;
             } else {
                 unhandled_relocations

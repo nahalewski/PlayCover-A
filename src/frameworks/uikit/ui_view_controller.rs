@@ -40,6 +40,8 @@ struct UIViewControllerHostObject {
     bundle: id,
     navigation_item: id,
     parent_controller: id,
+    /// Child view controllers (retained), for `addChildViewController:`.
+    children: Vec<id>,
     /// Absolute path of the `.storyboardc` directory this controller was
     /// instantiated from, if any (its view nib lives there).
     storyboard_dir: Option<String>,
@@ -272,6 +274,43 @@ pub const CLASSES: ClassExports = objc_classes! {
     msg![env; item title]
 }
 - (id)parentViewController { env.objc.borrow::<UIViewControllerHostObject>(this).parent_controller }
+
+// View controller containment. Only the bookkeeping: the app adds and removes
+// the child's view itself.
+- (())addChildViewController:(id)child {
+    if child == nil {
+        return;
+    }
+    let old_parent = env.objc.borrow::<UIViewControllerHostObject>(child).parent_controller;
+    if old_parent != nil {
+        () = msg![env; child removeFromParentViewController];
+    }
+    retain(env, child);
+    env.objc.borrow_mut::<UIViewControllerHostObject>(this).children.push(child);
+    env.objc.borrow_mut::<UIViewControllerHostObject>(child).parent_controller = this;
+}
+- (())removeFromParentViewController {
+    let parent = env.objc.borrow::<UIViewControllerHostObject>(this).parent_controller;
+    if parent == nil {
+        return;
+    }
+    env.objc.borrow_mut::<UIViewControllerHostObject>(this).parent_controller = nil;
+    let host = env.objc.borrow_mut::<UIViewControllerHostObject>(parent);
+    if let Some(i) = host.children.iter().position(|&c| c == this) {
+        host.children.remove(i);
+        release(env, this);
+    }
+}
+- (())willMoveToParentViewController:(id)_parent {}
+- (())didMoveToParentViewController:(id)_parent {}
+- (id)childViewControllers {
+    let children = env.objc.borrow::<UIViewControllerHostObject>(this).children.clone();
+    let array: id = msg_class![env; NSMutableArray new];
+    for child in children {
+        () = msg![env; array addObject:child];
+    }
+    crate::objc::autorelease(env, array)
+}
 - (id)navigationController {
     let class = env.objc.get_known_class("UINavigationController", &mut env.mem);
     let mut parent = env.objc.borrow::<UIViewControllerHostObject>(this).parent_controller;

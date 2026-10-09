@@ -125,7 +125,7 @@ pub const CLASSES: ClassExports = objc_classes! {
     let id_nss: id = msg![env; coder decodeObjectForKey:id_key];
     let id = to_rust_string(env, id_nss);
 
-    if id == "IBFilesOwner" || id == "UIStoryboardPlaceholder" {
+    if id == "IBFilesOwner" || id == "UIStoryboardPlaceholder" || id.starts_with("UpstreamPlaceholder-") {
         // The file owner is usually the UIApplication instance.
         // Replacing the proxy with that instance is important so that the
         // "delegate" outlet can be connected between it and the
