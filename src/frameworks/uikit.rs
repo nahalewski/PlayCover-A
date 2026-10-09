@@ -27,6 +27,7 @@ pub mod ui_image_picker_controller;
 pub mod ui_local_notification;
 pub mod ui_navigation_item;
 pub mod ui_nib;
+pub mod ui_storyboard;
 pub mod ui_pasteboard;
 pub mod ui_responder;
 pub mod ui_screen;
@@ -50,6 +51,7 @@ pub const DYLIB: crate::dyld::HostDylib = crate::dyld::HostDylib {
         ui_image_picker_controller::CLASSES,
         ui_local_notification::CLASSES,
         ui_nib::CLASSES,
+        ui_storyboard::CLASSES,
         ui_pasteboard::CLASSES,
         ui_responder::CLASSES,
         ui_screen::CLASSES,

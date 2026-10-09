@@ -434,6 +434,11 @@ pub(super) fn UIApplicationMain(
                 assert!(delegate != nil);
             }
         };
+        // Apps with a main storyboard get their window and initial view
+        // controller created by UIKit before the app is told it launched.
+        if let Some(storyboard_name) = env.bundle.main_storyboard_filename().map(str::to_string) {
+            launch_main_storyboard(env, ui_application, storyboard_name);
+        }
         // We can't hang on to the delegate, the guest app may change it at any
         // time.
 
@@ -498,6 +503,14 @@ pub(super) fn UIApplicationMain(
         let center: id = msg_class![env; NSNotificationCenter defaultCenter];
         let notif_name = get_static_str(env, UIApplicationDidBecomeActiveNotification);
         () = msg![env; center postNotificationName:notif_name object:ui_application userInfo:nil];
+
+        // The storyboard's root view controller appears now that the app is active.
+        let root_vc_bits = STORYBOARD_ROOT_VC.swap(0, std::sync::atomic::Ordering::Relaxed);
+        if root_vc_bits != 0 {
+            let root_vc: id = crate::mem::Ptr::from_bits(root_vc_bits);
+            () = msg![env; root_vc viewWillAppear:false];
+            () = msg![env; root_vc viewDidAppear:false];
+        }
 
         if env
             .framework_state
@@ -661,3 +674,35 @@ pub const CONSTANTS: ConstantExports = &[
 ];
 
 pub const FUNCTIONS: FunctionExports = &[export_c_func!(UIApplicationMain(_, _, _, _))];
+
+/// Root view controller created from the main storyboard; it is told it appeared
+/// once the app is active (like UIKit does after the window is shown).
+static STORYBOARD_ROOT_VC: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Creates the window and initial view controller of `UIMainStoryboardFile`.
+fn launch_main_storyboard(env: &mut Environment, ui_application: id, name: String) {
+    let ns_name = from_rust_string(env, name.clone());
+    let bundle: id = msg_class![env; NSBundle mainBundle];
+    let storyboard: id = msg_class![env; UIStoryboard storyboardWithName:ns_name bundle:bundle];
+    let vc: id = msg![env; storyboard instantiateInitialViewController];
+    if vc == nil {
+        log!("Warning: couldn't load the initial view controller of storyboard {:?}", name);
+        return;
+    }
+    let screen: id = msg_class![env; UIScreen mainScreen];
+    let frame: crate::frameworks::core_graphics::CGRect = msg![env; screen bounds];
+    let window: id = msg_class![env; UIWindow alloc];
+    let window: id = msg![env; window initWithFrame:frame];
+    () = msg![env; window setRootViewController:vc];
+    let delegate: id = msg![env; ui_application delegate];
+    if delegate != nil
+        && env
+            .objc
+            .object_has_method_named(&env.mem, delegate, "setWindow:")
+    {
+        () = msg![env; delegate setWindow:window];
+    }
+    STORYBOARD_ROOT_VC.store(vc.to_bits(), std::sync::atomic::Ordering::Relaxed);
+    () = msg![env; window makeKeyAndVisible];
+    log!("Launched main storyboard {:?}: window {:?}, root view controller {:?}", name, window, vc);
+}

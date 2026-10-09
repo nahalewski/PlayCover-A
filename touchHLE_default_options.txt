@@ -256,3 +256,5 @@ com.gamevil.zenonia4: --device-family=ipad --fps-limit=15
 com.gamevil.zenonia5free: --landscape-left --fps-limit=15 --allow-network-access
 # Scribblenauts Remix: lays out a widescreen UI for the 4-inch iPhone screen; on 320x480 the corner buttons are cropped
 com.wb.Scribblenauts: --tall-screen
+# Sonic CD 2.0: refuses to start without internet (ads/age check), so it needs real network access
+com.sega.soniccd: --allow-network-access

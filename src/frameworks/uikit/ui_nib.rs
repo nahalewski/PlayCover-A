@@ -125,7 +125,7 @@ pub const CLASSES: ClassExports = objc_classes! {
     let id_nss: id = msg![env; coder decodeObjectForKey:id_key];
     let id = to_rust_string(env, id_nss);
 
-    if id == "IBFilesOwner" {
+    if id == "IBFilesOwner" || id == "UIStoryboardPlaceholder" {
         // The file owner is usually the UIApplication instance.
         // Replacing the proxy with that instance is important so that the
         // "delegate" outlet can be connected between it and the
@@ -400,4 +400,27 @@ fn load_nib_file(env: &mut Environment, ui_nib: id, path: GuestPathBuf) -> Resul
     }
 
     Ok(unarchiver)
+}
+
+/// Loads the nib file at `path` (an absolute guest path) with `owner` as File's
+/// Owner and returns its top-level objects (autoreleased `NSArray*`), or nil.
+/// Used for storyboard scenes, which live outside the bundle's resource root.
+pub fn instantiate_nib_at_path(env: &mut Environment, path: String, owner: id) -> id {
+    let class = env.objc.get_known_class("UINib", &mut env.mem);
+    let nib = env.objc.alloc_object(
+        class,
+        Box::new(UINibHostObject { nib_name: nil, bundle: nil, file_owner: owner }),
+        &mut env.mem,
+    );
+    let Ok(unarchiver) = load_nib_file(env, nib, GuestPathBuf::from(path)) else {
+        release(env, nib);
+        return nil;
+    };
+    let key = get_static_str(env, "UINibTopLevelObjectsKey");
+    let top_level_objects: id = msg![env; unarchiver decodeObjectForKey:key];
+    retain(env, top_level_objects);
+    release(env, unarchiver);
+    env.objc.borrow_mut::<UINibHostObject>(nib).file_owner = nil;
+    release(env, nib);
+    autorelease(env, top_level_objects)
 }

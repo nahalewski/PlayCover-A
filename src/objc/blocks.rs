@@ -285,3 +285,9 @@ pub const CLASSES: ClassExports = objc_classes! {
 @end
 
 };
+
+/// Copies `block` to the heap if needed (for host code that keeps a block
+/// beyond the call that received it, e.g. a completion handler).
+pub(crate) fn copy_block(env: &mut Environment, block: id) -> id {
+    Ptr::from_bits(_Block_copy(env, Ptr::from_bits(block.to_bits())).to_bits())
+}

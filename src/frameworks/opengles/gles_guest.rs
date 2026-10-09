@@ -1834,3 +1834,66 @@ fn _get_buffer_size(env: &mut Environment, target: GLenum) -> GLint {
         buffer_size
     })
 }
+
+/// GLKit support: creates the framebuffer a `GLKView` draws into (color
+/// renderbuffer backed by `layer`, optional depth) and leaves it bound.
+/// Returns `(framebuffer, color renderbuffer, width, height)`.
+pub fn glk_create_drawable(
+    env: &mut Environment,
+    context: crate::objc::id,
+    layer: crate::objc::id,
+    depth_bits: u32,
+) -> (GLuint, GLuint, u32, u32) {
+    use crate::objc::msg;
+    let tmp: MutPtr<GLuint> = env.mem.alloc(4).cast();
+    glGenFramebuffersOES(env, 1, tmp);
+    let fbo = env.mem.read(tmp);
+    glBindFramebufferOES(env, gles11::FRAMEBUFFER_OES, fbo);
+    glGenRenderbuffersOES(env, 1, tmp);
+    let color = env.mem.read(tmp);
+    glBindRenderbufferOES(env, gles11::RENDERBUFFER_OES, color);
+    let _ok: bool = msg![env; context renderbufferStorage:(gles11::RENDERBUFFER_OES as u32) fromDrawable:layer];
+    glFramebufferRenderbufferOES(
+        env,
+        gles11::FRAMEBUFFER_OES,
+        gles11::COLOR_ATTACHMENT0_OES,
+        gles11::RENDERBUFFER_OES,
+        color,
+    );
+    let size_ptr: MutPtr<GLint> = tmp.cast();
+    glGetRenderbufferParameterivOES(env, gles11::RENDERBUFFER_OES, gles11::RENDERBUFFER_WIDTH_OES, size_ptr);
+    let width = env.mem.read(size_ptr);
+    glGetRenderbufferParameterivOES(env, gles11::RENDERBUFFER_OES, gles11::RENDERBUFFER_HEIGHT_OES, size_ptr);
+    let height = env.mem.read(size_ptr);
+    if depth_bits != 0 {
+        glGenRenderbuffersOES(env, 1, tmp);
+        let depth = env.mem.read(tmp);
+        glBindRenderbufferOES(env, gles11::RENDERBUFFER_OES, depth);
+        let format = if depth_bits >= 24 {
+            0x81A6 /* DEPTH_COMPONENT24_OES */
+        } else {
+            gles11::DEPTH_COMPONENT16_OES
+        };
+        // The color renderbuffer may be larger than the app's (scale hack):
+        // `glRenderbufferStorageOES` applies the same factor, so pass the
+        // app-visible size.
+        let factor = env.options.scale_hack.get() as GLint;
+        glRenderbufferStorageOES(env, gles11::RENDERBUFFER_OES, format, width / factor, height / factor);
+        glFramebufferRenderbufferOES(
+            env,
+            gles11::FRAMEBUFFER_OES,
+            gles11::DEPTH_ATTACHMENT_OES,
+            gles11::RENDERBUFFER_OES,
+            depth,
+        );
+        glBindRenderbufferOES(env, gles11::RENDERBUFFER_OES, color);
+    }
+    env.mem.free(tmp.cast());
+    (fbo, color, width.max(0) as u32, height.max(0) as u32)
+}
+
+/// GLKit support: binds a `GLKView`'s framebuffer and color renderbuffer again.
+pub fn glk_bind_drawable(env: &mut Environment, framebuffer: GLuint, color_renderbuffer: GLuint) {
+    glBindFramebufferOES(env, gles11::FRAMEBUFFER_OES, framebuffer);
+    glBindRenderbufferOES(env, gles11::RENDERBUFFER_OES, color_renderbuffer);
+}

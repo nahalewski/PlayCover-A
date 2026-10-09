@@ -177,7 +177,10 @@ pub const CLASSES: ClassExports = objc_classes! {
 
 // These come from a category in UIKit's UIGeometry.h
 - (CGPoint)decodeCGPointForKey:(id)key { // NSString*
-    let val = get_value_to_decode_for_key(env, this, key).unwrap();
+    // Like the real NSCoder, a missing key decodes as zero.
+    let Some(val) = get_value_to_decode_for_key(env, this, key) else {
+        return CGPoint { x: 0.0, y: 0.0 };
+    };
     let ValueVariant::Data(data) = val.value() else {
         unreachable!()
     };
@@ -190,7 +193,12 @@ pub const CLASSES: ClassExports = objc_classes! {
     CGPoint { x, y }
 }
 - (CGRect)decodeCGRectForKey:(id)key { // NSString*
-    let val = get_value_to_decode_for_key(env, this, key).unwrap();
+    let Some(val) = get_value_to_decode_for_key(env, this, key) else {
+        return CGRect {
+            origin: CGPoint { x: 0.0, y: 0.0 },
+            size: CGSize { width: 0.0, height: 0.0 },
+        };
+    };
     let ValueVariant::Data(data) = val.value() else {
         unreachable!()
     };

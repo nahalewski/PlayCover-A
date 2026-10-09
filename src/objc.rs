@@ -24,7 +24,7 @@ use crate::MutexId;
 use std::collections::HashMap;
 
 mod arc;
-mod blocks;
+pub(crate) mod blocks;
 mod classes;
 mod messages;
 mod methods;

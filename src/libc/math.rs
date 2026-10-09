@@ -531,6 +531,8 @@ fn __fpclassifyf(_env: &mut Environment, arg: f32) -> GuestFPCategory {
 }
 
 pub const FUNCTIONS: FunctionExports = &[
+    export_c_func!(__sincosf_stret(_)),
+    export_c_func!(__sincos_stret(_)),
     export_c_func!(abs(_)),
     export_c_func!(fabs(_)),
     // Trigonometric functions
@@ -619,3 +621,32 @@ pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(hypot(_, _)),
     export_c_func!(__fpclassifyf(_)),
 ];
+
+/// Return type of `__sincosf_stret()`: `{ sin, cos }` (8 bytes, so returned
+/// through a hidden pointer on 32-bit ARM).
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
+#[repr(C, packed)]
+pub struct SinCosF {
+    sin: f32,
+    cos: f32,
+}
+unsafe impl crate::mem::SafeRead for SinCosF {}
+crate::abi::impl_GuestRet_for_large_struct!(SinCosF);
+
+/// Return type of `__sincos_stret()`: `{ sin, cos }` as doubles.
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
+#[repr(C, packed)]
+pub struct SinCos {
+    sin: f64,
+    cos: f64,
+}
+unsafe impl crate::mem::SafeRead for SinCos {}
+crate::abi::impl_GuestRet_for_large_struct!(SinCos);
+
+/// Compilers emit this instead of separate `sinf`/`cosf` calls.
+fn __sincosf_stret(_env: &mut Environment, arg: f32) -> SinCosF {
+    SinCosF { sin: arg.sin(), cos: arg.cos() }
+}
+fn __sincos_stret(_env: &mut Environment, arg: f64) -> SinCos {
+    SinCos { sin: arg.sin(), cos: arg.cos() }
+}

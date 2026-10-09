@@ -249,6 +249,13 @@ impl Bundle {
             .map(|v| v.as_string().unwrap())
     }
 
+    /// Name of the main storyboard (`UIMainStoryboardFile`), if the app uses one.
+    pub fn main_storyboard_filename(&self) -> Option<&str> {
+        self.plist
+            .get("UIMainStoryboardFile")
+            .and_then(|v| v.as_string())
+    }
+
     /// Whether Info.plist says anything about interface orientation at all.
     pub fn declares_interface_orientation(&self) -> bool {
         self.plist.get("UISupportedInterfaceOrientations").is_some()

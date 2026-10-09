@@ -16,6 +16,7 @@ use crate::frameworks::uikit::ui_application::{
     UIInterfaceOrientation, UIInterfaceOrientationPortrait,
 };
 use crate::frameworks::uikit::ui_view::set_view_controller;
+use crate::frameworks::uikit::ui_nib::instantiate_nib_at_path;
 use crate::objc::{
     id, msg, msg_class, nil, objc_classes, release, retain, todo_objc_setter, Class, ClassExports,
     HostObject, NSZonePtr,
@@ -39,6 +40,13 @@ struct UIViewControllerHostObject {
     bundle: id,
     navigation_item: id,
     parent_controller: id,
+    /// Absolute path of the `.storyboardc` directory this controller was
+    /// instantiated from, if any (its view nib lives there).
+    storyboard_dir: Option<String>,
+    /// Controller presented modally by this one (retained), and the
+    /// controller that presented this one (weak).
+    presented_controller: id,
+    presenting_controller: id,
 }
 impl HostObject for UIViewControllerHostObject {}
 
@@ -104,6 +112,20 @@ pub const CLASSES: ClassExports = objc_classes! {
 }
 
 - (())loadView {
+    let storyboard_dir = env.objc.borrow::<UIViewControllerHostObject>(this).storyboard_dir.clone();
+    if let Some(dir) = storyboard_dir {
+        let nib_name: id = env.objc.borrow::<UIViewControllerHostObject>(this).nib_name;
+        if nib_name != nil {
+            let path = format!("{}/{}.nib", dir, to_rust_string(env, nib_name));
+            log_dbg!("Load {:?} view controller's view from storyboard nib {}", this, path);
+            let _ = instantiate_nib_at_path(env, path, this);
+            if env.objc.borrow::<UIViewControllerHostObject>(this).view != nil {
+                return;
+            }
+            log!("Storyboard view nib for {:?} did not provide a view", this);
+        }
+    }
+
     let bundle: id = env.objc.borrow::<UIViewControllerHostObject>(this).bundle;
     let bundle: id = if bundle == nil {
         msg_class![env; NSBundle mainBundle]
@@ -158,6 +180,11 @@ pub const CLASSES: ClassExports = objc_classes! {
     let view: id = msg![env; view initWithFrame:app_frame];
     () = msg![env; this setView:view];
 }
+
+- (id)storyboard { nil }
+- (())setStoryboard:(id)_storyboard {}
+- (())setTopLayoutGuide:(id)_guide {}
+- (())setBottomLayoutGuide:(id)_guide {}
 
 - (())setView:(id)new_view { // UIView*
     let host_obj = env.objc.borrow_mut::<UIViewControllerHostObject>(this);
@@ -240,8 +267,72 @@ pub const CLASSES: ClassExports = objc_classes! {
 }
 
 - (())dismissModalViewControllerAnimated:(bool)animated {
-    log!("TODO: [(UIViewController*){:?} dismissModalViewControllerAnimated:{}]", this, animated); // TODO
+    () = msg![env; this dismissViewControllerAnimated:animated completion:nil];
 }
+- (id)presentedViewController {
+    env.objc.borrow::<UIViewControllerHostObject>(this).presented_controller
+}
+- (id)presentingViewController {
+    env.objc.borrow::<UIViewControllerHostObject>(this).presenting_controller
+}
+
+// Modal presentation is shown as the presented view covering the presenter's
+// view (no animation).
+- (())presentViewController:(id)view_controller
+                   animated:(bool)_animated
+                 completion:(id)completion { // void (^)(void)
+    if view_controller == nil {
+        if completion != nil {
+            crate::frameworks::foundation::ns_operation_queue::run_block(env, completion);
+        }
+        return;
+    }
+    // Alert controllers are shown by the Android alert overlay.
+    let alert_class = env.objc.get_known_class("UIAlertController", &mut env.mem);
+    let presented_class: Class = msg![env; view_controller class];
+    if env.objc.class_is_subclass_of(presented_class, alert_class) {
+        () = msg![env; view_controller _touchHLE_showAlert];
+        if completion != nil {
+            crate::frameworks::foundation::ns_operation_queue::run_block(env, completion);
+        }
+        return;
+    }
+    let presenter_view: id = msg![env; this view];
+    let presented_view: id = msg![env; view_controller view];
+    let bounds: CGRect = msg![env; presenter_view bounds];
+    () = msg![env; presented_view setFrame:bounds];
+    () = msg![env; presenter_view addSubview:presented_view];
+    retain(env, view_controller);
+    env.objc.borrow_mut::<UIViewControllerHostObject>(this).presented_controller = view_controller;
+    env.objc.borrow_mut::<UIViewControllerHostObject>(view_controller).presenting_controller = this;
+    () = msg![env; view_controller viewWillAppear:false];
+    () = msg![env; view_controller viewDidAppear:false];
+    if completion != nil {
+        crate::frameworks::foundation::ns_operation_queue::run_block(env, completion);
+    }
+}
+
+- (())dismissViewControllerAnimated:(bool)_animated
+                        completion:(id)completion {
+    // Dismissing the presented controller itself dismisses it from its
+    // presenter.
+    let presenting = env.objc.borrow::<UIViewControllerHostObject>(this).presenting_controller;
+    let owner = if presenting != nil { presenting } else { this };
+    let presented = env.objc.borrow::<UIViewControllerHostObject>(owner).presented_controller;
+    if presented != nil {
+        () = msg![env; presented viewWillDisappear:false];
+        let view: id = msg![env; presented view];
+        () = msg![env; view removeFromSuperview];
+        () = msg![env; presented viewDidDisappear:false];
+        env.objc.borrow_mut::<UIViewControllerHostObject>(presented).presenting_controller = nil;
+        env.objc.borrow_mut::<UIViewControllerHostObject>(owner).presented_controller = nil;
+        release(env, presented);
+    }
+    if completion != nil {
+        crate::frameworks::foundation::ns_operation_queue::run_block(env, completion);
+    }
+}
+
 - (())dismissMoviePlayerViewControllerAnimated {
     log!("TODO: [(UIViewController*){:?} dismissMoviePlayerViewControllerAnimated]", this); // TODO
 }
@@ -313,4 +404,12 @@ fn check_nib_exists(env: &mut Environment, bundle: id, nib_name: id) -> bool {
     let type_: id = get_static_str(env, "nib");
     let res: id = msg![env; bundle pathForResource:nib_name ofType:type_];
     res != nil
+}
+
+/// Remember which `.storyboardc` directory `view_controller` came from, so its
+/// view can be loaded from the storyboard's nibs.
+pub fn set_storyboard_dir(env: &mut Environment, view_controller: id, dir: &str) {
+    env.objc
+        .borrow_mut::<UIViewControllerHostObject>(view_controller)
+        .storyboard_dir = Some(dir.to_string());
 }
