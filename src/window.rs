@@ -353,6 +353,8 @@ pub struct Window {
     splash_image: Option<Image>,
     device_family: DeviceFamily,
     tall_screen: bool,
+    /// See `Options::widescreen`.
+    widescreen: Option<f32>,
     device_orientation: DeviceOrientation,
     controller_ctx: sdl2::GameControllerSubsystem,
     controllers: Vec<sdl2::controller::GameController>,
@@ -504,6 +506,7 @@ impl Window {
             splash_image: launch_image,
             device_family,
             tall_screen: options.tall_screen,
+            widescreen: options.widescreen,
             device_orientation,
             controller_ctx,
             controllers: Vec::new(),
@@ -1551,6 +1554,22 @@ impl Window {
 
         let app_aspect = app_width as f32 / app_height as f32;
         let screen_aspect = screen_width as f32 / screen_height as f32;
+        // Widescreen: stretch the picture sideways to fill the screen (or up to
+        // the requested aspect ratio) instead of leaving black bars. It is
+        // scaled from the same framebuffer, so it is as sharp as before;
+        // shapes are just wider.
+        let app_aspect = match self.widescreen {
+            // Only when the screen has the same orientation as the app (a
+            // portrait app on a landscape screen would be stretched absurdly).
+            Some(limit) if (app_aspect >= 1.0) == (screen_aspect >= 1.0) => {
+                if limit > app_aspect.min(screen_aspect) && limit < app_aspect.max(screen_aspect) {
+                    limit
+                } else {
+                    screen_aspect
+                }
+            }
+            _ => app_aspect,
+        };
         let (scaled_width, scaled_height) = if app_aspect < screen_aspect {
             (
                 (screen_height as f32 * app_aspect).round() as u32,

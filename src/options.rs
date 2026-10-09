@@ -38,6 +38,9 @@ pub struct Options {
     pub device_family: Option<DeviceFamily>,
     /// Emulate the 4-inch iPhone screen (320x568) instead of 320x480.
     pub tall_screen: bool,
+    /// Stretch the picture to fill a wider screen (see `--widescreen`): the
+    /// widest aspect ratio to stretch to, or 0.0 for the whole screen.
+    pub widescreen: Option<f32>,
     pub initial_orientation: DeviceOrientation,
     pub scale_hack: NonZeroU32,
     pub deadzone: f32,
@@ -79,6 +82,7 @@ impl Default for Options {
             fullscreen: false,
             device_family: None,
             tall_screen: false,
+            widescreen: None,
             initial_orientation: DeviceOrientation::Portrait,
             scale_hack: NonZeroU32::new(1).unwrap(),
             analog_stick_tilt_controls: true,
@@ -142,6 +146,20 @@ impl Options {
             self.initial_orientation = DeviceOrientation::LandscapeLeft;
         } else if arg == "--landscape-right" {
             self.initial_orientation = DeviceOrientation::LandscapeRight;
+        } else if arg == "--widescreen" {
+            self.widescreen = Some(0.0);
+        } else if let Some(value) = arg.strip_prefix("--widescreen=") {
+            let (w, h) = value
+                .split_once(':')
+                .ok_or_else(|| "Invalid widescreen aspect ratio (expected W:H)".to_string())?;
+            let (w, h): (f32, f32) = (
+                w.parse().map_err(|_| "Invalid widescreen aspect ratio".to_string())?,
+                h.parse().map_err(|_| "Invalid widescreen aspect ratio".to_string())?,
+            );
+            if !(w > 0.0 && h > 0.0) {
+                return Err("Invalid widescreen aspect ratio".to_string());
+            }
+            self.widescreen = Some(w / h);
         } else if arg == "--tall-screen" {
             self.tall_screen = true;
         } else if let Some(value) = arg.strip_prefix("--device-family=") {

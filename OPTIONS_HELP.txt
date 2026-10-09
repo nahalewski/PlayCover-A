@@ -38,6 +38,17 @@ Device options:
         original 320x480. Some apps lay out a widescreen UI when they see it
         and clip it on a 3:2 screen. Only applies to the iPhone family.
 
+    --widescreen
+    --widescreen=W:H
+        Stretches the picture sideways to fill a wider screen instead of
+        leaving black bars on the sides, without lowering the rendering
+        resolution (the same framebuffer is just scaled wider; shapes look
+        wider). With a ratio, e.g. --widescreen=16:9, it stretches only up to
+        that aspect ratio. Touch input is adjusted to match. Unlike
+        --tall-screen it works with every app, but it does not change how the
+        app lays out its UI. Does nothing on a screen that is not wider than
+        the app.
+
     --device-family=...
         Specifies which device family should be emulated: iPhone or iPad.
         This only work if running app does support selected family
