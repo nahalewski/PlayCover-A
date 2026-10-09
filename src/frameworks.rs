@@ -35,6 +35,7 @@ pub mod core_text;
 pub mod core_telephony;
 pub mod security;
 pub mod foundation;
+pub mod game_controller;
 pub mod game_kit;
 pub mod media_player;
 pub mod message_ui;

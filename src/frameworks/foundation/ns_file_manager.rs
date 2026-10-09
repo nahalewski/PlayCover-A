@@ -373,7 +373,12 @@ pub const CLASSES: ClassExports = objc_classes! {
                           error:(MutPtr<id>)error { // NSError**
     let contents: id = msg![env; this directoryContentsAtPath:path];
     if contents == nil && !error.is_null() {
-        todo!(); // TODO: create an NSError if requested
+        // NSFileReadNoSuchFileError (260) is what a missing directory reports.
+        let domain = get_static_str(env, NSCocoaErrorDomain);
+        let ns_error = msg_class![env; NSError alloc];
+        let ns_error = msg![env; ns_error initWithDomain:domain code:(NSFileReadNoSuchFileError as super::NSInteger) userInfo:nil];
+        autorelease(env, ns_error);
+        env.mem.write(error, ns_error);
     }
     contents
 }
