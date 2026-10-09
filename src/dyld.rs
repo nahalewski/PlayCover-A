@@ -254,7 +254,24 @@ pub struct Dyld {
     /// Unimplemented functions already warned about (see
     /// [IGNORE_UNIMPLEMENTED_FUNCTIONS]), so each is only logged once.
     warned_unimplemented: std::collections::HashSet<String>,
+    /// One block of lazy-link trampolines per binary, see
+    /// [Self::setup_lazy_linking].
+    lazy_trampolines: Vec<LazyTrampolines>,
 }
+
+/// Trampolines for the lazy symbol stubs of one binary.
+///
+/// The stubs in `__symbol_stub*` are left exactly as the compiler emitted them
+/// (some apps checksum their own `__TEXT`, e.g. the Airplay/Marmalade loader),
+/// and instead each `__la_symbol_ptr` is pointed at an 8-byte trampoline
+/// (`svc; bx lr`) in separate guest memory. Trampoline `i` belongs to stub `i`.
+struct LazyTrampolines {
+    bin_idx: usize,
+    start: u32,
+    /// Address of the `__la_symbol_ptr` entry each stub loads from.
+    la_ptrs: Vec<u32>,
+}
+const TRAMPOLINE_SIZE: u32 = 8;
 
 impl Dyld {
     /// We reserve this SVC ID for invoking the lazy linker.
@@ -285,6 +302,7 @@ impl Dyld {
             constants_to_link_later: Vec::new(),
             guessed_string_constants: Vec::new(),
             non_lazy_host_functions: HashMap::new(),
+            lazy_trampolines: Vec::new(),
         }
     }
 
@@ -310,8 +328,8 @@ impl Dyld {
         objc.register_bin_selectors(&bins[0], mem);
         objc.register_host_selectors(mem);
 
-        for bin in bins {
-            self.setup_lazy_linking(bin, mem);
+        for (bin_idx, bin) in bins.iter().enumerate() {
+            self.setup_lazy_linking(bin_idx, bin, mem);
             // Must happen before `register_bin_classes`, else superclass
             // pointers will be wrong.
             self.do_non_lazy_linking(bin, bins, mem, objc);
@@ -439,49 +457,71 @@ impl Dyld {
     /// external function and then jump to it), or on subsequent calls, jump
     /// straight to the external function.
     ///
-    /// These stubs already exist in the binary, but they need to be rewritten
-    /// so that they will invoke our dynamic linker.
-    fn setup_lazy_linking(&self, bin: &MachO, mem: &mut Mem) {
+    /// The stubs already exist in the binary and are not modified (an app may
+    /// hash its own code, and real dyld doesn't touch them either). Instead,
+    /// the `__la_symbol_ptr` entry each stub jumps through is made to point at
+    /// a trampoline of ours that invokes the dynamic linker.
+    fn setup_lazy_linking(&mut self, bin_idx: usize, bin: &MachO, mem: &mut Mem) {
         let Some(stubs) = bin.get_section(SectionType::SymbolStubs) else {
             return;
         };
 
         let entry_size = stubs.dyld_indirect_symbol_info.as_ref().unwrap().entry_size;
-
-        // two or three A32 instructions (PIC stub needs one more) followed by
-        // the address or offset of the corresponding __la_symbol_ptr
-        let expected_instructions = match entry_size {
-            4 => &[],
-            12 => Self::SYMBOL_STUB_INSTRUCTIONS.as_slice(),
-            16 => Self::PIC_SYMBOL_STUB_INSTRUCTIONS.as_slice(),
-            _ => unimplemented!(),
-        };
-
+        assert!(matches!(entry_size, 4 | 12 | 16));
         assert!(stubs.size % entry_size == 0);
         let stub_count = stubs.size / entry_size;
+
+        let start = mem.alloc(stub_count * TRAMPOLINE_SIZE).to_bits();
+        let mut la_ptrs = Vec::with_capacity(stub_count as usize);
         for i in 0..stub_count {
-            let ptr: MutPtr<u32> = Ptr::from_bits(stubs.addr + i * entry_size);
+            let stub_addr = stubs.addr + i * entry_size;
+            let stub: MutPtr<u32> = Ptr::from_bits(stub_addr);
 
-            for (j, &instr) in expected_instructions.iter().enumerate() {
-                assert!(mem.read(ptr + j.try_into().unwrap()) == instr);
-            }
+            // two or three A32 instructions (PIC stub needs one more)
+            // followed by the address or offset of the corresponding
+            // __la_symbol_ptr; or just one `ldr pc, [pc, #imm]`.
+            let la_ptr = match entry_size {
+                4 => {
+                    let instr = mem.read(stub);
+                    assert!(
+                        instr & 0xff7ff000 == 0xe51ff000, // ldr pc, [pc, #+/-imm12]
+                        "Unexpected symbol stub {instr:#x} at {stub_addr:#x}"
+                    );
+                    let offset = instr & 0xfff;
+                    if instr & (1 << 23) != 0 {
+                        stub_addr + 8 + offset
+                    } else {
+                        stub_addr + 8 - offset
+                    }
+                }
+                12 => {
+                    for (j, &instr) in Self::SYMBOL_STUB_INSTRUCTIONS.iter().enumerate() {
+                        assert!(mem.read(stub + j.try_into().unwrap()) == instr);
+                    }
+                    mem.read(stub + 2)
+                }
+                16 => {
+                    for (j, &instr) in Self::PIC_SYMBOL_STUB_INSTRUCTIONS.iter().enumerate() {
+                        assert!(mem.read(stub + j.try_into().unwrap()) == instr);
+                    }
+                    stub_addr + mem.read(stub + 3) + 12
+                }
+                _ => unreachable!(),
+            };
 
-            // For convenience, make the stub return once the SVC is done
-            // (Otherwise we have to manually update the PC)
-            if entry_size == 4 {
-                mem.write(ptr + 0, encode_a32_svc(Self::SVC_LAZY_LINK_RET_FLAG));
-            } else {
-                mem.write(ptr + 0, encode_a32_svc(Self::SVC_LAZY_LINK));
-                mem.write(ptr + 1, encode_a32_ret());
-            }
-            if entry_size == 16 {
-                // This is preceded by a return instruction, so if we do execute
-                // it, something has gone wrong.
-                mem.write(ptr + 2, encode_a32_trap());
-            }
-            // Leave the __la_symbol_ptr intact in case we want to link it to
-            // a real symbol later.
+            let trampoline_addr = start + i * TRAMPOLINE_SIZE;
+            let trampoline: MutPtr<u32> = Ptr::from_bits(trampoline_addr);
+            mem.write(trampoline + 0, encode_a32_svc(Self::SVC_LAZY_LINK));
+            mem.write(trampoline + 1, encode_a32_ret());
+            // Initially this pointed into __stub_helper.
+            mem.write(MutPtr::<u32>::from_bits(la_ptr), trampoline_addr);
+            la_ptrs.push(la_ptr);
         }
+        self.lazy_trampolines.push(LazyTrampolines {
+            bin_idx,
+            start,
+            la_ptrs,
+        });
     }
 
     /// Link non-lazy symbols for a loaded binary.
@@ -496,7 +536,21 @@ impl Dyld {
     /// binaries symbols may be looked up in.
     fn do_non_lazy_linking(&mut self, bin: &MachO, bins: &[MachO], mem: &mut Mem, objc: &mut ObjC) {
         let mut unhandled_relocations: HashMap<&str, Vec<u32>> = HashMap::new();
+        // Lazy symbol pointers belong to the lazy-link trampolines (see
+        // [Self::setup_lazy_linking]) and are resolved when first called, even
+        // if the binary also has a bind-at-launch entry for them (as weak
+        // symbols such as C++ `operator new` do). Applying such a relocation
+        // would add the trampoline address to the target as if it were an
+        // addend.
+        let lazy_pointers: std::collections::HashSet<u32> = self
+            .lazy_trampolines
+            .iter()
+            .flat_map(|block| block.la_ptrs.iter().copied())
+            .collect();
         for &(ptr_ptr, ref name) in &bin.external_relocations {
+            if lazy_pointers.contains(&ptr_ptr) {
+                continue;
+            }
             let ptr_ptr: MutPtr<ConstVoidPtr> = Ptr::from_bits(ptr_ptr);
             // There will be an existing value at the address, which is an
             // offset that should be applied to the external symbol's address.
@@ -702,7 +756,7 @@ impl Dyld {
                     panic!("Unexpected SVC #{svc} at {svc_pc:#x}");
                 };
                 if TRACE_HOST_CALLS.load(Ordering::Relaxed) {
-                    log!("[C] {}", symbol);
+                    log!("[C] {} (lr={:#x})", symbol, cpu.regs()[Cpu::LR]);
                 }
                 log_dbg!("Call to host function, already linked: {}", symbol);
                 Some(f)
@@ -717,129 +771,69 @@ impl Dyld {
         cpu: &mut Cpu,
         svc_pc: u32,
     ) -> Option<HostFunction> {
-        // Links by restoring the original stub function, then updating
-        // __la_symbol_ptr to the appropriate function.
-        fn link_by_restoring_stub(
-            mem: &mut Mem,
-            cpu: &mut Cpu,
-            linked_function: u32,
-            svc_pc: u32,
-            entry_size: u32,
-            pic_offset: u32,
-        ) -> (MutPtr<u32>, MutPtr<u32>) {
-            let original_instructions = match entry_size {
-                4 => Dyld::SYMBOL_STUB1_INSTRUCTIONS.as_slice(),
-                12 => Dyld::SYMBOL_STUB_INSTRUCTIONS.as_slice(),
-                16 => Dyld::PIC_SYMBOL_STUB_INSTRUCTIONS.as_slice(),
-                _ => unreachable!(),
-            };
-            let instruction_count: GuestUSize = original_instructions.len().try_into().unwrap();
-
-            // Restore the original stub, which calls the __la_symbol_ptr
-            let stub_function_ptr: MutPtr<u32> = Ptr::from_bits(svc_pc);
-            if entry_size == 4 {
-                mem.write(stub_function_ptr, original_instructions[0] | pic_offset)
-            } else {
-                for (i, &instr) in original_instructions.iter().enumerate() {
-                    mem.write(stub_function_ptr + i.try_into().unwrap(), instr)
-                }
-            }
-
-            cpu.invalidate_cache_range(stub_function_ptr.to_bits(), instruction_count * 4);
-
-            // Update the __la_symbol_ptr
-            let la_symbol_ptr: MutPtr<u32> = if entry_size == 12 {
-                // Normal stub: absolute address
-                let addr = mem.read(stub_function_ptr + instruction_count);
-                Ptr::from_bits(addr)
-            } else {
-                // The PIC (position-independent code) stub uses a
-                // PC-relative offset rather than an absolute address.
-                if entry_size == 4 {
-                    let offset = mem.read(stub_function_ptr) & 0xFFF;
-                    Ptr::from_bits(stub_function_ptr.to_bits() + offset + 8)
-                } else {
-                    let offset = mem.read(stub_function_ptr + instruction_count);
-                    Ptr::from_bits(stub_function_ptr.to_bits() + offset + 12)
-                }
-            };
-            mem.write(la_symbol_ptr, linked_function);
-            (stub_function_ptr, la_symbol_ptr)
+        // Make the trampoline at `svc_pc` and the __la_symbol_ptr jump straight
+        // to `target` (A32 or Thumb, indicated by the lowest bit).
+        fn link_to_address(mem: &mut Mem, cpu: &mut Cpu, svc_pc: u32, la_ptr: u32, target: u32) {
+            let trampoline: MutPtr<u32> = Ptr::from_bits(svc_pc);
+            // ldr pc, [pc, #-4]
+            mem.write(trampoline + 0, 0xe51ff004);
+            mem.write(trampoline + 1, target);
+            cpu.invalidate_cache_range(svc_pc, TRAMPOLINE_SIZE);
+            mem.write(MutPtr::<u32>::from_bits(la_ptr), target);
         }
 
-        let (stubs, pic_offset) = bins
+        let (block, idx) = self
+            .lazy_trampolines
             .iter()
-            .find_map(|bin| {
-                let stubs = bin.get_section(SectionType::SymbolStubs)?;
-                if !(stubs.addr..(stubs.addr + stubs.size)).contains(&svc_pc) {
-                    return None;
+            .find_map(|block| {
+                let end = block.start + block.la_ptrs.len() as u32 * TRAMPOLINE_SIZE;
+                if (block.start..end).contains(&svc_pc) {
+                    Some((block, ((svc_pc - block.start) / TRAMPOLINE_SIZE) as usize))
+                } else {
+                    None
                 }
-                let pic_offset = bin
-                    .get_section(SectionType::LazySymbolPointers)
-                    .map_or(0, |lazy_ptrs| lazy_ptrs.addr - stubs.addr);
-                Some((stubs, pic_offset))
             })
+            .unwrap_or_else(|| panic!("Lazy link SVC at unexpected address {svc_pc:#x}"));
+        let la_ptr = block.la_ptrs[idx];
+        let stubs = bins[block.bin_idx]
+            .get_section(SectionType::SymbolStubs)
             .unwrap();
-
         let info = stubs.dyld_indirect_symbol_info.as_ref().unwrap();
-
-        let offset = svc_pc - stubs.addr;
-        assert!(offset.is_multiple_of(info.entry_size));
-        let idx = (offset / info.entry_size) as usize;
 
         let symbol = info.indirect_undef_symbols[idx].as_deref().unwrap();
 
         if let Some(&addr) = self.non_lazy_host_functions.get(symbol) {
             // The host function was already linked non-lazily, point the
-            // stub and __la_symbol_ptr to the function.
-            let (stub_function_ptr, la_symbol_ptr) = link_by_restoring_stub(
-                mem,
-                cpu,
-                addr.addr_with_thumb_bit(),
-                svc_pc,
-                info.entry_size,
-                pic_offset,
-            );
+            // __la_symbol_ptr to the function. It calls the host function.
+            link_to_address(mem, cpu, svc_pc, la_ptr, addr.addr_with_thumb_bit());
             log_dbg!(
-                "Linked host function {} at {:?}/{:?} to existing stub ({:?}).",
+                "Linked host function {} at {:#x}/{:#x} to existing stub ({:?}).",
                 symbol,
-                stub_function_ptr,
-                la_symbol_ptr,
+                svc_pc,
+                la_ptr,
                 addr,
             );
-            // The stub jumps to the non-lazy function, which calls the
-            // host function.
             return None;
         }
 
         if let Some(&(symbol, f)) = search_host_dylibs(|dylib| dylib.function_exports, symbol) {
             // Allocate an SVC ID for this host function
             let idx: u32 = self.linked_host_functions.len().try_into().unwrap();
-            let mut svc = idx + Self::SVC_LINKED_FUNCTIONS_BASE;
-            // Indicate to the handler to return manually after call
-            if info.entry_size == 4 {
-                assert!(svc < Self::SVC_LAZY_LINK_RET_FLAG);
-                svc |= Self::SVC_LAZY_LINK_RET_FLAG;
-            }
+            let svc = idx + Self::SVC_LINKED_FUNCTIONS_BASE;
+            assert!(svc < Self::SVC_LAZY_LINK_RET_FLAG);
             self.linked_host_functions.push((symbol, f));
 
-            // Rewrite stub function to call this host function
-            let stub_function_ptr: MutPtr<u32> = Ptr::from_bits(svc_pc);
-            mem.write(stub_function_ptr, encode_a32_svc(svc));
-            if info.entry_size != 4 {
-                assert!(mem.read(stub_function_ptr + 1) == encode_a32_ret());
-            }
-
-            cpu.invalidate_cache_range(stub_function_ptr.to_bits(), 4);
+            // Rewrite the trampoline to call this host function (the `bx lr`
+            // after it is kept).
+            let trampoline: MutPtr<u32> = Ptr::from_bits(svc_pc);
+            mem.write(trampoline, encode_a32_svc(svc));
+            assert!(mem.read(trampoline + 1) == encode_a32_ret());
+            cpu.invalidate_cache_range(svc_pc, 4);
 
             if TRACE_HOST_CALLS.load(Ordering::Relaxed) {
-                log!("[C] {} (first call)", symbol);
+                log!("[C] {} (first call, lr={:#x})", symbol, cpu.regs()[Cpu::LR]);
             }
-            log_dbg!(
-                "Linked {} at {:?} to host implementation",
-                symbol,
-                stub_function_ptr
-            );
+            log_dbg!("Linked {} at {:#x} to host implementation", symbol, svc_pc);
 
             // Return the host function so that we can call it now that we're
             // done.
@@ -848,13 +842,12 @@ impl Dyld {
 
         for dylib in bins.iter() {
             if let Some(&addr) = dylib.exported_symbols.get(symbol) {
-                let (stub_function_ptr, la_symbol_ptr) =
-                    link_by_restoring_stub(mem, cpu, addr, svc_pc, info.entry_size, pic_offset);
+                link_to_address(mem, cpu, svc_pc, la_ptr, addr);
                 log_dbg!(
-                    "Linked {} at {:?}/{:?} to {:#x} from {}",
+                    "Linked {} at {:#x}/{:#x} to {:#x} from {}",
                     symbol,
-                    stub_function_ptr,
-                    la_symbol_ptr,
+                    svc_pc,
+                    la_ptr,
                     addr,
                     dylib.name
                 );
