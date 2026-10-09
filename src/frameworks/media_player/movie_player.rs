@@ -26,6 +26,12 @@ pub struct State {
     /// delay such notifications until the app next returns to the run loop,
     /// which seems to be late enough.
     pending_notifications: VecDeque<(&'static str, id, Instant)>,
+    /// The player whose movie is currently shown by the Android video overlay
+    /// (see `MovieOverlay.java`), and the sequence number of its command.
+    overlay_player: Option<(id, u64)>,
+    /// How the next `MPMoviePlayerPlaybackDidFinishNotification` of a player
+    /// ends (`MPMovieFinishReason`); players without an entry failed.
+    finish_reasons: std::collections::HashMap<id, NSInteger>,
 }
 impl State {
     fn get(env: &mut Environment) -> &mut Self {
@@ -87,6 +93,7 @@ struct MPMoviePlayerControllerHostObject {
     window: id,
     previous_key_window: id,
     fullscreen: bool,
+    should_autoplay: bool,
 }
 impl HostObject for MPMoviePlayerControllerHostObject {}
 
@@ -182,6 +189,112 @@ fn dismiss_fullscreen(env: &mut Environment, player: id) {
     release(env, previous);
 }
 
+/// Starts the movie in the Android video overlay (the Java side plays it with
+/// the platform's decoder and reports the end in `movie_evt.txt`). The movie is
+/// copied out of the app bundle first, as the platform player needs a real
+/// file. Returns whether the overlay was started.
+#[cfg(target_os = "android")]
+fn start_overlay(env: &mut Environment, player: id) -> bool {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let url = env
+        .objc
+        .borrow::<MPMoviePlayerControllerHostObject>(player)
+        .content_url;
+    if url == nil {
+        return false;
+    }
+    let guest_path = ns_url::to_rust_path(env, url);
+    let Some(name) = guest_path.file_name().map(str::to_owned) else {
+        return false;
+    };
+    let Ok(bytes) = env.fs.read(&*guest_path) else {
+        log!("Movie {:?} could not be read, not playing it", guest_path);
+        return false;
+    };
+    let dir = crate::paths::user_data_base_path().join("movies");
+    let file = dir.join(&name);
+    let up_to_date = std::fs::metadata(&file).map_or(false, |m| m.len() == bytes.len() as u64);
+    if !up_to_date
+        && (std::fs::create_dir_all(&dir).is_err() || std::fs::write(&file, &bytes).is_err())
+    {
+        log!("Movie {:?} could not be copied for playback", name);
+        return false;
+    }
+    let seq = SEQ.fetch_add(2, Ordering::Relaxed)
+        + std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(1, |d| d.as_millis() as u64 * 2);
+    let (x, y, w, h) = env.window().viewport();
+    let base = crate::paths::user_data_base_path();
+    let _ = std::fs::remove_file(base.join("movie_evt.txt"));
+    let text = format!("{}\nplay\n{} {} {} {}\n{}", seq, x, y, w, h, file.display());
+    let tmp = base.join("movie_cmd.tmp");
+    if std::fs::write(&tmp, text).is_err()
+        || std::fs::rename(&tmp, base.join("movie_cmd.txt")).is_err()
+    {
+        return false;
+    }
+    log!("Playing movie {:?} in the video overlay", name);
+    State::get(env).overlay_player = Some((player, seq));
+    true
+}
+#[cfg(not(target_os = "android"))]
+fn start_overlay(_env: &mut Environment, _player: id) -> bool {
+    false
+}
+
+fn stop_overlay(env: &mut Environment, player: id) {
+    let Some((overlay_player, seq)) = State::get(env).overlay_player else {
+        return;
+    };
+    if overlay_player != player {
+        return;
+    }
+    State::get(env).overlay_player = None;
+    #[cfg(target_os = "android")]
+    {
+        let base = crate::paths::user_data_base_path();
+        let tmp = base.join("movie_cmd.tmp");
+        let text = format!("{}\nstop\n0 0 0 0\n", seq + 1);
+        if std::fs::write(&tmp, text).is_ok() {
+            let _ = std::fs::rename(&tmp, base.join("movie_cmd.txt"));
+        }
+    }
+    #[cfg(not(target_os = "android"))]
+    let _ = seq;
+}
+
+/// The Java overlay reports the end of the movie (`done`, `user` for a tap
+/// that skipped it, or `error`) in `movie_evt.txt`.
+fn poll_overlay(env: &mut Environment) {
+    let Some((player, seq)) = State::get(env).overlay_player else {
+        return;
+    };
+    let path = crate::paths::user_data_base_path().join("movie_evt.txt");
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return;
+    };
+    let mut lines = text.lines();
+    if lines.next().and_then(|l| l.trim().parse::<u64>().ok()) != Some(seq) {
+        return;
+    }
+    let reason = match lines.next().map(str::trim) {
+        Some("done") => 0, // MPMovieFinishReasonPlaybackEnded
+        Some("user") => 2, // MPMovieFinishReasonUserExited
+        _ => 1,            // MPMovieFinishReasonPlaybackError
+    };
+    log!("Movie playback finished in the overlay (reason {})", reason);
+    State::get(env).overlay_player = None;
+    State::get(env).finish_reasons.insert(player, reason);
+    retain(env, player); // Pending notifications own their sender.
+    State::get(env).pending_notifications.push_back((
+        MPMoviePlayerPlaybackDidFinishNotification,
+        player,
+        Instant::now(),
+    ));
+}
+
 pub const CLASSES: ClassExports = objc_classes! {
 
 (env, this, _cmd);
@@ -198,6 +311,7 @@ pub const CLASSES: ClassExports = objc_classes! {
         window: nil,
         previous_key_window: nil,
         fullscreen: false,
+        should_autoplay: true,
     });
     env.objc.alloc_object(this, host_object, &mut env.mem)
 }
@@ -296,10 +410,16 @@ pub const CLASSES: ClassExports = objc_classes! {
     );
     retain(env, this); // Pending notifications own their sender.
 
-    // There is no movie decoder, so playback cannot happen. Some apps (e.g.
-    // LEGO Harry Potter) never call `play` themselves and only wait for the
-    // completion notification, so report the (failed) playback as finished
-    // shortly afterwards; otherwise they would wait forever on a black screen.
+    // Like on iOS, a player that should autoplay starts as soon as it is
+    // prepared. Some apps (e.g. LEGO Harry Potter) never call `play` themselves
+    // and only wait for the completion notification.
+    if env.objc.borrow::<MPMoviePlayerControllerHostObject>(this).should_autoplay {
+        () = msg![env; this play];
+        return;
+    }
+    // Without autoplay nothing starts the movie; report the (failed) playback
+    // as finished shortly afterwards, otherwise apps that only wait for the
+    // completion notification would wait forever on a black screen.
     let already_pending = State::get(env)
         .pending_notifications
         .iter()
@@ -312,6 +432,12 @@ pub const CLASSES: ClassExports = objc_classes! {
         ));
         retain(env, this);
     }
+}
+- (bool)shouldAutoplay {
+    env.objc.borrow::<MPMoviePlayerControllerHostObject>(this).should_autoplay
+}
+- (())setShouldAutoplay:(bool)should_autoplay {
+    env.objc.borrow_mut::<MPMoviePlayerControllerHostObject>(this).should_autoplay = should_autoplay;
 }
 - (bool)isPreparedToPlay {
     true
@@ -354,8 +480,15 @@ pub const CLASSES: ClassExports = objc_classes! {
         present_fullscreen(env, this);
     }
 
-    // There is currently no movie decoder. Report a playback error through
-    // the documented completion notification, rather than successful playback.
+    if State::get(env).overlay_player.map(|(player, _)| player) == Some(this) {
+        return;
+    }
+    if State::get(env).overlay_player.is_none() && start_overlay(env, this) {
+        // The overlay reports the end of the movie.
+        return;
+    }
+    // Without a movie decoder, report a playback error through the documented
+    // completion notification, rather than successful playback.
     let notif = (MPMoviePlayerPlaybackDidFinishNotification, this, Instant::now().checked_add(Duration::from_millis(1000)).unwrap());
     for (name, obj, _) in &mut State::get(env).pending_notifications {
         // De-duplicate similar notifications. This can happen if app is calling
@@ -373,7 +506,8 @@ pub const CLASSES: ClassExports = objc_classes! {
 }
 
 - (())stop {
-    log!("TODO: [(MPMoviePlayerController*){:?} stop]", this);
+    log!("[(MPMoviePlayerController*){:?} stop]", this);
+    stop_overlay(env, this);
     dismiss_fullscreen(env, this);
     if env.framework_state.media_player.movie_player.active_player == Some(this) {
         // Some applications (like NOVA2) may send 2 `stop` messages for each
@@ -406,6 +540,7 @@ pub const CLASSES: ClassExports = objc_classes! {
 /// For use by `NSRunLoop` via [super::handle_players]: check movie players'
 /// status, send notifications if necessary.
 pub(super) fn handle_players(env: &mut Environment) {
+    poll_overlay(env);
     let mut notifs_to_run = Vec::new();
     let pending_notifs = &mut State::get(env).pending_notifications;
     let mut i = 0;
@@ -423,6 +558,23 @@ pub(super) fn handle_players(env: &mut Environment) {
         let name = ns_string::get_static_str(env, name_str);
         let center: id = msg_class![env; NSNotificationCenter defaultCenter];
         if name_str == MPMoviePlayerPlaybackDidFinishNotification {
+            let finished = State::get(env).finish_reasons.remove(&object);
+            if let Some(finish_reason) = finished {
+                // The movie really played (or the user skipped it).
+                let reason: id = msg_class![env; NSNumber numberWithInteger:finish_reason];
+                let key = ns_string::get_static_str(
+                    env,
+                    MPMoviePlayerPlaybackDidFinishReasonUserInfoKey,
+                );
+                let info: id = msg_class![env; NSMutableDictionary dictionary];
+                () = msg![env; info setObject:reason forKey:key];
+                () = msg![env; center postNotificationName:name object:object userInfo:info];
+                if State::get(env).active_player == Some(object) {
+                    () = msg![env; object stop];
+                }
+                release(env, object);
+                continue;
+            }
             let reason: id = msg_class![env; NSNumber numberWithInteger:2i32];
             let key =
                 ns_string::get_static_str(env, MPMoviePlayerPlaybackDidFinishReasonUserInfoKey);

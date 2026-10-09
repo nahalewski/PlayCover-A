@@ -54,6 +54,7 @@ public class MainActivity extends SDLActivity {
         installExitButton();
         if (mLayout != null) {
             new WebOverlay(this, mLayout);
+            new MovieOverlay(this, mLayout);
             new AlertOverlay(this, mLayout);
         }
     }
