@@ -6,8 +6,9 @@
 //! `dlfcn.h` (`dlopen()` and friends)
 
 use crate::dyld::{export_c_func, FunctionExports};
-use crate::mem::{ConstPtr, ConstVoidPtr, MutVoidPtr, Ptr};
+use crate::mem::{ConstPtr, ConstVoidPtr, MutPtr, MutVoidPtr, Ptr, SafeRead};
 use crate::Environment;
+use std::collections::HashMap;
 
 const RTLD_DEFAULT: MutVoidPtr = Ptr::from_bits(-2 as _);
 
@@ -69,10 +70,83 @@ fn dlclose(env: &mut Environment, handle: MutVoidPtr) -> i32 {
     0 // success
 }
 
-/// `dladdr()`: nothing here maps host-side addresses to symbols, so report
-/// "not found" (0), which callers have to be ready for anyway.
-fn dladdr(_env: &mut Environment, _addr: ConstVoidPtr, _info: MutVoidPtr) -> i32 {
-    0
+/// Cached guest C strings handed out by `dladdr()` (callers don't free them).
+#[derive(Default)]
+pub struct State {
+    strings: HashMap<String, ConstPtr<u8>>,
+}
+
+fn cached_cstr(env: &mut Environment, s: &str) -> ConstPtr<u8> {
+    if let Some(&ptr) = env.libc_state.dlfcn.strings.get(s) {
+        return ptr;
+    }
+    let ptr = env.mem.alloc_and_write_cstr(s.as_bytes()).cast_const();
+    env.libc_state.dlfcn.strings.insert(s.to_string(), ptr);
+    ptr
+}
+
+#[allow(non_camel_case_types)]
+#[repr(C, packed)]
+#[derive(Copy, Clone, Debug)]
+/// `Dl_info`
+struct Dl_info {
+    dli_fname: ConstPtr<u8>,
+    dli_fbase: ConstVoidPtr,
+    dli_sname: ConstPtr<u8>,
+    dli_saddr: ConstVoidPtr,
+}
+unsafe impl SafeRead for Dl_info {}
+
+/// `dladdr()`: find the loaded image containing `addr` and fill in its path,
+/// the address of its Mach-O header, and the nearest symbol at or below
+/// `addr`. Apps use the header address to walk their own load commands.
+fn dladdr(env: &mut Environment, addr: ConstVoidPtr, info: MutPtr<Dl_info>) -> i32 {
+    let addr = addr.to_bits();
+    let Some(bin_idx) = env.bins.iter().position(|bin| {
+        bin.segment_ranges
+            .iter()
+            .any(|&(start, size)| addr >= start && addr - start < size)
+    }) else {
+        return 0;
+    };
+    let bin = &env.bins[bin_idx];
+    let Some(header_addr) = bin.header_addr else {
+        return 0;
+    };
+    let fname = if bin_idx == 0 {
+        env.bundle.executable_path().as_str().to_string()
+    } else {
+        bin.name.clone()
+    };
+    // Nearest preceding symbol (Thumb bit ignored for the comparison).
+    let symbol = bin
+        .exported_symbols
+        .iter()
+        .filter(|&(_, &sym_addr)| (sym_addr & !1) <= addr)
+        .max_by_key(|&(_, &sym_addr)| sym_addr & !1)
+        .map(|(name, &sym_addr)| (name.clone(), sym_addr));
+
+    let dli_fname = cached_cstr(env, &fname);
+    let (dli_sname, dli_saddr) = match symbol {
+        Some((name, sym_addr)) => {
+            // dladdr() reports C names without the leading underscore.
+            let name = name.strip_prefix('_').unwrap_or(&name).to_string();
+            (cached_cstr(env, &name), Ptr::from_bits(sym_addr))
+        }
+        None => (Ptr::null(), Ptr::null()),
+    };
+    if !info.is_null() {
+        env.mem.write(
+            info,
+            Dl_info {
+                dli_fname,
+                dli_fbase: Ptr::from_bits(header_addr),
+                dli_sname,
+                dli_saddr,
+            },
+        );
+    }
+    1
 }
 
 pub const FUNCTIONS: FunctionExports = &[

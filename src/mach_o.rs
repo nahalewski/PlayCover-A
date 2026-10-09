@@ -55,6 +55,11 @@ pub struct MachO {
     /// This is used by get_end() to return the first address after the last
     /// segment in the executable.
     pub last_segment_end: u32,
+    /// Guest address of the Mach-O header (the start of the `__TEXT`
+    /// segment, which maps the file from offset 0), if it was loaded.
+    pub header_addr: Option<u32>,
+    /// Guest address ranges `(start, size)` of the loaded segments.
+    pub segment_ranges: Vec<(u32, u32)>,
 }
 
 #[derive(Debug)]
@@ -316,6 +321,8 @@ impl MachO {
         let mut sym_tab_info: Option<(u32, u32, u32, u32)> = None;
         let mut segment_offsets = Vec::new();
         let mut last_segment_end: u32 = 0;
+        let mut header_addr: Option<u32> = None;
+        let mut segment_ranges: Vec<(u32, u32)> = Vec::new();
 
         // Info used for the result
         let mut dynamic_libraries = Vec::new();
@@ -382,6 +389,10 @@ impl MachO {
                             vmsize
                         );
                         into_mem.reserve(vmaddr + slide, vmsize);
+                        segment_ranges.push((vmaddr + slide, vmsize));
+                        if fileoff == 0 && filesize > 0 {
+                            header_addr = Some(vmaddr + slide);
+                        }
 
                         // If filesize is less than vmsize, the rest of the
                         // segment should be filled with zeroes. We are assuming
@@ -688,6 +699,8 @@ impl MachO {
             external_relocations,
             entry_point_pc,
             last_segment_end,
+            header_addr,
+            segment_ranges,
         })
     }
 

@@ -133,6 +133,7 @@ pub const DYLIB: crate::dyld::HostDylib = crate::dyld::HostDylib {
 pub struct State {
     crypto: crypto::State,
     dirent: dirent::State,
+    dlfcn: dlfcn::State,
     keymgr: keymgr::State,
     math: math::State,
     posix_io: posix_io::State,
