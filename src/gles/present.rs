@@ -38,6 +38,30 @@ impl FpsCounter {
     }
 }
 
+/// Counts presented frames and, about once a second, writes the frame rate to
+/// `fps.txt` in the user data folder, for the Android FPS counter overlay.
+fn count_presented_frame() {
+    use std::sync::Mutex;
+    static STATE: Mutex<Option<(Instant, u32)>> = Mutex::new(None);
+    let Ok(mut state) = STATE.lock() else {
+        return;
+    };
+    let now = Instant::now();
+    let (start, frames) = state.get_or_insert((now, 0));
+    *frames += 1;
+    let elapsed = now.duration_since(*start);
+    if elapsed >= Duration::from_secs(1) {
+        let fps = *frames as f32 / elapsed.as_secs_f32();
+        *state = Some((now, 0));
+        drop(state);
+        let base = crate::paths::user_data_base_path();
+        let tmp = base.join("fps.tmp");
+        if std::fs::write(&tmp, format!("{:.1}", fps)).is_ok() {
+            let _ = std::fs::rename(&tmp, base.join("fps.txt"));
+        }
+    }
+}
+
 static FILL_BACKGROUND: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static FILL_SCREEN_SIZE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -62,6 +86,7 @@ pub unsafe fn present_frame(
     rotation_matrix: Matrix<2>,
     virtual_cursor_visible_at: Option<(f32, f32, bool)>,
 ) {
+    count_presented_frame();
     // While this is a generic utility, it is closely tied to
     // crate::frameworks::opengles::eagl::present_renderbuffer, which handles
     // backing up and restoring OpenGL ES state that this function might touch,

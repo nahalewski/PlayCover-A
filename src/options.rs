@@ -112,7 +112,7 @@ impl Default for Options {
             fps_limit: Some(60.0), // Original iPhone is 60Hz and uses v-sync,
             force_composition: false,
             landscape_view_adaptation: true,
-            network_access: false,
+            network_access: true,
             popup_errors: true,
             dumping_options: Default::default(),
             dumping_file: crate::paths::user_data_base_path().join("DUMP.txt"),
@@ -302,6 +302,8 @@ impl Options {
             self.force_composition = true;
         } else if arg == "--allow-ads" {
             crate::ad_blocklist::set_allow_ads(true);
+        } else if arg == "--no-network-access" {
+            self.network_access = false;
         } else if arg == "--allow-network-access" {
             self.network_access = true;
         } else if arg == "--no-error-popup" {

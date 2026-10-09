@@ -309,6 +309,15 @@ Other options:
 
     --allow-network-access
         Allow apps running in touchHLE to access the Internet and the local network.
+        This is the default.
+
+    --no-network-access
+        Block the app's access to the Internet and the local network.
+
+    --allow-ads
+        Let the app contact advertising networks and ad-attribution trackers.
+        By default these are blocked for every app (name lookups, HTTP requests
+        and web pages for them fail like an unreachable server).
 
     --ignore-gl-errors
         Ignore host OpenGL errors as queried by glGetError function.

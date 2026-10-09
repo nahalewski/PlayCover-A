@@ -1546,6 +1546,13 @@ impl Window {
     ///
     /// The aspect ratio of this region always reflects the guest app's view of
     /// the world, but the scale and orientation might not.
+    /// Changes how the picture fills a wider screen while the app runs (see
+    /// `Options::widescreen` and `Options::widescreen_blur`).
+    pub fn set_view_mode(&mut self, widescreen: Option<f32>, blur: bool) {
+        self.widescreen = widescreen;
+        self.widescreen_blur = blur;
+    }
+
     pub fn viewport(&self) -> (u32, u32, u32, u32) {
         let (app_width, app_height) =
             size_for_orientation(self.device_family, self.tall_screen, self.device_orientation, self.scale_hack);

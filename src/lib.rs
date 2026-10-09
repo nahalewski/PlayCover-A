@@ -45,6 +45,7 @@ mod gles;
 mod image;
 mod libc;
 mod licenses;
+mod live_settings;
 mod mach_o;
 mod matrix;
 mod mem;

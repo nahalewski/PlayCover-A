@@ -470,6 +470,7 @@ pub fn run_run_loop(
         if is_main_run_loop {
             super::ns_url_connection::handle_pending_loads(env);
             media_player::handle_players(env);
+            crate::live_settings::poll(env);
         }
 
         // Unfortunately, touchHLE has to poll for certain things repeatedly;
