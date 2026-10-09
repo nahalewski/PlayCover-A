@@ -12,8 +12,8 @@ use crate::abi::DotDotDot;
 use crate::dyld::{export_c_func, FunctionExports};
 use crate::fs::{FsError, GuestFile, GuestOpenOptions, GuestPath};
 use crate::libc::errno::{
-    set_errno, EACCES, EBADF, EEXIST, EFAULT, EINTR, EINVAL, EIO, EISDIR, ENOENT, ENOTDIR,
-    EOVERFLOW, ESPIPE,
+    set_errno, EACCES, EAGAIN, EBADF, EEXIST, EFAULT, EINTR, EINVAL, EIO, EISDIR, ENOENT,
+    ENOTDIR, EOVERFLOW, EPIPE, ESPIPE,
 };
 use crate::libc::sys::socket::close_socket;
 use crate::libc::unistd::pid_t;
@@ -45,6 +45,8 @@ struct PosixFileHostObject {
     needs_flush: bool,
     reached_eof: bool,
     flags: i32,
+    /// `O_NONBLOCK`, set by `open()` or `fcntl(F_SETFL)`.
+    nonblocking: bool,
 }
 
 // TODO: stdin/stdout/stderr handling somehow
@@ -213,6 +215,7 @@ pub fn open_direct(env: &mut Environment, path: ConstPtr<u8>, flags: i32) -> Fil
                 needs_flush,
                 reached_eof: false,
                 flags: 0,
+                nonblocking: flags & O_NONBLOCK != 0,
             };
 
             find_or_create_fd(env, host_object)
@@ -270,6 +273,19 @@ pub fn read(
             size,
         );
         // TODO: set errno
+        return -1;
+    };
+
+    // A blocking read from an empty pipe waits for a writer.
+    while let Some(false) = pipe_read_ready(env, fd) {
+        if env.libc_state.posix_io.file_for_fd(fd).unwrap().nonblocking {
+            set_errno(env, EAGAIN);
+            return -1;
+        }
+        env.sleep(std::time::Duration::from_millis(1));
+    }
+    let Some(file) = env.libc_state.posix_io.file_for_fd(fd) else {
+        set_errno(env, EBADF);
         return -1;
     };
 
@@ -432,7 +448,10 @@ pub fn write(
             bytes_written.try_into().unwrap()
         }
         Err(e) => {
-            // TODO: set errno
+            if e.kind() == std::io::ErrorKind::BrokenPipe {
+                set_errno(env, EPIPE);
+            }
+            // TODO: set errno otherwise
             log!(
                 "Warning: write({:?}, {:?}, {:#x}) encountered error {:?}, returning -1",
                 fd,
@@ -627,6 +646,20 @@ pub fn close(env: &mut Environment, fd: FileDescriptor) -> i32 {
                     close_socket(env, fd);
                     0
                 }
+                // The other end of a pipe learns about the closing
+                GuestFile::Pipe {
+                    buffer,
+                    is_write_end,
+                } => {
+                    let mut pipe = buffer.lock().unwrap();
+                    if is_write_end {
+                        pipe.write_end_closed = true;
+                    } else {
+                        pipe.read_end_closed = true;
+                    }
+                    0
+                }
+                GuestFile::Kqueue(_) => 0,
                 // Files must be synced if they require flushing
                 _ => {
                     if !file.needs_flush {
@@ -772,6 +805,13 @@ fn fcntl(
         return -1;
     }
 
+    // stdin, stdout and stderr are not tracked as files: accept the flag
+    // commands that make sense for them.
+    if fd < NORMAL_FILENO_BASE && matches!(cmd, F_GETFD | F_SETFD | F_GETFL | F_SETFL) {
+        log_dbg!("fcntl({}, {}) on a standard stream => 0", fd, cmd);
+        return 0;
+    }
+
     match cmd {
         F_GETFD => {
             let file = env.libc_state.posix_io.file_for_fd(fd).unwrap();
@@ -855,13 +895,15 @@ fn fcntl(
             log_dbg!("TODO: Ignoring F_RDADVISE for file descriptor {}", fd);
         }
         F_GETFL => {
-            // TODO: track O_NONBLOCK/O_APPEND status flags per descriptor.
-            log!("TODO: fcntl({}, F_GETFL) => 0 (status flags not tracked)", fd);
-            return 0;
+            // TODO: track O_APPEND and the access mode per descriptor.
+            let file = env.libc_state.posix_io.file_for_fd(fd).unwrap();
+            return if file.nonblocking { O_NONBLOCK } else { 0 };
         }
         F_SETFL => {
             let flags: i32 = args.start().next(env);
-            log!("TODO: fcntl({}, F_SETFL, {:#x}) ignored", fd, flags);
+            // TODO: O_APPEND and the other status flags are ignored.
+            let file = env.libc_state.posix_io.file_for_fd(fd).unwrap();
+            file.nonblocking = flags & O_NONBLOCK != 0;
         }
         _ => unimplemented!(),
     }
@@ -965,7 +1007,333 @@ pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(fsync(_)),
     export_c_func!(ftruncate(_, _)),
     export_c_func!(truncate(_, _)),
+    export_c_func!(pipe(_)),
+    export_c_func!(kqueue()),
+    export_c_func!(kevent(_, _, _, _, _, _)),
 ];
+
+/// Whether a `read()` on `fd` would return right away: [None] if `fd` is not
+/// the read end of a pipe.
+fn pipe_read_ready(env: &mut Environment, fd: FileDescriptor) -> Option<bool> {
+    let file = env.libc_state.posix_io.file_for_fd(fd)?;
+    match &file.file {
+        GuestFile::Pipe {
+            buffer,
+            is_write_end: false,
+        } => {
+            let pipe = buffer.lock().unwrap();
+            Some(!pipe.data.is_empty() || pipe.write_end_closed)
+        }
+        _ => None,
+    }
+}
+
+fn new_pipe_end(buffer: crate::fs::PipeRef, is_write_end: bool) -> PosixFileHostObject {
+    PosixFileHostObject {
+        file: GuestFile::Pipe {
+            buffer,
+            is_write_end,
+        },
+        needs_flush: false,
+        reached_eof: false,
+        flags: 0,
+        nonblocking: false,
+    }
+}
+
+fn pipe(env: &mut Environment, fds: MutPtr<FileDescriptor>) -> i32 {
+    set_errno(env, 0);
+    let buffer = std::sync::Arc::new(std::sync::Mutex::new(crate::fs::PipeBuffer::default()));
+    let read_fd = find_or_create_fd(env, new_pipe_end(buffer.clone(), false));
+    let write_fd = find_or_create_fd(env, new_pipe_end(buffer, true));
+    env.mem.write(fds, read_fd);
+    env.mem.write(fds + 1, write_fd);
+    log_dbg!("pipe() => [{}, {}]", read_fd, write_fd);
+    0
+}
+
+fn kqueue(env: &mut Environment) -> FileDescriptor {
+    set_errno(env, 0);
+    let fd = find_or_create_fd(
+        env,
+        PosixFileHostObject {
+            file: GuestFile::Kqueue(Vec::new()),
+            needs_flush: false,
+            reached_eof: false,
+            flags: 0,
+            nonblocking: false,
+        },
+    );
+    log_dbg!("kqueue() => {}", fd);
+    fd
+}
+
+/// `struct kevent` (32-bit layout).
+#[allow(non_camel_case_types)]
+#[repr(C, packed)]
+#[derive(Clone, Copy)]
+struct kevent {
+    ident: u32,
+    filter: i16,
+    flags: u16,
+    fflags: u32,
+    data: i32,
+    udata: u32,
+}
+unsafe impl SafeRead for kevent {}
+
+const EVFILT_READ: i16 = -1;
+const EVFILT_WRITE: i16 = -2;
+const EVFILT_TIMER: i16 = -7;
+const EV_ADD: u16 = 0x1;
+const EV_DELETE: u16 = 0x2;
+const EV_ENABLE: u16 = 0x4;
+const EV_DISABLE: u16 = 0x8;
+const EV_ONESHOT: u16 = 0x10;
+const EV_RECEIPT: u16 = 0x40;
+const EV_EOF: u16 = 0x8000;
+const EV_ERROR: u16 = 0x4000;
+/// Registration state only: the event is disabled (not part of the API).
+const EV_DISABLED_INTERNAL: u16 = 0x0100;
+const NOTE_SECONDS: u32 = 0x1;
+const NOTE_USECONDS: u32 = 0x2;
+const NOTE_NSECONDS: u32 = 0x4;
+
+fn kevent_timer_period(fflags: u32, data: i32) -> std::time::Duration {
+    let data = data.max(0) as u64;
+    if fflags & NOTE_SECONDS != 0 {
+        std::time::Duration::from_secs(data)
+    } else if fflags & NOTE_USECONDS != 0 {
+        std::time::Duration::from_micros(data)
+    } else if fflags & NOTE_NSECONDS != 0 {
+        std::time::Duration::from_nanos(data)
+    } else {
+        std::time::Duration::from_millis(data)
+    }
+}
+
+/// Returns (ready, data, eof) for a read or write event on `ident`.
+fn kevent_fd_ready(env: &mut Environment, ident: u32, filter: i16) -> (bool, i32, bool) {
+    let Ok(fd) = FileDescriptor::try_from(ident) else {
+        return (false, 0, false);
+    };
+    if fd < NORMAL_FILENO_BASE {
+        return (false, 0, false);
+    }
+    let Some(file) = env.libc_state.posix_io.file_for_fd(fd) else {
+        return (false, 0, false);
+    };
+    match (&file.file, filter) {
+        (
+            GuestFile::Pipe {
+                buffer,
+                is_write_end: false,
+            },
+            EVFILT_READ,
+        ) => {
+            let pipe = buffer.lock().unwrap();
+            let ready = !pipe.data.is_empty() || pipe.write_end_closed;
+            (ready, pipe.data.len() as i32, pipe.write_end_closed)
+        }
+        (
+            GuestFile::Pipe {
+                buffer,
+                is_write_end: true,
+            },
+            EVFILT_WRITE,
+        ) => {
+            let pipe = buffer.lock().unwrap();
+            if pipe.read_end_closed {
+                (true, 0, true)
+            } else {
+                (true, (65536 - pipe.data.len() as i32).max(0), false)
+            }
+        }
+        // Regular files are always ready.
+        (GuestFile::File(_) | GuestFile::IpaBundleFile(_) | GuestFile::ResourceFile(_), _) => {
+            (true, 0, false)
+        }
+        // TODO: sockets (touchHLE's sockets are not connected to anything).
+        _ => (false, 0, false),
+    }
+}
+
+fn kevent(
+    env: &mut Environment,
+    kq: FileDescriptor,
+    changelist: ConstPtr<kevent>,
+    nchanges: i32,
+    eventlist: MutPtr<kevent>,
+    nevents: i32,
+    timeout: ConstPtr<crate::libc::time::timespec>,
+) -> i32 {
+    set_errno(env, 0);
+
+    if !matches!(
+        env.libc_state.posix_io.file_for_fd(kq).map(|f| &f.file),
+        Some(GuestFile::Kqueue(_))
+    ) {
+        set_errno(env, EBADF);
+        return -1;
+    }
+
+    // Registrations and receipts.
+    let mut receipts: Vec<kevent> = Vec::new();
+    let max_out = nevents.max(0) as usize;
+    for i in 0..nchanges.max(0) as u32 {
+        let change = env.mem.read(changelist + i);
+        let (ident, filter, flags, fflags, data, udata) = (
+            change.ident,
+            change.filter,
+            change.flags,
+            change.fflags,
+            change.data,
+            change.udata,
+        );
+        let Some(GuestFile::Kqueue(registered)) = env
+            .libc_state
+            .posix_io
+            .file_for_fd(kq)
+            .map(|f| &mut f.file)
+        else {
+            unreachable!()
+        };
+        let position = registered
+            .iter()
+            .position(|e| e.ident == ident && e.filter == filter);
+        if flags & EV_DELETE != 0 {
+            if let Some(position) = position {
+                registered.remove(position);
+            }
+        } else if flags & EV_ADD != 0 {
+            let next_fire = (filter == EVFILT_TIMER)
+                .then(|| std::time::Instant::now() + kevent_timer_period(fflags, data));
+            let entry = crate::fs::KEvent {
+                ident,
+                filter,
+                flags: flags & !EV_ADD,
+                fflags,
+                data,
+                udata,
+                next_fire,
+            };
+            match position {
+                Some(position) => registered[position] = entry,
+                None => registered.push(entry),
+            }
+        } else if let Some(position) = position {
+            if flags & EV_DISABLE != 0 {
+                registered[position].flags |= EV_DISABLED_INTERNAL;
+            }
+            if flags & EV_ENABLE != 0 {
+                registered[position].flags &= !EV_DISABLED_INTERNAL;
+            }
+        }
+        if flags & EV_RECEIPT != 0 && receipts.len() < max_out {
+            receipts.push(kevent {
+                ident,
+                filter,
+                flags: flags | EV_ERROR,
+                fflags: 0,
+                data: 0,
+                udata,
+            });
+        }
+    }
+    if !receipts.is_empty() {
+        for (i, event) in receipts.iter().enumerate() {
+            env.mem.write(eventlist + i as u32, *event);
+        }
+        return receipts.len() as i32;
+    }
+    if max_out == 0 {
+        return 0;
+    }
+
+    // Wait for events.
+    let deadline = if timeout.is_null() {
+        None
+    } else {
+        let timeout = env.mem.read(timeout);
+        let (secs, nanos) = (timeout.tv_sec, timeout.tv_nsec);
+        Some(
+            std::time::Instant::now()
+                + std::time::Duration::new(secs.max(0) as u64, nanos.max(0) as u32),
+        )
+    };
+    loop {
+        let registered = match env.libc_state.posix_io.file_for_fd(kq).map(|f| &f.file) {
+            Some(GuestFile::Kqueue(registered)) => registered.clone(),
+            _ => {
+                set_errno(env, EBADF);
+                return -1;
+            }
+        };
+        let now = std::time::Instant::now();
+        let mut delivered: Vec<(usize, kevent)> = Vec::new();
+        for (index, entry) in registered.iter().enumerate() {
+            if delivered.len() >= max_out {
+                break;
+            }
+            if entry.flags & EV_DISABLED_INTERNAL != 0 {
+                continue;
+            }
+            let (ready, data, eof) = match entry.filter {
+                EVFILT_READ | EVFILT_WRITE => kevent_fd_ready(env, entry.ident, entry.filter),
+                EVFILT_TIMER => (entry.next_fire.is_some_and(|t| t <= now), 1, false),
+                _ => (false, 0, false),
+            };
+            if ready {
+                delivered.push((
+                    index,
+                    kevent {
+                        ident: entry.ident,
+                        filter: entry.filter,
+                        flags: (entry.flags & !EV_DISABLED_INTERNAL) | if eof { EV_EOF } else { 0 },
+                        fflags: entry.fflags,
+                        data,
+                        udata: entry.udata,
+                    },
+                ));
+            }
+        }
+        if !delivered.is_empty() {
+            for (i, (_, event)) in delivered.iter().enumerate() {
+                env.mem.write(eventlist + i as u32, *event);
+            }
+            // Update the registrations: reschedule timers, drop one-shots.
+            let Some(GuestFile::Kqueue(registered)) = env
+                .libc_state
+                .posix_io
+                .file_for_fd(kq)
+                .map(|f| &mut f.file)
+            else {
+                return delivered.len() as i32;
+            };
+            let mut remove: Vec<usize> = Vec::new();
+            for (index, event) in &delivered {
+                let Some(entry) = registered.get_mut(*index) else {
+                    continue;
+                };
+                if event.flags & EV_ONESHOT != 0 {
+                    remove.push(*index);
+                } else if entry.filter == EVFILT_TIMER {
+                    let period = kevent_timer_period(entry.fflags, entry.data);
+                    entry.next_fire = Some(now + period);
+                }
+            }
+            remove.sort_unstable_by(|a, b| b.cmp(a));
+            for index in remove {
+                registered.remove(index);
+            }
+            return delivered.len() as i32;
+        }
+        if deadline.is_some_and(|d| now >= d) {
+            return 0;
+        }
+        env.sleep(std::time::Duration::from_millis(1));
+    }
+}
 
 /// Helper function, not part of API
 fn find_or_create_fd(env: &mut Environment, host_object: PosixFileHostObject) -> FileDescriptor {
@@ -993,6 +1361,7 @@ pub fn find_or_create_socket(env: &mut Environment) -> FileDescriptor {
         needs_flush: false,
         reached_eof: false,
         flags: 0,
+        nonblocking: false,
     };
     find_or_create_fd(env, host_object)
 }

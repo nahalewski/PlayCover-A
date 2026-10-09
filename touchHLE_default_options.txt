@@ -258,3 +258,6 @@ com.gamevil.zenonia5free: --landscape-left --fps-limit=15 --allow-network-access
 com.wb.Scribblenauts: --tall-screen
 # Sonic CD 2.0: refuses to start without internet (ads/age check), so it needs real network access
 com.sega.soniccd: --allow-network-access
+
+# Zenonia S: Rifts in Time is an online game (HIVE login, news); it declares no orientation but lays itself out for landscape
+com.gamevil.zenoniaonline.ios.apple.global.normal: --landscape-left --allow-network-access

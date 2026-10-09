@@ -384,6 +384,35 @@ pub enum GuestFile {
     /// `/dev/urandom` and `/dev/random`: endless pseudo-random bytes (libc++'s
     /// `std::random_device` opens one of these when it is constructed).
     RandomDevice,
+    /// One end of a `pipe()`.
+    Pipe {
+        buffer: PipeRef,
+        is_write_end: bool,
+    },
+    /// A `kqueue()` and the events registered with it.
+    Kqueue(Vec<KEvent>),
+}
+
+/// Bytes in flight in a `pipe()`, shared by both ends.
+#[derive(Debug, Default)]
+pub struct PipeBuffer {
+    pub data: std::collections::VecDeque<u8>,
+    pub write_end_closed: bool,
+    pub read_end_closed: bool,
+}
+pub type PipeRef = std::sync::Arc<std::sync::Mutex<PipeBuffer>>;
+
+/// An event registered with a `kqueue()` (see `kevent()`).
+#[derive(Debug, Clone)]
+pub struct KEvent {
+    pub ident: u32,
+    pub filter: i16,
+    pub flags: u16,
+    pub fflags: u32,
+    pub data: i32,
+    pub udata: u32,
+    /// For timers: when the timer fires next.
+    pub next_fire: Option<std::time::Instant>,
 }
 
 /// Fill `buf` with pseudo-random bytes (xorshift64*, seeded from the clock).
@@ -428,7 +457,11 @@ impl GuestFile {
     pub fn sync_all(&self) -> std::io::Result<()> {
         match self {
             GuestFile::File(file) => file.sync_all(),
-            GuestFile::IpaBundleFile(_) | GuestFile::ResourceFile(_) | GuestFile::RandomDevice => Ok(()),
+            GuestFile::IpaBundleFile(_)
+            | GuestFile::ResourceFile(_)
+            | GuestFile::RandomDevice
+            | GuestFile::Pipe { .. }
+            | GuestFile::Kqueue(_) => Ok(()),
             GuestFile::Directory => {
                 log!("Warning: syncing directory as a guest file.");
                 Ok(())
@@ -464,7 +497,10 @@ impl GuestFile {
     pub fn is_seekable(&self) -> bool {
         // Due to legacy directory iteration support, directories are seekable
         // https://stackoverflow.com/questions/65911066/what-does-lseek-mean-for-a-directory-file-descriptor
-        !matches!(self, GuestFile::Socket)
+        !matches!(
+            self,
+            GuestFile::Socket | GuestFile::Pipe { .. } | GuestFile::Kqueue(_)
+        )
     }
 }
 
@@ -478,6 +514,28 @@ impl Read for GuestFile {
                 fill_random(buf);
                 Ok(buf.len())
             }
+            GuestFile::Pipe {
+                buffer,
+                is_write_end: false,
+            } => {
+                let mut pipe = buffer.lock().unwrap();
+                if pipe.data.is_empty() {
+                    return if pipe.write_end_closed {
+                        Ok(0)
+                    } else {
+                        Err(std::io::ErrorKind::WouldBlock.into())
+                    };
+                }
+                let count = buf.len().min(pipe.data.len());
+                for byte in buf.iter_mut().take(count) {
+                    *byte = pipe.data.pop_front().unwrap();
+                }
+                Ok(count)
+            }
+            GuestFile::Pipe { .. } | GuestFile::Kqueue(_) => Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "Attempt to read from a file that cannot be read",
+            )),
             GuestFile::Directory => Err(std::io::Error::new(
                 std::io::ErrorKind::IsADirectory,
                 "Attempt to read from a directory as a guest file",
@@ -499,6 +557,21 @@ impl Write for GuestFile {
             }
             GuestFile::Directory => panic!("Attempt to write to a directory as a guest file"),
             GuestFile::RandomDevice => Ok(buf.len()),
+            GuestFile::Pipe {
+                buffer,
+                is_write_end: true,
+            } => {
+                let mut pipe = buffer.lock().unwrap();
+                if pipe.read_end_closed {
+                    return Err(std::io::ErrorKind::BrokenPipe.into());
+                }
+                pipe.data.extend(buf.iter().copied());
+                Ok(buf.len())
+            }
+            GuestFile::Pipe { .. } | GuestFile::Kqueue(_) => Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "Attempt to write to a file that cannot be written",
+            )),
             _ => unimplemented!(),
         }
     }
@@ -514,7 +587,7 @@ impl Write for GuestFile {
                 panic!("Attempt to flush a read-only file: {file:?}")
             }
             GuestFile::Directory => panic!("Attempt to flush a directory as a guest file"),
-            GuestFile::RandomDevice => Ok(()),
+            GuestFile::RandomDevice | GuestFile::Pipe { .. } | GuestFile::Kqueue(_) => Ok(()),
             _ => unimplemented!(),
         }
     }
@@ -527,6 +600,10 @@ impl Seek for GuestFile {
             GuestFile::IpaBundleFile(file) => file.seek(pos),
             GuestFile::ResourceFile(file) => file.get().seek(pos),
             GuestFile::RandomDevice => Ok(0),
+            GuestFile::Pipe { .. } | GuestFile::Kqueue(_) => Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "Attempt to seek a pipe or kqueue",
+            )),
             GuestFile::Directory => {
                 // Note: directories as supposed to be seekable on iOS! https://stackoverflow.com/questions/65911066/what-does-lseek-mean-for-a-directory-file-descriptor
                 // As far as I can (f)tell, apps are really not using that

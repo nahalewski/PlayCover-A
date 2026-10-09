@@ -21,8 +21,9 @@ use crate::frameworks::foundation::ns_thread::detach_new_thread_inner;
 use crate::libc::semaphore::{host_destroy_semaphore, sem_wait};
 use crate::mem::MutVoidPtr;
 use crate::objc::{
-    autorelease, id, msg, msg_class, msg_send, msg_send_no_type_checking, nil, objc_classes,
-    retain, Class, ClassExports, NSZonePtr, ObjC, TrivialHostObject, SEL,
+    autorelease, class_getMethodImplementation, id, msg, msg_class, msg_send,
+    msg_send_no_type_checking, nil, objc_classes, retain, Class, ClassExports, NSZonePtr, ObjC,
+    TrivialHostObject, IMP, SEL,
 };
 
 pub const CLASSES: ClassExports = objc_classes! {
@@ -45,6 +46,10 @@ pub const CLASSES: ClassExports = objc_classes! {
 + (id)new {
     let new_object: id = msg![env; this alloc];
     msg![env; new_object init]
+}
+
++ (IMP)instanceMethodForSelector:(SEL)selector {
+    class_getMethodImplementation(env, this, selector)
 }
 
 + (Class)class {
@@ -272,6 +277,14 @@ forUndefinedKey:(id)key { // NSString*
 
 - (bool)respondsToSelector:(SEL)selector {
     env.objc.object_has_method(&env.mem, this, selector)
+}
+
+// Returns the implementation that `-performSelector:` would run, for callers
+// that cache it and call it directly.
+// TODO: unknown selectors should give the message forwarding IMP, not NULL.
+- (IMP)methodForSelector:(SEL)selector {
+    let class: Class = ObjC::read_isa(this, &env.mem);
+    class_getMethodImplementation(env, class, selector)
 }
 
 - (id)performSelector:(SEL)sel {

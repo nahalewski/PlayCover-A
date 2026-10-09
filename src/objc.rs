@@ -34,6 +34,7 @@ mod selectors;
 mod synchronization;
 
 pub use classes::{install_skipped_method, objc_classes, Class, ClassExports, ClassTemplate};
+pub(crate) use classes::class_getMethodImplementation;
 pub use messages::{
     autorelease, msg, msg_class, msg_send, msg_send_no_initialize, msg_send_no_type_checking,
     msg_send_super2, msg_super, objc_super, release, retain,
@@ -49,7 +50,7 @@ use crate::mem::ConstVoidPtr;
 use crate::Environment;
 use classes::{
     class_addMethod, class_conformsToProtocol, class_getClassMethod, class_getInstanceMethod, class_getInstanceSize,
-    class_getMethodImplementation, class_getName, class_getProperty, class_getSuperclass,
+    class_getName, class_getProperty, class_getSuperclass,
     class_replaceMethod, method_exchangeImplementations, method_getImplementation,
     method_setImplementation, objc_copyClassList, objc_enumerationMutation, objc_getClass, objc_getClassList, objc_lookUpClass,
     ClassHostObject, FakeClass, UnimplementedClass,

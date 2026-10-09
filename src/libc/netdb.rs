@@ -48,10 +48,40 @@ pub struct addrinfo {
 }
 unsafe impl SafeRead for addrinfo {}
 
+const AI_CANONNAME: i32 = 0x2;
+const AI_NUMERICHOST: i32 = 0x4;
+
+const AF_UNSPEC: i32 = 0;
+
+const EAI_FAMILY: i32 = 5;
+const EAI_NONAME: i32 = 8;
+const EAI_SERVICE: i32 = 9;
+
+/// Port for a service name or number string.
+fn service_port(service: &str) -> Option<u16> {
+    if let Ok(port) = service.parse::<u16>() {
+        return Some(port);
+    }
+    // A few well-known names, which is what /etc/services would provide.
+    Some(match service {
+        "ftp" => 21,
+        "ssh" => 22,
+        "telnet" => 23,
+        "smtp" => 25,
+        "domain" => 53,
+        "http" => 80,
+        "pop3" => 110,
+        "ntp" => 123,
+        "imap" => 143,
+        "https" => 443,
+        _ => return None,
+    })
+}
+
 fn getaddrinfo(
     env: &mut Environment,
-    node_name: MutPtr<u8>,
-    serv_name: MutPtr<u8>,
+    node_name: ConstPtr<u8>,
+    serv_name: ConstPtr<u8>,
     hints: ConstPtr<addrinfo>,
     res: MutPtr<MutPtr<addrinfo>>,
 ) -> i32 {
@@ -66,45 +96,128 @@ fn getaddrinfo(
         return EAI_FAIL;
     }
 
-    assert!(node_name.is_null()); // TODO
+    let (ai_flags, ai_family, ai_socktype, ai_protocol) = if hints.is_null() {
+        (0, AF_UNSPEC, 0, 0)
+    } else {
+        let hint = env.mem.read(hints);
+        (
+            hint.ai_flags,
+            hint.ai_family,
+            hint.ai_socktype,
+            hint.ai_protocol,
+        )
+    };
+    if ai_family != AF_UNSPEC && ai_family != AF_INET {
+        // Only IPv4 is supported.
+        return EAI_FAMILY;
+    }
+    if node_name.is_null() && serv_name.is_null() {
+        return EAI_NONAME;
+    }
 
-    let hint = env.mem.read(hints);
-    let ai_flags = hint.ai_flags;
-    assert_eq!(ai_flags, AI_PASSIVE);
-    let ai_family = hint.ai_family;
-    assert_eq!(ai_family, AF_INET);
-    assert!(hint.ai_socktype == SOCK_STREAM || hint.ai_socktype == SOCK_DGRAM);
-    assert!(
-        hint.ai_protocol == IPPROTO_TCP || hint.ai_protocol == IPPROTO_UDP || hint.ai_protocol == 0
-    );
-    let ai_addrlen = hint.ai_addrlen;
-    assert_eq!(ai_addrlen, 0);
-    assert!(hint.ai_canonname.is_null());
-    assert!(hint.ai_addr.is_null());
-    assert!(hint.ai_next.is_null());
+    let port = if serv_name.is_null() {
+        0
+    } else {
+        let service = env.mem.cstr_at_utf8(serv_name).unwrap().to_string();
+        match service_port(&service) {
+            Some(port) => port,
+            None => return EAI_SERVICE,
+        }
+    };
 
-    let mut addr_info = hint;
-    let port: u16 = env.mem.cstr_at_utf8(serv_name).unwrap().parse().unwrap();
-    log_dbg!("getaddrinfo: port {}", port);
-    let addr = sockaddr::from_ipv4_parts([0; 4], port);
+    // The addresses to return (IPv4 only) and the name for AI_CANONNAME.
+    let (addresses, canonical_name): (Vec<[u8; 4]>, Option<String>) = if node_name.is_null() {
+        // No host: the loopback address, or the wildcard address for servers.
+        let octets = if ai_flags & AI_PASSIVE != 0 {
+            [0, 0, 0, 0]
+        } else {
+            [127, 0, 0, 1]
+        };
+        (vec![octets], None)
+    } else {
+        let host = env.mem.cstr_at_utf8(node_name).unwrap().to_string();
+        use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
+        if let Ok(literal) = host.parse::<Ipv4Addr>() {
+            (vec![literal.octets()], Some(host))
+        } else if ai_flags & AI_NUMERICHOST != 0 {
+            return EAI_NONAME;
+        } else {
+            let resolved = (host.as_str(), port).to_socket_addrs();
+            let mut addresses: Vec<[u8; 4]> = Vec::new();
+            if let Ok(found) = resolved {
+                for found in found {
+                    if let IpAddr::V4(v4) = found.ip() {
+                        if !addresses.contains(&v4.octets()) {
+                            addresses.push(v4.octets());
+                        }
+                    }
+                }
+            }
+            if addresses.is_empty() {
+                log!("getaddrinfo(\"{}\") => EAI_NONAME (lookup failed)", host);
+                return EAI_NONAME;
+            }
+            log!("getaddrinfo(\"{}\") => {:?}", host, addresses);
+            (addresses, Some(host))
+        }
+    };
 
-    let tmp_addr = env.mem.alloc_and_write(addr);
-    addr_info.ai_addr = tmp_addr;
-    addr_info.ai_addrlen = guest_size_of::<sockaddr>();
-
-    let tmp_addr_info = env.mem.alloc_and_write(addr_info);
-    env.mem.write(res, tmp_addr_info);
-
+    // One entry per address and socket type.
+    let socket_types: Vec<(i32, i32)> = match ai_socktype {
+        0 => vec![(SOCK_STREAM, IPPROTO_TCP), (SOCK_DGRAM, IPPROTO_UDP)],
+        SOCK_STREAM => vec![(SOCK_STREAM, if ai_protocol != 0 { ai_protocol } else { IPPROTO_TCP })],
+        SOCK_DGRAM => vec![(SOCK_DGRAM, if ai_protocol != 0 { ai_protocol } else { IPPROTO_UDP })],
+        _ => return EAI_NONAME,
+    };
+    let mut head: MutPtr<addrinfo> = Ptr::null();
+    let mut tail: MutPtr<addrinfo> = Ptr::null();
+    let mut first = true;
+    for octets in addresses {
+        for &(socktype, protocol) in &socket_types {
+            let sockaddr_ptr = env.mem.alloc_and_write(sockaddr::from_ipv4_parts(octets, port));
+            let canonname = match (&canonical_name, first && ai_flags & AI_CANONNAME != 0) {
+                (Some(name), true) => env.mem.alloc_and_write_cstr(name.as_bytes()),
+                _ => Ptr::null(),
+            };
+            first = false;
+            let entry = env.mem.alloc_and_write(addrinfo {
+                ai_flags: 0,
+                ai_family: AF_INET,
+                ai_socktype: socktype,
+                ai_protocol: protocol,
+                ai_addrlen: guest_size_of::<sockaddr>(),
+                ai_canonname: canonname,
+                ai_addr: sockaddr_ptr,
+                ai_next: Ptr::null(),
+            });
+            if head.is_null() {
+                head = entry;
+            } else {
+                let mut previous = env.mem.read(tail);
+                previous.ai_next = entry;
+                env.mem.write(tail, previous);
+            }
+            tail = entry;
+        }
+    }
+    env.mem.write(res, head);
     0 // Success
 }
 
 fn freeaddrinfo(env: &mut Environment, addrinfo: MutPtr<addrinfo>) {
-    let addrinfo_val = env.mem.read(addrinfo);
-    assert!(addrinfo_val.ai_next.is_null()); // TODO
-    let ai_addrlen = addrinfo_val.ai_addrlen;
-    assert_eq!(ai_addrlen, guest_size_of::<sockaddr>());
-    env.mem.free(addrinfo_val.ai_addr.cast());
-    env.mem.free(addrinfo.cast());
+    let mut node = addrinfo;
+    while !node.is_null() {
+        let value = env.mem.read(node);
+        let next = value.ai_next;
+        if !value.ai_addr.is_null() {
+            env.mem.free(value.ai_addr.cast());
+        }
+        if !value.ai_canonname.is_null() {
+            env.mem.free(value.ai_canonname.cast());
+        }
+        env.mem.free(node.cast());
+        node = next;
+    }
 }
 
 fn gethostbyname(env: &mut Environment, name: ConstPtr<u8>) -> MutPtr<hostent> {

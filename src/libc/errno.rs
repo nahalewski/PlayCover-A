@@ -29,6 +29,7 @@ pub const ENOTDIR: i32 = 20;
 pub const EISDIR: i32 = 21;
 pub const EINVAL: i32 = 22;
 pub const ESPIPE: i32 = 29;
+pub const EPIPE: i32 = 32;
 pub const EROFS: i32 = 30;
 pub const EAGAIN: i32 = 35;
 pub const EPROTONOSUPPORT: i32 = 43;
@@ -180,8 +181,28 @@ fn strerror(env: &mut Environment, err_num: i32) -> ConstPtr<u8> {
     }
 }
 
+/// Thread-safe `strerror()`: copies the message into the caller's buffer.
+/// Returns 0, or `ERANGE` if the buffer is too small (the message is truncated).
+fn strerror_r(env: &mut Environment, err_num: i32, buf: MutPtr<u8>, buf_len: u32) -> i32 {
+    let message = strerror(env, err_num);
+    let text = env.mem.cstr_at(message).to_vec();
+    if buf.is_null() || buf_len == 0 {
+        return 34; // ERANGE
+    }
+    let copy_len = text.len().min(buf_len as usize - 1);
+    let dest = env.mem.bytes_at_mut(buf, copy_len as u32 + 1);
+    dest[..copy_len].copy_from_slice(&text[..copy_len]);
+    dest[copy_len] = 0;
+    if copy_len < text.len() {
+        34 // ERANGE
+    } else {
+        0
+    }
+}
+
 pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(__error()),
     export_c_func!(perror(_)),
     export_c_func!(strerror(_)),
+    export_c_func!(strerror_r(_, _, _)),
 ];
