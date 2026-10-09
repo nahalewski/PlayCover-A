@@ -45,6 +45,7 @@ public class MainActivity extends SDLActivity {
             finish();
             return;
         }
+        hideSystemBars();
         int rotation = getWindowManager().getDefaultDisplay().getRotation();
         boolean portrait = getResources().getConfiguration().orientation ==
             android.content.res.Configuration.ORIENTATION_PORTRAIT;
@@ -59,6 +60,63 @@ public class MainActivity extends SDLActivity {
 
     private int dp(int value) {
         return Math.round(value * getResources().getDisplayMetrics().density);
+    }
+
+    /**
+     * Immersive full-screen mode: hides the status bar and the navigation bar.
+     * A swipe from the screen edge shows them temporarily and they hide again.
+     */
+    private void hideSystemBars() {
+        android.view.Window window = getWindow();
+        if (window == null) return;
+        // SDL sets this when its (non-fullscreen) window is created.
+        window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_FORCE_NOT_FULLSCREEN);
+        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_FULLSCREEN);
+        if (android.os.Build.VERSION.SDK_INT >= 28) {
+            android.view.WindowManager.LayoutParams attributes = window.getAttributes();
+            attributes.layoutInDisplayCutoutMode =
+                android.view.WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+            window.setAttributes(attributes);
+        }
+        if (android.os.Build.VERSION.SDK_INT >= 30) {
+            window.setDecorFitsSystemWindows(false);
+            android.view.WindowInsetsController controller = window.getInsetsController();
+            if (controller != null) {
+                controller.hide(android.view.WindowInsets.Type.statusBars()
+                    | android.view.WindowInsets.Type.navigationBars());
+                controller.setSystemBarsBehavior(
+                    android.view.WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+            }
+        } else {
+            window.getDecorView().setSystemUiVisibility(
+                android.view.View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                | android.view.View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                | android.view.View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                | android.view.View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                | android.view.View.SYSTEM_UI_FLAG_FULLSCREEN
+                | android.view.View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
+        }
+    }
+
+    /**
+     * SDL resets the window style to "bars visible" when it creates its
+     * window, and a swipe from the edge shows the bars: hide them again.
+     */
+    @Override
+    public void onSystemUiVisibilityChange(int visibility) {
+        super.onSystemUiVisibilityChange(visibility);
+        boolean barsHidden = (visibility & android.view.View.SYSTEM_UI_FLAG_FULLSCREEN) != 0
+            && (visibility & android.view.View.SYSTEM_UI_FLAG_HIDE_NAVIGATION) != 0;
+        if (!barsHidden) {
+            getWindow().getDecorView().post(this::hideSystemBars);
+        }
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        // Bars come back after dialogs, the keyboard or the app switcher.
+        if (hasFocus) hideSystemBars();
     }
 
     /** Android overlay, outside the emulated app's view hierarchy. */
