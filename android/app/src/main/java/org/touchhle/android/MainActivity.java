@@ -56,6 +56,48 @@ public class MainActivity extends SDLActivity {
             new WebOverlay(this, mLayout);
             new MovieOverlay(this, mLayout);
             new AlertOverlay(this, mLayout);
+            fpsOverlay = new FpsOverlay(this, mLayout);
+        }
+        loadGameSettings(path);
+    }
+
+    // ---- Per-game settings ----
+
+    private GameSettings gameSettings;
+    private FpsOverlay fpsOverlay;
+    private boolean menuWanted;
+    /** Values the emulator was started with: changing these needs a restart. */
+    private int startedScale, startedFpsLimit;
+
+    /** The bundle id needs the IPA to be read: do it off the UI thread. */
+    private void loadGameSettings(String path) {
+        new Thread(() -> {
+            String id = GameSettings.resolveBundleId(this, path);
+            GameSettings settings = GameSettings.load(this, id);
+            runOnUiThread(() -> {
+                if (isFinishing() || isDestroyed()) return;
+                gameSettings = settings;
+                startedScale = settings.scale;
+                startedFpsLimit = settings.fpsLimit;
+                if (settings.manualOrientation >= 0) {
+                    manualOrientation = settings.manualOrientation;
+                    matchDeviceRotation = false;
+                    applyManualOrientation();
+                }
+                if (fpsOverlay != null) fpsOverlay.setEnabled(settings.fpsCounter);
+                applyMenuButtonStyle();
+                // The emulator skips the first command it sees (it may be left
+                // over from an earlier run); send the current state now so later
+                // changes from the menu are not the ones skipped.
+                settings.sendLiveCommand();
+                if (menuWanted) { menuWanted = false; showIPAMenu(); }
+            });
+        }, "Anastasis-game-settings").start();
+    }
+
+    private void applyMenuButtonStyle() {
+        if (ipaMenuButton != null && gameSettings != null) {
+            ipaMenuButton.setAlpha(gameSettings.fadedMenuButton ? 0.35f : 1f);
         }
     }
 
@@ -162,87 +204,378 @@ public class MainActivity extends SDLActivity {
     /** Manual orientation: -1 = automatic, else 0 portrait, 1/3 landscape, 2 upside down. */
     private int manualOrientation = -1;
 
+    // Material 3 (dark) tonal palette, drawn by hand: no Material library here.
+    private static final int M3_SURFACE = 0xD92B2930; // ~85% opaque
+    private static final int M3_ON_SURFACE = 0xFFE6E0E9;
+    private static final int M3_ON_SURFACE_VARIANT = 0xFFCAC4D0;
+    private static final int M3_PRIMARY = 0xFFD0BCFF;
+    private static final int M3_ON_PRIMARY = 0xFF381E72;
+    private static final int M3_OUTLINE = 0xFF938F99;
+    private static final int M3_OUTLINE_VARIANT = 0x6649454F;
+    private static final int M3_SECONDARY_CONTAINER = 0xFF4A4458;
+    private static final int M3_ON_SECONDARY_CONTAINER = 0xFFE8DEF8;
+    private static final int M3_ERROR = 0xFFF2B8B5;
+
+    private android.app.Dialog menuDialog;
+
+    private interface Choice { void chosen(int index); }
+    private interface Toggle { void toggled(boolean on); }
+
+    /** Lays out its children left to right, wrapping into more rows. */
+    private static final class FlowLayout extends android.view.ViewGroup {
+        private final int gap;
+        FlowLayout(android.content.Context context, int gap) { super(context); this.gap = gap; }
+
+        @Override protected void onMeasure(int widthSpec, int heightSpec) {
+            int maxWidth = MeasureSpec.getSize(widthSpec);
+            boolean bounded = MeasureSpec.getMode(widthSpec) != MeasureSpec.UNSPECIFIED;
+            int x = 0, y = 0, rowHeight = 0, widest = 0;
+            for (int i = 0; i < getChildCount(); i++) {
+                android.view.View child = getChildAt(i);
+                if (child.getVisibility() == GONE) continue;
+                child.measure(MeasureSpec.makeMeasureSpec(maxWidth, MeasureSpec.AT_MOST),
+                    MeasureSpec.makeMeasureSpec(0, MeasureSpec.UNSPECIFIED));
+                int w = child.getMeasuredWidth(), h = child.getMeasuredHeight();
+                if (bounded && x > 0 && x + w > maxWidth) { x = 0; y += rowHeight + gap; rowHeight = 0; }
+                x += w + gap;
+                widest = Math.max(widest, x - gap);
+                rowHeight = Math.max(rowHeight, h);
+            }
+            setMeasuredDimension(bounded ? maxWidth : widest, y + rowHeight);
+        }
+
+        @Override protected void onLayout(boolean changed, int l, int t, int r, int b) {
+            int maxWidth = r - l;
+            int x = 0, y = 0, rowHeight = 0;
+            for (int i = 0; i < getChildCount(); i++) {
+                android.view.View child = getChildAt(i);
+                if (child.getVisibility() == GONE) continue;
+                int w = child.getMeasuredWidth(), h = child.getMeasuredHeight();
+                if (x > 0 && x + w > maxWidth) { x = 0; y += rowHeight + gap; rowHeight = 0; }
+                child.layout(x, y, x + w, y + h);
+                x += w + gap;
+                rowHeight = Math.max(rowHeight, h);
+            }
+        }
+    }
+
+    private android.widget.TextView text(String value, int color, float size) {
+        android.widget.TextView view = new android.widget.TextView(this);
+        view.setText(value);
+        view.setTextColor(color);
+        view.setTextSize(size);
+        return view;
+    }
+
+    private static android.graphics.drawable.Drawable ripple(android.graphics.drawable.GradientDrawable shape) {
+        return new android.graphics.drawable.RippleDrawable(
+            android.content.res.ColorStateList.valueOf(android.graphics.Color.argb(0x33, 0xD0, 0xBC, 0xFF)), shape, null);
+    }
+
+    private void styleChip(android.widget.TextView chip, String label, boolean selected) {
+        chip.setText(selected ? "✓  " + label : label);
+        chip.setTextColor(selected ? M3_ON_SECONDARY_CONTAINER : M3_ON_SURFACE);
+        android.graphics.drawable.GradientDrawable shape = new android.graphics.drawable.GradientDrawable();
+        shape.setCornerRadius(dp(8));
+        if (selected) {
+            shape.setColor(M3_SECONDARY_CONTAINER);
+        } else {
+            shape.setColor(android.graphics.Color.TRANSPARENT);
+            shape.setStroke(Math.max(1, dp(1)), M3_OUTLINE);
+        }
+        chip.setBackground(ripple(shape));
+        chip.setSelected(selected);
+    }
+
+    /** Single-choice filter chips; selected < 0 selects none. */
+    private android.view.View chipGroup(String[] labels, int selected, Choice choice) {
+        FlowLayout group = new FlowLayout(this, dp(8));
+        android.widget.TextView[] chips = new android.widget.TextView[labels.length];
+        for (int i = 0; i < labels.length; i++) {
+            final int index = i;
+            android.widget.TextView chip = text(labels[i], M3_ON_SURFACE, 14);
+            chip.setGravity(android.view.Gravity.CENTER);
+            chip.setMinHeight(dp(36));
+            chip.setPadding(dp(14), 0, dp(14), 0);
+            styleChip(chip, labels[i], i == selected);
+            chip.setOnClickListener(v -> {
+                for (int j = 0; j < chips.length; j++) styleChip(chips[j], labels[j], j == index);
+                choice.chosen(index);
+            });
+            chips[i] = chip;
+            group.addView(chip, new android.view.ViewGroup.LayoutParams(
+                android.view.ViewGroup.LayoutParams.WRAP_CONTENT, dp(36)));
+        }
+        return group;
+    }
+
+    private android.view.View toggleRow(String label, boolean on, Toggle toggle) {
+        android.widget.LinearLayout row = new android.widget.LinearLayout(this);
+        row.setOrientation(android.widget.LinearLayout.HORIZONTAL);
+        row.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        row.setMinimumHeight(dp(40));
+        android.widget.TextView name = text(label, M3_ON_SURFACE, 15);
+        row.addView(name, new android.widget.LinearLayout.LayoutParams(0,
+            android.view.ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        // Material 3 switch, drawn by hand (the platform Switch looks different
+        // on every vendor theme, and is just "ON"/"OFF" text on some).
+        android.widget.FrameLayout track = new android.widget.FrameLayout(this);
+        android.view.View thumb = new android.view.View(this);
+        track.addView(thumb);
+        final boolean[] state = {on};
+        final Runnable paint = () -> {
+            boolean checked = state[0];
+            android.graphics.drawable.GradientDrawable trackShape = new android.graphics.drawable.GradientDrawable();
+            trackShape.setCornerRadius(dp(16));
+            trackShape.setColor(checked ? M3_PRIMARY : 0xFF36343B);
+            if (!checked) trackShape.setStroke(dp(2), M3_OUTLINE);
+            track.setBackground(trackShape);
+            android.graphics.drawable.GradientDrawable thumbShape = new android.graphics.drawable.GradientDrawable();
+            thumbShape.setShape(android.graphics.drawable.GradientDrawable.OVAL);
+            thumbShape.setColor(checked ? M3_ON_PRIMARY : M3_OUTLINE);
+            thumb.setBackground(thumbShape);
+            int size = checked ? dp(24) : dp(16);
+            android.widget.FrameLayout.LayoutParams p = new android.widget.FrameLayout.LayoutParams(size, size,
+                android.view.Gravity.CENTER_VERTICAL | (checked ? android.view.Gravity.END : android.view.Gravity.START));
+            p.leftMargin = p.rightMargin = checked ? dp(4) : dp(8);
+            thumb.setLayoutParams(p);
+            track.setContentDescription(label + (checked ? ", on" : ", off"));
+        };
+        paint.run();
+        row.addView(track, new android.widget.LinearLayout.LayoutParams(dp(52), dp(32)));
+        row.setOnClickListener(v -> {
+            state[0] = !state[0];
+            paint.run();
+            toggle.toggled(state[0]);
+        });
+        track.setOnClickListener(v -> row.performClick());
+        return row;
+    }
+
+    /** A titled group of controls; wide menus put the title beside them. */
+    private void addSection(android.widget.LinearLayout body, boolean wide, String title, String note,
+                            android.view.View... controls) {
+        if (body.getChildCount() > 0) {
+            android.view.View divider = new android.view.View(this);
+            divider.setBackgroundColor(M3_OUTLINE_VARIANT);
+            android.widget.LinearLayout.LayoutParams p = new android.widget.LinearLayout.LayoutParams(
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT, Math.max(1, dp(1)));
+            p.setMargins(dp(16), dp(10), dp(16), dp(10));
+            body.addView(divider, p);
+        }
+        android.widget.LinearLayout section = new android.widget.LinearLayout(this);
+        section.setOrientation(wide ? android.widget.LinearLayout.HORIZONTAL : android.widget.LinearLayout.VERTICAL);
+        section.setPadding(dp(16), 0, dp(16), 0);
+        android.widget.TextView label = text(title, M3_PRIMARY, 14);
+        label.setTypeface(android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL));
+        label.setPadding(0, wide ? dp(9) : 0, dp(8), wide ? 0 : dp(8));
+        section.addView(label, wide
+            ? new android.widget.LinearLayout.LayoutParams(dp(120), android.view.ViewGroup.LayoutParams.WRAP_CONTENT)
+            : new android.widget.LinearLayout.LayoutParams(android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                android.view.ViewGroup.LayoutParams.WRAP_CONTENT));
+        android.widget.LinearLayout column = new android.widget.LinearLayout(this);
+        column.setOrientation(android.widget.LinearLayout.VERTICAL);
+        for (android.view.View control : controls) {
+            android.widget.LinearLayout.LayoutParams p = new android.widget.LinearLayout.LayoutParams(
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT, android.view.ViewGroup.LayoutParams.WRAP_CONTENT);
+            if (column.getChildCount() > 0) p.topMargin = dp(6);
+            column.addView(control, p);
+        }
+        if (note != null) {
+            android.widget.TextView hint = text(note, M3_ON_SURFACE_VARIANT, 12);
+            hint.setPadding(0, dp(6), 0, 0);
+            column.addView(hint);
+        }
+        section.addView(column, wide
+            ? new android.widget.LinearLayout.LayoutParams(0, android.view.ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            : new android.widget.LinearLayout.LayoutParams(android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                android.view.ViewGroup.LayoutParams.WRAP_CONTENT));
+        body.addView(section);
+    }
+
+    private static int indexOf(int[] values, int value) {
+        for (int i = 0; i < values.length; i++) if (values[i] == value) return i;
+        return -1;
+    }
+
     private void showIPAMenu() {
-        String[] names = {"Automatic (follow device)", "Portrait", "Landscape (left)", "Landscape (right)", "Portrait upside down"};
-        int[] values = {-1, 0, 3, 1, 2};
-        int checked = 0;
-        for (int i = 0; i < values.length; i++) if (values[i] == manualOrientation) checked = i;
-        // Material 3 (dark) tonal palette, drawn by hand: no Material library here.
-        final int surface = android.graphics.Color.argb(0xD9, 0x2B, 0x29, 0x30); // ~85% opaque
-        final int onSurface = 0xFFE6E0E9;
-        final int onSurfaceVariant = 0xFFCAC4D0;
-        final int primary = 0xFFD0BCFF;
-        final int selectedContainer = android.graphics.Color.argb(0xCC, 0x4A, 0x44, 0x58);
-        final int error = 0xFFF2B8B5;
+        if (gameSettings == null) {
+            // Still reading the game's bundle id; open as soon as it is known.
+            menuWanted = true;
+            android.widget.Toast.makeText(this, "Loading game settings…", android.widget.Toast.LENGTH_SHORT).show();
+            return;
+        }
+        if (menuDialog != null && menuDialog.isShowing()) return;
+        final GameSettings s = gameSettings;
+        android.util.DisplayMetrics metrics = getResources().getDisplayMetrics();
+        final int width = Math.min(dp(640), metrics.widthPixels - dp(32));
+        final boolean wide = width >= dp(480);
+        final int maxHeight = Math.round(metrics.heightPixels * 0.92f);
 
         android.app.Dialog dialog = new android.app.Dialog(this, android.R.style.Theme_DeviceDefault_Dialog_NoActionBar);
+        menuDialog = dialog;
         android.widget.LinearLayout panel = new android.widget.LinearLayout(this);
         panel.setOrientation(android.widget.LinearLayout.VERTICAL);
-        panel.setPadding(dp(8), dp(20), dp(8), dp(12));
+        panel.setPadding(dp(8), dp(18), dp(8), dp(10));
         android.graphics.drawable.GradientDrawable panelBg = new android.graphics.drawable.GradientDrawable();
-        panelBg.setColor(surface);
+        panelBg.setColor(M3_SURFACE);
         panelBg.setCornerRadius(dp(28));
         panel.setBackground(panelBg);
 
-        android.widget.TextView title = new android.widget.TextView(this);
-        title.setText("Screen orientation");
-        title.setTextColor(onSurface);
-        title.setTextSize(22);
-        title.setPadding(dp(16), 0, dp(16), dp(4));
+        android.widget.TextView title = text("Game settings", M3_ON_SURFACE, 22);
+        title.setPadding(dp(16), 0, dp(16), dp(2));
         panel.addView(title);
-        android.widget.TextView subtitle = new android.widget.TextView(this);
-        subtitle.setText("For games that don't rotate by themselves");
-        subtitle.setTextColor(onSurfaceVariant);
-        subtitle.setTextSize(14);
-        subtitle.setPadding(dp(16), 0, dp(16), dp(12));
+        android.widget.TextView subtitle = text("Saved for " + s.bundleId, M3_ON_SURFACE_VARIANT, 13);
+        subtitle.setSingleLine(true);
+        subtitle.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
+        subtitle.setPadding(dp(16), 0, dp(16), dp(10));
         panel.addView(subtitle);
 
-        for (int i = 0; i < names.length; i++) {
-            final int value = values[i];
-            final boolean selected = (i == checked);
-            android.widget.TextView row = new android.widget.TextView(this);
-            row.setText((selected ? "✓  " : "     ") + names[i]);
-            row.setTextSize(16);
-            row.setTextColor(selected ? primary : onSurface);
-            row.setGravity(android.view.Gravity.CENTER_VERTICAL);
-            row.setPadding(dp(16), 0, dp(16), 0);
-            android.graphics.drawable.GradientDrawable rowBg = new android.graphics.drawable.GradientDrawable();
-            rowBg.setCornerRadius(dp(28));
-            rowBg.setColor(selected ? selectedContainer : android.graphics.Color.TRANSPARENT);
-            row.setBackground(new android.graphics.drawable.RippleDrawable(
-                android.content.res.ColorStateList.valueOf(android.graphics.Color.argb(0x33, 0xD0, 0xBC, 0xFF)), rowBg, null));
-            row.setOnClickListener(v -> {
-                manualOrientation = value;
-                matchDeviceRotation = manualOrientation < 0;
-                applyManualOrientation();
-                dialog.dismiss();
-            });
-            android.widget.LinearLayout.LayoutParams rowParams =
-                new android.widget.LinearLayout.LayoutParams(android.view.ViewGroup.LayoutParams.MATCH_PARENT, dp(52));
-            rowParams.setMargins(dp(8), dp(2), dp(8), dp(2));
-            panel.addView(row, rowParams);
-        }
+        android.widget.LinearLayout body = new android.widget.LinearLayout(this);
+        body.setOrientation(android.widget.LinearLayout.VERTICAL);
+        body.setPadding(0, dp(4), 0, dp(8));
+
+        // Footer pieces first: settings that need a restart update them.
+        android.widget.TextView restartNote = text("Restart to apply resolution / FPS limit", M3_ON_SURFACE_VARIANT, 12);
+        android.widget.TextView restart = menuButton("Restart game", M3_ON_PRIMARY);
+        android.graphics.drawable.GradientDrawable restartShape = new android.graphics.drawable.GradientDrawable();
+        restartShape.setCornerRadius(dp(20));
+        restartShape.setColor(M3_PRIMARY);
+        restart.setBackground(ripple(restartShape));
+        final Runnable updateRestart = () -> {
+            boolean pending = s.scale != startedScale || s.fpsLimit != startedFpsLimit;
+            restart.setVisibility(pending ? android.view.View.VISIBLE : android.view.View.GONE);
+            restartNote.setVisibility(pending && wide ? android.view.View.VISIBLE : android.view.View.GONE);
+        };
+
+        // 1. View
+        final String[] views = {GameSettings.VIEW_DEFAULT, GameSettings.VIEW_STRETCH, GameSettings.VIEW_BLUR, GameSettings.VIEW_16_9};
+        int viewIndex = java.util.Arrays.asList(views).indexOf(s.view);
+        addSection(body, wide, "View", "Generated keeps the picture sharp and fills the sides",
+            chipGroup(new String[]{"Default", "Widescreen", "Widescreen generated", "16:9"}, viewIndex, i -> {
+                s.view = views[i];
+                s.saveOptions();
+                s.sendLiveCommand();
+            }));
+
+        // 2. Rotation
+        final int[] rotations = {-1, 0, 3, 1, 2};
+        addSection(body, wide, "Rotation", null,
+            chipGroup(new String[]{"Automatic", "Portrait", "Landscape left", "Landscape right", "Upside down"},
+                Math.max(0, indexOf(rotations, manualOrientation)), i -> {
+                    manualOrientation = rotations[i];
+                    matchDeviceRotation = manualOrientation < 0;
+                    s.manualOrientation = manualOrientation;
+                    s.savePrefs();
+                    applyManualOrientation();
+                }));
+
+        // 3. Network
+        addSection(body, wide, "Network", null,
+            chipGroup(new String[]{"On (default)", "Off"}, s.network ? 0 : 1, i -> {
+                s.network = i == 0;
+                s.saveOptions();
+                s.sendLiveCommand();
+            }));
+
+        // 4. Resolution upscaler
+        final int[] scales = {1, 2, 3, 4};
+        addSection(body, wide, "Resolution", "Internal render scale · applies after a restart",
+            chipGroup(new String[]{"Default (1x)", "2x", "3x", "4x"}, indexOf(scales, s.scale), i -> {
+                s.scale = scales[i];
+                s.saveOptions();
+                updateRestart.run();
+            }));
+
+        // 5. Performance
+        final int[] limits = {0, 30, 60};
+        android.widget.TextView limitLabel = text("FPS limit", M3_ON_SURFACE, 15);
+        limitLabel.setPadding(0, dp(4), 0, dp(2));
+        addSection(body, wide, "Performance", "FPS limit applies after a restart",
+            toggleRow("FPS counter", s.fpsCounter, on -> {
+                s.fpsCounter = on;
+                s.savePrefs();
+                if (fpsOverlay != null) fpsOverlay.setEnabled(on);
+            }),
+            limitLabel,
+            chipGroup(new String[]{"Default", "30", "60"}, indexOf(limits, s.fpsLimit), i -> {
+                s.fpsLimit = limits[i];
+                s.saveOptions();
+                updateRestart.run();
+            }));
+
+        // 6. Ads
+        addSection(body, wide, "Ads", null,
+            toggleRow("Block ads", s.blockAds, on -> {
+                s.blockAds = on;
+                s.saveOptions();
+                s.sendLiveCommand();
+            }));
+
+        // 7. Menu button
+        addSection(body, wide, "Menu button", null,
+            toggleRow("Faded while playing", s.fadedMenuButton, on -> {
+                s.fadedMenuButton = on;
+                s.savePrefs();
+                applyMenuButtonStyle();
+            }));
+
+        // The settings scroll; title and buttons stay in place.
+        android.widget.ScrollView scroll = new android.widget.ScrollView(this) {
+            @Override protected void onMeasure(int widthSpec, int heightSpec) {
+                int available = maxHeight - title.getMeasuredHeight() - subtitle.getMeasuredHeight() - dp(96);
+                super.onMeasure(widthSpec, MeasureSpec.makeMeasureSpec(Math.max(dp(120), available), MeasureSpec.AT_MOST));
+            }
+        };
+        scroll.setVerticalFadingEdgeEnabled(true);
+        scroll.setFadingEdgeLength(dp(16));
+        scroll.addView(body);
+        panel.addView(scroll, new android.widget.LinearLayout.LayoutParams(
+            android.view.ViewGroup.LayoutParams.MATCH_PARENT, android.view.ViewGroup.LayoutParams.WRAP_CONTENT));
 
         android.widget.LinearLayout buttons = new android.widget.LinearLayout(this);
-        buttons.setGravity(android.view.Gravity.END);
-        buttons.setPadding(dp(8), dp(12), dp(8), 0);
-        android.widget.TextView exit = menuButton("Exit IPA", error);
+        buttons.setGravity(android.view.Gravity.END | android.view.Gravity.CENTER_VERTICAL);
+        buttons.setPadding(dp(8), dp(8), dp(8), 0);
+        restartNote.setPadding(dp(8), 0, dp(8), 0);
+        buttons.addView(restartNote, new android.widget.LinearLayout.LayoutParams(0,
+            android.view.ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        restart.setOnClickListener(v -> { dialog.dismiss(); restartGame(); });
+        android.widget.TextView exit = menuButton("Exit IPA", M3_ERROR);
         exit.setOnClickListener(v -> { dialog.dismiss(); exitCurrentIPA(); });
-        android.widget.TextView close = menuButton("Close", primary);
+        android.widget.TextView close = menuButton("Close", M3_PRIMARY);
         close.setOnClickListener(v -> dialog.dismiss());
+        buttons.addView(restart);
         buttons.addView(exit);
         buttons.addView(close);
         panel.addView(buttons);
+        updateRestart.run();
 
         dialog.setContentView(panel);
+        dialog.setOnDismissListener(d -> { if (menuDialog == dialog) menuDialog = null; });
         android.view.Window window = dialog.getWindow();
         if (window != null) {
             window.setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(android.graphics.Color.TRANSPARENT));
             window.setDimAmount(0.25f); // keep the game visible behind the menu
-            window.setLayout(Math.min(dp(360), getResources().getDisplayMetrics().widthPixels - dp(32)),
-                android.view.ViewGroup.LayoutParams.WRAP_CONTENT);
+            window.setLayout(width, android.view.ViewGroup.LayoutParams.WRAP_CONTENT);
         }
         dialog.show();
+    }
+
+    /**
+     * Starts this game again, so that options read only at launch (render
+     * scale, FPS limit) take effect. The emulator can't be restarted inside its
+     * process: queue a fresh launch with the same extras, then end the process
+     * before the launch can be delivered to it, so Android starts a new one.
+     */
+    private void restartGame() {
+        if (exitingIPA) return;
+        exitingIPA = true;
+        android.content.Intent intent = new android.content.Intent(this, MainActivity.class);
+        android.os.Bundle extras = getIntent().getExtras();
+        if (extras != null) intent.putExtras(extras);
+        intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK | android.content.Intent.FLAG_ACTIVITY_CLEAR_TASK);
+        startActivity(intent);
+        android.os.Process.killProcess(android.os.Process.myPid());
     }
 
     private android.widget.TextView menuButton(String label, int color) {
@@ -346,11 +679,17 @@ public class MainActivity extends SDLActivity {
         if (ipaMenuButton != null) {
             ipaMenuButton.setVisibility(inPip ? android.view.View.GONE : android.view.View.VISIBLE);
         }
+        if (fpsOverlay != null) fpsOverlay.setPictureInPicture(inPip);
     }
 
     @Override public void onConfigurationChanged(android.content.res.Configuration config) {
         super.onConfigurationChanged(config);
         updateForcedOrientation();
+        // The menu was sized for the old window shape: lay it out again.
+        if (menuDialog != null && menuDialog.isShowing()) {
+            menuDialog.dismiss();
+            getWindow().getDecorView().postDelayed(this::showIPAMenu, 300);
+        }
     }
 
     @Override protected void onResume() {
@@ -490,8 +829,22 @@ public class MainActivity extends SDLActivity {
             arguments.add("--ignore-unknown-selectors");
         }
         String[] settings = getIntent().getStringArrayExtra(EXTRA_RUNTIME_OPTIONS);
+        // Command-line options win over the options file, so a launcher-wide
+        // value would hide this game's own choice from the in-game menu.
+        boolean gameScale = false, gameFpsLimit = false, gameNoNetwork = false;
+        String bundleId = GameSettings.cachedBundleId(this, appPath);
+        if (bundleId != null) {
+            for (String option : GameSettings.appOptions(getExternalFilesDir(null), bundleId)) {
+                if (option.startsWith("--scale-hack=")) gameScale = true;
+                else if (option.startsWith("--fps-limit=")) gameFpsLimit = true;
+                else if (option.equals("--no-network-access")) gameNoNetwork = true;
+            }
+        }
         if (settings != null) {
             for (String setting : settings) {
+                if (setting == null || (gameScale && setting.startsWith("--scale-hack=")) ||
+                    (gameFpsLimit && setting.startsWith("--fps-limit=")) ||
+                    (gameNoNetwork && setting.equals("--allow-network-access"))) continue;
                 if (setting != null && (setting.matches("--scale-hack=[1-4]") || setting.matches("--fps-limit=[0-9]{1,3}") ||
                     setting.equals("--upside-down") || setting.equals("--landscape-left") ||
                     setting.equals("--landscape-right") || setting.equals("--allow-network-access") ||
