@@ -472,6 +472,8 @@ pub(super) fn UIApplicationMain(
         // TODO: launch options in `userInfo` if it'll ever become a concern
         () = msg![env; center postNotificationName:notif_name object:ui_application userInfo:nil];
 
+        show_storyboard_window(env);
+
         let _: () = msg![env; pool drain];
     }
 
@@ -693,7 +695,10 @@ fn launch_main_storyboard(env: &mut Environment, ui_application: id, name: Strin
     let frame: crate::frameworks::core_graphics::CGRect = msg![env; screen bounds];
     let window: id = msg_class![env; UIWindow alloc];
     let window: id = msg![env; window initWithFrame:frame];
-    () = msg![env; window setRootViewController:vc];
+    // Like UIKit, the controller's view is not loaded (so `viewDidLoad` does not
+    // run) until the app has finished launching: see `show_storyboard_window`.
+    STORYBOARD_WINDOW.store(window.to_bits(), std::sync::atomic::Ordering::Relaxed);
+    retain(env, vc);
     let delegate: id = msg![env; ui_application delegate];
     if delegate != nil
         && env
@@ -703,6 +708,23 @@ fn launch_main_storyboard(env: &mut Environment, ui_application: id, name: Strin
         () = msg![env; delegate setWindow:window];
     }
     STORYBOARD_ROOT_VC.store(vc.to_bits(), std::sync::atomic::Ordering::Relaxed);
+    log!("Prepared main storyboard {:?}: window {:?}, root view controller {:?}", name, window, vc);
+}
+
+static STORYBOARD_WINDOW: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Second half of the storyboard launch, after `application:didFinishLaunching…`
+/// returned: install the root view controller (loading its view) and show the
+/// window.
+fn show_storyboard_window(env: &mut Environment) {
+    let window_bits = STORYBOARD_WINDOW.swap(0, std::sync::atomic::Ordering::Relaxed);
+    let vc_bits = STORYBOARD_ROOT_VC.load(std::sync::atomic::Ordering::Relaxed);
+    if window_bits == 0 || vc_bits == 0 {
+        return;
+    }
+    let window: id = crate::mem::Ptr::from_bits(window_bits);
+    let vc: id = crate::mem::Ptr::from_bits(vc_bits);
+    () = msg![env; window setRootViewController:vc];
     () = msg![env; window makeKeyAndVisible];
-    log!("Launched main storyboard {:?}: window {:?}, root view controller {:?}", name, window, vc);
+    log!("Showed main storyboard window {:?} with root view controller {:?}", window, vc);
 }

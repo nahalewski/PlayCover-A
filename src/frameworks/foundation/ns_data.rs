@@ -136,7 +136,23 @@ pub const CLASSES: ClassExports = objc_classes! {
         let absolute_str: id = msg![env; url absoluteString];
         let path = to_rust_string(env, absolute_str);
         assert!(path.starts_with("http"));
-        log!("TODO: ignoring [(NSData*){:?} initWithContentsOfURL:{:?}]", this, path);
+        // With network access enabled, plain-http URLs are really fetched (the
+        // body is returned whatever the HTTP status, like on iOS).
+        if env.options.network_access && path.starts_with("http://") {
+            if let Some(body) = http_get(&path) {
+                log!("[(NSData*){:?} initWithContentsOfURL:{:?}] fetched {} bytes", this, path, body.len());
+                let size: crate::mem::GuestUSize = body.len().try_into().unwrap();
+                let alloc = env.mem.alloc(size);
+                env.mem.bytes_at_mut(alloc.cast(), size).copy_from_slice(&body);
+                let host_object = env.objc.borrow_mut::<NSDataHostObject>(this);
+                host_object.bytes = alloc;
+                host_object.length = size;
+                return this;
+            }
+            log!("[(NSData*){:?} initWithContentsOfURL:{:?}] request failed", this, path);
+        } else {
+            log!("TODO: ignoring [(NSData*){:?} initWithContentsOfURL:{:?}]", this, path);
+        }
         release(env, this);
         nil
     }
@@ -358,4 +374,62 @@ pub fn to_rust_slice(env: &mut Environment, data: id) -> &[u8] {
     assert!(!borrowed_data.bytes.is_null() && borrowed_data.length != 0);
     env.mem
         .bytes_at(borrowed_data.bytes.cast(), borrowed_data.length)
+}
+
+/// Minimal blocking `http://` GET (HTTP/1.0, no redirects, no TLS). Returns the
+/// response body, or `None` (after logging why) if the request failed.
+fn http_get(url: &str) -> Option<Vec<u8>> {
+    match http_get_inner(url) {
+        Ok(body) => Some(body),
+        Err(e) => {
+            log!("http_get({}) failed: {}", url, e);
+            None
+        }
+    }
+}
+
+fn http_get_inner(url: &str) -> Result<Vec<u8>, String> {
+    use std::io::{Read, Write};
+    use std::net::ToSocketAddrs;
+    use std::time::Duration;
+
+    let rest = url.strip_prefix("http://").ok_or("not an http:// URL")?;
+    let (host_port, path) = match rest.find('/') {
+        Some(i) => (&rest[..i], &rest[i..]),
+        None => (rest, "/"),
+    };
+    let addr_str = if host_port.contains(':') {
+        host_port.to_string()
+    } else {
+        format!("{}:80", host_port)
+    };
+    let addr = addr_str
+        .to_socket_addrs()
+        .map_err(|e| format!("DNS lookup of {} failed: {}", addr_str, e))?
+        .next()
+        .ok_or_else(|| format!("DNS lookup of {} returned no address", addr_str))?;
+    let mut stream = std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(10))
+        .map_err(|e| format!("connecting to {} failed: {}", addr, e))?;
+    let timeout = Some(Duration::from_secs(10));
+    let _ = stream.set_read_timeout(timeout);
+    let _ = stream.set_write_timeout(timeout);
+    let host = host_port.split(':').next().unwrap_or(host_port);
+    let request = format!(
+        "GET {} HTTP/1.0\r\nHost: {}\r\nUser-Agent: touchHLE\r\nConnection: close\r\n\r\n",
+        path, host
+    );
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|e| format!("sending the request failed: {}", e))?;
+    let mut response = Vec::new();
+    if let Err(e) = stream.read_to_end(&mut response) {
+        if response.is_empty() {
+            return Err(format!("reading the response failed: {}", e));
+        }
+    }
+    let split = response
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .ok_or_else(|| format!("no HTTP header terminator in {} response bytes", response.len()))?;
+    Ok(response[split + 4..].to_vec())
 }
