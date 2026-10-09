@@ -15,7 +15,7 @@
 use crate::frameworks::core_graphics::CGFloat;
 use crate::frameworks::foundation::ns_string::{from_rust_string, get_static_str, to_rust_string};
 use crate::frameworks::uikit::ui_nib::instantiate_nib_at_path;
-use crate::frameworks::uikit::ui_view_controller::set_storyboard_dir;
+use crate::frameworks::uikit::ui_view_controller::{set_scale_to_fit, set_storyboard_dir};
 use crate::objc::{
     autorelease, id, msg, msg_class, nil, objc_classes, release,
     retain, ClassExports, HostObject, NSZonePtr,
@@ -61,6 +61,31 @@ fn instantiate_scene(env: &mut Environment, storyboard: id, nib_name: &str) -> i
     nil
 }
 
+
+fn instantiate_by_identifier(env: &mut Environment, storyboard: id, identifier: id, scale_to_fit: bool) -> id {
+    let dir = env.objc.borrow::<UIStoryboardHostObject>(storyboard).dir.clone();
+    let plist = read_info_plist(env, &dir);
+    if plist == nil {
+        return nil;
+    }
+    let key = get_static_str(env, "UIViewControllerIdentifiersToNibNames");
+    let table: id = msg![env; plist objectForKey:key];
+    let nib_name: id = if table == nil { nil } else { msg![env; table objectForKey:identifier] };
+    if nib_name == nil {
+        log!("UIStoryboard: no scene with identifier {:?}", to_rust_string(env, identifier));
+        return nil;
+    }
+    let nib_name = to_rust_string(env, nib_name).to_string();
+    let vc = instantiate_scene(env, storyboard, &nib_name);
+    if vc != nil {
+        if scale_to_fit {
+            set_scale_to_fit(env, vc);
+        }
+        autorelease(env, vc);
+    }
+    vc
+}
+
 pub const CLASSES: ClassExports = objc_classes! {
 
 (env, this, _cmd);
@@ -97,28 +122,11 @@ pub const CLASSES: ClassExports = objc_classes! {
     if ident == nil {
         return nil;
     }
-    msg![env; this instantiateViewControllerWithIdentifier:ident]
+    instantiate_by_identifier(env, this, ident, false)
 }
 
 - (id)instantiateViewControllerWithIdentifier:(id)identifier { // NSString*
-    let dir = env.objc.borrow::<UIStoryboardHostObject>(this).dir.clone();
-    let plist = read_info_plist(env, &dir);
-    if plist == nil {
-        return nil;
-    }
-    let key = get_static_str(env, "UIViewControllerIdentifiersToNibNames");
-    let table: id = msg![env; plist objectForKey:key];
-    let nib_name: id = if table == nil { nil } else { msg![env; table objectForKey:identifier] };
-    if nib_name == nil {
-        log!("UIStoryboard: no scene with identifier {:?}", to_rust_string(env, identifier));
-        return nil;
-    }
-    let nib_name = to_rust_string(env, nib_name).to_string();
-    let vc = instantiate_scene(env, this, &nib_name);
-    if vc != nil {
-        autorelease(env, vc);
-    }
-    vc
+    instantiate_by_identifier(env, this, identifier, true)
 }
 
 // Nibs connect each scene's view controller back to its storyboard through

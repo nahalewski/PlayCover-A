@@ -184,11 +184,7 @@ pub const CLASSES: ClassExports = objc_classes! {
     let ValueVariant::Data(data) = val.value() else {
         unreachable!()
     };
-    if data[0] != 6 {
-        log!("Warning: unexpected nib geometry encoding tag {} (len {})", data[0], data.len());
-    }
-    let x = f32::from_le_bytes(data[1..5].try_into().unwrap());
-    let y = f32::from_le_bytes(data[5..9].try_into().unwrap());
+    let [x, y] = geometry_values::<2>(data);
     log_dbg!("decoded CGPoint {} {}", x, y);
     CGPoint { x, y }
 }
@@ -202,13 +198,7 @@ pub const CLASSES: ClassExports = objc_classes! {
     let ValueVariant::Data(data) = val.value() else {
         unreachable!()
     };
-    if data[0] != 6 {
-        log!("Warning: unexpected nib geometry encoding tag {} (len {})", data[0], data.len());
-    }
-    let x = f32::from_le_bytes(data[1..5].try_into().unwrap());
-    let y = f32::from_le_bytes(data[5..9].try_into().unwrap());
-    let width = f32::from_le_bytes(data[9..13].try_into().unwrap());
-    let height = f32::from_le_bytes(data[13..17].try_into().unwrap());
+    let [x, y, width, height] = geometry_values::<4>(data);
     log_dbg!("decoded CGRect {} {} {} {}", x, y, width, height);
     CGRect {
         origin: CGPoint { x, y },
@@ -392,4 +382,29 @@ pub fn decode_current_number(env: &mut Environment, unarchiver: id) -> id {
         }
         _ => unimplemented!("decode_current_number: {key}"),
     }
+}
+
+/// Decodes the `N` numbers of a nib geometry value (CGPoint: 2, CGRect: 4).
+/// Older nibs store a tag byte 6 followed by `f32`s, newer ones (e.g. storyboard
+/// scenes built by recent Xcode) tag 7 followed by `f64`s.
+fn geometry_values<const N: usize>(data: &[u8]) -> [f32; N] {
+    let mut out = [0.0f32; N];
+    match data[0] {
+        7 => {
+            for (i, v) in out.iter_mut().enumerate() {
+                let start = 1 + i * 8;
+                *v = f64::from_le_bytes(data[start..start + 8].try_into().unwrap()) as f32;
+            }
+        }
+        tag => {
+            if tag != 6 {
+                log!("Warning: unexpected nib geometry encoding tag {} (len {})", tag, data.len());
+            }
+            for (i, v) in out.iter_mut().enumerate() {
+                let start = 1 + i * 4;
+                *v = f32::from_le_bytes(data[start..start + 4].try_into().unwrap());
+            }
+        }
+    }
+    out
 }

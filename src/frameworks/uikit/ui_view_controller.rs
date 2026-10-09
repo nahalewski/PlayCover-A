@@ -43,6 +43,12 @@ struct UIViewControllerHostObject {
     /// Absolute path of the `.storyboardc` directory this controller was
     /// instantiated from, if any (its view nib lives there).
     storyboard_dir: Option<String>,
+    /// Scene instantiated by the app (not the window's initial controller):
+    /// its view keeps the layout archived in the nib and is scaled to fit
+    /// whatever frame the app gives it (Auto Layout is not solved).
+    scale_to_fit: bool,
+    /// Size of the view as archived in the storyboard, for `scale_to_fit`.
+    native_view_size: Option<(f32, f32)>,
     /// Controller presented modally by this one (retained), and the
     /// controller that presented this one (weak).
     presented_controller: id,
@@ -203,6 +209,29 @@ pub const CLASSES: ClassExports = objc_classes! {
     if view == nil {
         () = msg![env; this loadView];
         let view = env.objc.borrow_mut::<UIViewControllerHostObject>(this).view;
+        // A storyboard scene's view is archived with a placeholder size (e.g.
+        // 600x600); apps that read `view.bounds` in `viewDidLoad` expect the
+        // size of a full-screen view (the device's screen in its current
+        // orientation), so size it like one before `viewDidLoad` runs.
+        let from_storyboard = env.objc.borrow::<UIViewControllerHostObject>(this).storyboard_dir.is_some();
+        let scale_to_fit = env.objc.borrow::<UIViewControllerHostObject>(this).scale_to_fit;
+        if scale_to_fit && view != nil {
+            let b: CGRect = msg![env; view bounds];
+            env.objc.borrow_mut::<UIViewControllerHostObject>(this).native_view_size =
+                Some(({ b.size.width }, { b.size.height }));
+        } else if from_storyboard && view != nil {
+            use crate::window::DeviceOrientation;
+            let (w, h) = env.window().portrait_size();
+            let (w, h) = match env.window().current_rotation() {
+                DeviceOrientation::LandscapeLeft | DeviceOrientation::LandscapeRight => (h, w),
+                _ => (w, h),
+            };
+            let frame = CGRect {
+                origin: crate::frameworks::core_graphics::CGPoint { x: 0.0, y: 0.0 },
+                size: crate::frameworks::core_graphics::CGSize { width: w as f32, height: h as f32 },
+            };
+            () = msg![env; view setFrame:frame];
+        }
         () = msg![env; this viewDidLoad];
         view
     } else {
@@ -300,7 +329,28 @@ pub const CLASSES: ClassExports = objc_classes! {
     let presenter_view: id = msg![env; this view];
     let presented_view: id = msg![env; view_controller view];
     let bounds: CGRect = msg![env; presenter_view bounds];
-    () = msg![env; presented_view setFrame:bounds];
+    let from_storyboard = env.objc.borrow::<UIViewControllerHostObject>(view_controller).storyboard_dir.is_some();
+    let native: CGRect = msg![env; presented_view bounds];
+    let (bw, bh) = ({ bounds.size.width }, { bounds.size.height });
+    let (nw, nh) = ({ native.size.width }, { native.size.height });
+    if from_storyboard && nw > 0.0 && nh > 0.0 && (nw > bw || nh > bh) {
+        // Storyboard scenes are laid out with Auto Layout, which is not solved
+        // here; a scene bigger than the presenter (e.g. an archived 600x600
+        // freeform view on a landscape phone) is scaled down to fit instead.
+        use crate::frameworks::core_graphics::cg_affine_transform::CGAffineTransform;
+        use crate::frameworks::core_graphics::{CGPoint, CGSize};
+        let scale = (bw / nw).min(bh / nh);
+        let native_bounds = CGRect {
+            origin: CGPoint { x: 0.0, y: 0.0 },
+            size: CGSize { width: nw, height: nh },
+        };
+        () = msg![env; presented_view setBounds:native_bounds];
+        () = msg![env; presented_view setCenter:(CGPoint { x: bw / 2.0, y: bh / 2.0 })];
+        let transform = CGAffineTransform::make_scale(scale, scale);
+        () = msg![env; presented_view setTransform:transform];
+    } else {
+        () = msg![env; presented_view setFrame:bounds];
+    }
     () = msg![env; presenter_view addSubview:presented_view];
     retain(env, view_controller);
     env.objc.borrow_mut::<UIViewControllerHostObject>(this).presented_controller = view_controller;
@@ -412,4 +462,22 @@ pub fn set_storyboard_dir(env: &mut Environment, view_controller: id, dir: &str)
     env.objc
         .borrow_mut::<UIViewControllerHostObject>(view_controller)
         .storyboard_dir = Some(dir.to_string());
+}
+
+/// Marks a storyboard scene as scale-to-fit (see `UIViewControllerHostObject`).
+pub fn set_scale_to_fit(env: &mut Environment, view_controller: id) {
+    env.objc
+        .borrow_mut::<UIViewControllerHostObject>(view_controller)
+        .scale_to_fit = true;
+}
+
+/// If `view_controller` is a scale-to-fit scene, the size its view was
+/// archived with.
+pub fn scale_to_fit_size(env: &mut Environment, view_controller: id) -> Option<(f32, f32)> {
+    let host = env.objc.borrow::<UIViewControllerHostObject>(view_controller);
+    if host.scale_to_fit {
+        host.native_view_size
+    } else {
+        None
+    }
 }

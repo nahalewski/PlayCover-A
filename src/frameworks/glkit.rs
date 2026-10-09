@@ -170,8 +170,26 @@ pub const CLASSES: ClassExports = objc_classes! {
 - (())setEnableSetNeedsDisplay:(bool)_enable {}
 - (bool)enableSetNeedsDisplay { false }
 
-- (NSInteger)drawableWidth { with_view(this, |s| s.width as NSInteger) }
-- (NSInteger)drawableHeight { with_view(this, |s| s.height as NSInteger) }
+// Like the real GLKView, the drawable size is known before the first frame
+// (the layer's size in pixels), not only once the framebuffer exists.
+- (NSInteger)drawableWidth {
+    let w = with_view(this, |s| s.width);
+    if w != 0 {
+        return w as NSInteger;
+    }
+    let bounds: CGRect = msg![env; this bounds];
+    let scale: f32 = msg![env; this contentScaleFactor];
+    (bounds.size.width * scale * env.options.scale_hack.get() as f32).round() as NSInteger
+}
+- (NSInteger)drawableHeight {
+    let h = with_view(this, |s| s.height);
+    if h != 0 {
+        return h as NSInteger;
+    }
+    let bounds: CGRect = msg![env; this bounds];
+    let scale: f32 = msg![env; this contentScaleFactor];
+    (bounds.size.height * scale * env.options.scale_hack.get() as f32).round() as NSInteger
+}
 
 - (())bindDrawable {
     let context: id = msg![env; this context];

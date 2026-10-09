@@ -756,6 +756,31 @@ pub const CLASSES: ClassExports = objc_classes! {
     msg![env; layer frame]
 }
 - (())setFrame:(CGRect)frame {
+    // A storyboard scene the app instantiated keeps the layout it was archived
+    // with (Auto Layout is not solved) and is scaled to fit the requested frame.
+    let controller = env.objc.borrow::<UIViewHostObject>(this).view_controller;
+    if controller != nil {
+        if let Some((nw, nh)) = crate::frameworks::uikit::ui_view_controller::scale_to_fit_size(env, controller) {
+            let (fw, fh) = ({ frame.size.width }, { frame.size.height });
+            if nw > 0.0 && nh > 0.0 && fw > 0.0 && fh > 0.0 && (fw != nw || fh != nh) {
+                use crate::frameworks::core_graphics::cg_affine_transform::CGAffineTransform;
+                let scale = (fw / nw).min(fh / nh);
+                let native_bounds = CGRect {
+                    origin: CGPoint { x: 0.0, y: 0.0 },
+                    size: CGSize { width: nw, height: nh },
+                };
+                let center = CGPoint {
+                    x: { frame.origin.x } + fw / 2.0,
+                    y: { frame.origin.y } + fh / 2.0,
+                };
+                () = msg![env; this setBounds:native_bounds];
+                () = msg![env; this setCenter:center];
+                let transform = CGAffineTransform::make_scale(scale, scale);
+                () = msg![env; this setTransform:transform];
+                return;
+            }
+        }
+    }
     let layer = env.objc.borrow::<UIViewHostObject>(this).layer;
     msg![env; layer setFrame:frame]
 }
