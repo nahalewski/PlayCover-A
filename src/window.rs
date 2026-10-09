@@ -355,6 +355,8 @@ pub struct Window {
     tall_screen: bool,
     /// See `Options::widescreen`.
     widescreen: Option<f32>,
+    /// See `Options::widescreen_blur`.
+    widescreen_blur: bool,
     device_orientation: DeviceOrientation,
     controller_ctx: sdl2::GameControllerSubsystem,
     controllers: Vec<sdl2::controller::GameController>,
@@ -507,6 +509,7 @@ impl Window {
             device_family,
             tall_screen: options.tall_screen,
             widescreen: options.widescreen,
+            widescreen_blur: options.widescreen_blur,
             device_orientation,
             controller_ctx,
             controllers: Vec::new(),
@@ -1583,6 +1586,12 @@ impl Window {
         };
         let x = (screen_width - scaled_width) / 2;
         let y = (screen_height - scaled_height) / 2;
+        // Tell the presentation code whether (and how big) a background has to
+        // be generated around the picture.
+        crate::gles::present::set_background_fill(
+            self.widescreen_blur && (scaled_width < screen_width || scaled_height < screen_height),
+            (screen_width, screen_height),
+        );
         (x, y, scaled_width, scaled_height)
     }
 

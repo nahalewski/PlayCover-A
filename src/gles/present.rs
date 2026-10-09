@@ -38,6 +38,18 @@ impl FpsCounter {
     }
 }
 
+static FILL_BACKGROUND: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static FILL_SCREEN_SIZE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Sets whether [present_frame] should fill the area around the picture with a
+/// blurred copy of it (for `--widescreen=blur`), and the size of the whole
+/// drawable.
+pub fn set_background_fill(enabled: bool, (width, height): (u32, u32)) {
+    use std::sync::atomic::Ordering;
+    FILL_BACKGROUND.store(enabled, Ordering::Relaxed);
+    FILL_SCREEN_SIZE.store(((width as u64) << 32) | height as u64, Ordering::Relaxed);
+}
+
 /// Present the the latest frame (e.g. the app's splash screen or rendering
 /// output), provided as a texture bound to `GL_TEXTURE_2D`, by drawing it on
 /// the window. It may be rotated, scaled and/or letterboxed as necessary. The
@@ -57,13 +69,6 @@ pub unsafe fn present_frame(
 
     use gles11::types::*;
 
-    // Draw the quad
-    gles.Viewport(
-        viewport.0 as _,
-        viewport.1 as _,
-        viewport.2 as _,
-        viewport.3 as _,
-    );
     gles.ClearColor(0.0, 0.0, 0.0, 1.0);
     gles.Clear(gles11::COLOR_BUFFER_BIT | gles11::DEPTH_BUFFER_BIT | gles11::STENCIL_BUFFER_BIT);
     gles.BindBuffer(gles11::ARRAY_BUFFER, 0);
@@ -79,6 +84,44 @@ pub unsafe fn present_frame(
     gles.MatrixMode(gles11::TEXTURE);
     gles.LoadMatrixf(matrix.columns().as_ptr() as *const _);
     gles.Enable(gles11::TEXTURE_2D);
+
+    use std::sync::atomic::Ordering;
+    if FILL_BACKGROUND.load(Ordering::Relaxed) {
+        // Generate the area around the picture: the whole frame, stretched over
+        // the whole screen, dimmed and blurred (the average of shifted copies).
+        // The picture itself is then drawn sharp on top.
+        let size = FILL_SCREEN_SIZE.load(Ordering::Relaxed);
+        let (sw, sh) = ((size >> 32) as i32, (size & 0xffff_ffff) as i32);
+        let step = (sh / 90).max(2);
+        let radius = step * 2;
+        gles.Enable(gles11::BLEND);
+        gles.BlendFunc(gles11::SRC_ALPHA, gles11::ONE_MINUS_SRC_ALPHA);
+        let mut tap = 0;
+        for iy in -2..=2 {
+            for ix in -2..=2 {
+                tap += 1;
+                // Running average: the n-th copy gets weight 1/n.
+                gles.Color4f(0.5, 0.5, 0.5, 1.0 / tap as f32);
+                gles.Viewport(
+                    ix * step - radius,
+                    iy * step - radius,
+                    sw + 2 * radius,
+                    sh + 2 * radius,
+                );
+                gles.DrawArrays(gles11::TRIANGLES, 0, 6);
+            }
+        }
+        gles.Disable(gles11::BLEND);
+        gles.Color4f(1.0, 1.0, 1.0, 1.0);
+    }
+
+    // Draw the picture
+    gles.Viewport(
+        viewport.0 as _,
+        viewport.1 as _,
+        viewport.2 as _,
+        viewport.3 as _,
+    );
     gles.DrawArrays(gles11::TRIANGLES, 0, 6);
     // clean this up so we don't need to worry about it in e.g. Core Animation
     gles.LoadIdentity();

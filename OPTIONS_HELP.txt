@@ -49,6 +49,12 @@ Device options:
         app lays out its UI. Does nothing on a screen that is not wider than
         the app.
 
+    --widescreen=blur
+        Keeps the picture at its own proportions and sharpness, and fills the
+        bars beside it with a dimmed, blurred copy of the picture instead of
+        black. Nothing is stretched. (The extra area is only decoration: it
+        does not show more of the game.)
+
     --device-family=...
         Specifies which device family should be emulated: iPhone or iPad.
         This only work if running app does support selected family

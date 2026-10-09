@@ -41,6 +41,9 @@ pub struct Options {
     /// Stretch the picture to fill a wider screen (see `--widescreen`): the
     /// widest aspect ratio to stretch to, or 0.0 for the whole screen.
     pub widescreen: Option<f32>,
+    /// Fill the bars beside a narrower picture with a blurred, dimmed copy of
+    /// it (`--widescreen=blur`).
+    pub widescreen_blur: bool,
     pub initial_orientation: DeviceOrientation,
     pub scale_hack: NonZeroU32,
     pub deadzone: f32,
@@ -83,6 +86,7 @@ impl Default for Options {
             device_family: None,
             tall_screen: false,
             widescreen: None,
+            widescreen_blur: false,
             initial_orientation: DeviceOrientation::Portrait,
             scale_hack: NonZeroU32::new(1).unwrap(),
             analog_stick_tilt_controls: true,
@@ -148,6 +152,8 @@ impl Options {
             self.initial_orientation = DeviceOrientation::LandscapeRight;
         } else if arg == "--widescreen" {
             self.widescreen = Some(0.0);
+        } else if arg == "--widescreen=blur" {
+            self.widescreen_blur = true;
         } else if let Some(value) = arg.strip_prefix("--widescreen=") {
             let (w, h) = value
                 .split_once(':')
