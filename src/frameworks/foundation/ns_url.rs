@@ -195,6 +195,37 @@ pub const CLASSES: ClassExports = objc_classes! {
     msg_class![env; NSURL fileURLWithPath:path]
 }
 
+- (id)URLByAppendingPathComponent:(id)path_component { // NSString *
+    msg![env; this URLByAppendingPathComponent:path_component isDirectory:false]
+}
+
+- (id)URLByAppendingPathExtension:(id)extension { // NSString *
+    let path: id = msg![env; this path];
+    let path: id = msg![env; path stringByAppendingPathExtension:extension];
+    msg_class![env; NSURL fileURLWithPath:path]
+}
+
+- (id)lastPathComponent {
+    let path: id = msg![env; this path];
+    msg![env; path lastPathComponent]
+}
+
+- (id)pathExtension {
+    let path: id = msg![env; this path];
+    msg![env; path pathExtension]
+}
+
+// There is no backup in touchHLE, so e.g. NSURLIsExcludedFromBackupKey is
+// trivially satisfied: there is nowhere to store other resource values.
+- (bool)setResourceValue:(id)_value // id
+                  forKey:(id)_key // NSString *
+                   error:(MutPtr<id>)error { // NSError **
+    if !error.is_null() {
+        env.mem.write(error, nil);
+    }
+    true
+}
+
 - (id)URLByDeletingLastPathComponent {
     let &NSURLHostObject::FileURL { ns_string, .. } = env.objc.borrow(this) else {
         unimplemented!(); // TODO

@@ -250,6 +250,9 @@ fn objc_msgSend_inner(
             // property accessors this way.
             if !resolve_attempted {
                 resolve_attempted = true;
+                if crate::frameworks::core_data::try_dynamic_accessor(env, receiver, orig_class, selector) {
+                    return;
+                }
                 if try_resolve_method(env, receiver, orig_class, selector) {
                     class = orig_class;
                     continue;

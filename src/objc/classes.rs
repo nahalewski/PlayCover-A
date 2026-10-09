@@ -765,7 +765,13 @@ impl ObjC {
                             continue;
                         }
 
-                        *offset = Ptr::from_bits((*offset).to_bits() + diff);
+                        // `offset` points to the ivar's offset variable
+                        // (`_OBJC_IVAR_$_Class._ivar`) in the app binary, which
+                        // is what the app's code reads, so that is what has to
+                        // be moved, not the pointer to it.
+                        let variable: MutPtr<GuestUSize> = Ptr::from_bits((*offset).to_bits());
+                        let current = mem.read(variable);
+                        mem.write(variable, current + diff);
                     }
                 }
 

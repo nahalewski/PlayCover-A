@@ -186,6 +186,12 @@ pub const CLASSES: ClassExports = objc_classes! {
 }
 
 // FIXME: writes should be atomic
+- (bool)writeToURL:(id)url // NSURL*
+       atomically:(bool)atomically {
+    let path: id = msg![env; url path];
+    msg![env; this writeToFile:path atomically:atomically]
+}
+
 - (bool)writeToFile:(id)path // NSString*
          atomically:(bool)_use_aux_file {
     let file = to_rust_string(env, path);

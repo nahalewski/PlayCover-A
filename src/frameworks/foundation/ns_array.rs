@@ -147,6 +147,12 @@ pub const CLASSES: ClassExports = objc_classes! {
     deserialize_plist_from_file(env, &path, /* array_expected: */ true)
 }
 
+- (bool)writeToURL:(id)url // NSURL*
+       atomically:(bool)atomically {
+    let path: id = msg![env; url path];
+    msg![env; this writeToFile:path atomically:atomically]
+}
+
 - (bool)writeToFile:(id)path // NSString*
          atomically:(bool)atomically {
     let error_desc: MutPtr<id> = Ptr::null();

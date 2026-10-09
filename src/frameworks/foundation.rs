@@ -64,6 +64,7 @@ pub mod ns_url_protocol;
 pub mod ns_url_request;
 pub mod ns_url_response;
 pub mod ns_url_session;
+pub mod ns_uuid;
 pub mod ns_user_defaults;
 pub mod ns_value;
 pub mod ns_xml_parser;
@@ -116,6 +117,7 @@ pub const DYLIB: crate::dyld::HostDylib = crate::dyld::HostDylib {
         ns_url_request::CLASSES,
         ns_url_response::CLASSES,
         ns_url_session::CLASSES,
+        ns_uuid::CLASSES,
         ns_user_defaults::CLASSES,
         ns_value::CLASSES,
         ns_xml_parser::CLASSES,

@@ -24,6 +24,8 @@ pub struct State {
     rand: u32,
     random: u32,
     arc4random: u32,
+    /// The 48-bit state of the `*rand48` family.
+    rand48: u64,
     fcvt_buf: Option<MutPtr<u8>>,
 }
 
@@ -249,6 +251,22 @@ fn rand_r(env: &mut Environment, seed_ptr: MutPtr<u32>) -> i32 {
 
 // BSD's "better" random number generator, with an implementation that is not
 // actually better.
+/// The POSIX `*rand48` linear congruential generator.
+fn rand48_next(env: &mut Environment) -> u64 {
+    let state = &mut env.libc_state.stdlib.rand48;
+    *state = state.wrapping_mul(0x5DEECE66D).wrapping_add(0xB) & ((1 << 48) - 1);
+    *state
+}
+fn srand48(env: &mut Environment, seed: i32) {
+    env.libc_state.stdlib.rand48 = ((seed as u32 as u64) << 16) | 0x330E;
+}
+fn drand48(env: &mut Environment) -> f64 {
+    rand48_next(env) as f64 / (1u64 << 48) as f64
+}
+fn lrand48(env: &mut Environment) -> i32 {
+    (rand48_next(env) >> 17) as i32
+}
+
 fn srandom(env: &mut Environment, seed: u32) {
     // TODO: handle errno properly
     set_errno(env, 0);
@@ -728,6 +746,9 @@ pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(rand()),
     export_c_func!(rand_r(_)),
     export_c_func!(srandom(_)),
+    export_c_func!(srand48(_)),
+    export_c_func!(drand48()),
+    export_c_func!(lrand48()),
     export_c_func!(random()),
     export_c_func!(arc4random()),
     export_c_func!(div(_, _)),

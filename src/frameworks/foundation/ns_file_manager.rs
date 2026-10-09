@@ -12,7 +12,7 @@ use crate::frameworks::foundation::ns_string::get_static_str;
 use crate::fs::{FsError, GuestPath, GuestPathBuf};
 use crate::mem::{ConstPtr, MutPtr, Ptr};
 use crate::objc::{
-    autorelease, id, msg, msg_class, nil, objc_classes, release, ClassExports, HostObject,
+    autorelease, id, msg, msg_class, nil, objc_classes, release, retain, ClassExports, HostObject,
 };
 use crate::Environment;
 
@@ -310,6 +310,39 @@ pub const CLASSES: ClassExports = objc_classes! {
     let error: MutPtr<id> = Ptr::null();
     msg![env; this createDirectoryAtPath:path
              withIntermediateDirectories:false
+                              attributes:attributes
+                                   error:error]
+}
+
+// Attributes like NSFileProtectionKey (data protection classes) or
+// permissions have no effect in touchHLE's sandbox, so setting them succeeds
+// without doing anything.
+- (bool)setAttributes:(id)_attributes // NSDictionary *
+         ofItemAtPath:(id)_path // NSString *
+                error:(MutPtr<id>)error { // NSError **
+    if !error.is_null() {
+        env.mem.write(error, nil);
+    }
+    true
+}
+
+- (id)URLsForDirectory:(NSSearchPathDirectory)directory
+             inDomains:(NSSearchPathDomainMask)domain_mask {
+    let paths = NSSearchPathForDirectoriesInDomains(env, directory, domain_mask, true);
+    let path: id = msg![env; paths objectAtIndex:0u32];
+    let url: id = msg_class![env; NSURL fileURLWithPath:path isDirectory:true];
+    let array = ns_array::from_vec(env, vec![url]);
+    retain(env, url);
+    autorelease(env, array)
+}
+
+- (bool)createDirectoryAtURL:(id)url // NSURL *
+ withIntermediateDirectories:(bool)with_intermediates
+                  attributes:(id)attributes // NSDictionary *
+                       error:(MutPtr<id>)error { // NSError **
+    let path: id = msg![env; url path];
+    msg![env; this createDirectoryAtPath:path
+             withIntermediateDirectories:with_intermediates
                               attributes:attributes
                                    error:error]
 }
