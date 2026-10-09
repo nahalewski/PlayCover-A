@@ -51,7 +51,10 @@ public class MainActivity extends SDLActivity {
         naturalPortrait = ((rotation == 0 || rotation == 2) == portrait);
         updateForcedOrientation();
         installExitButton();
-        if (mLayout != null) new WebOverlay(this, mLayout);
+        if (mLayout != null) {
+            new WebOverlay(this, mLayout);
+            new AlertOverlay(this, mLayout);
+        }
     }
 
     private int dp(int value) {

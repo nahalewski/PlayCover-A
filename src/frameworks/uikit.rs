@@ -118,6 +118,7 @@ pub fn handle_events(env: &mut Environment) -> Option<Instant> {
 
     // NSRunLoop will never call this function in headless mode.
     ui_view::ui_web_view::poll_events(env);
+    ui_view::ui_alert_view::poll_events(env);
     while let Some(event) = env.window_mut().pop_event() {
         match event {
             Event::Quit => {
