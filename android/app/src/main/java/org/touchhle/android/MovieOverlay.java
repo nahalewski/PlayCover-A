@@ -99,6 +99,9 @@ final class MovieOverlay {
         remove();
         playingSeq = seq;
         video = new VideoView(activity);
+        // The game draws into its own SurfaceView; the movie's surface has to be
+        // above it or the movie is hidden behind the game's (black) frame.
+        video.setZOrderOnTop(true);
         video.setBackgroundColor(0xFF000000);
         video.setOnPreparedListener(new MediaPlayer.OnPreparedListener() {
             @Override public void onPrepared(MediaPlayer mp) {
