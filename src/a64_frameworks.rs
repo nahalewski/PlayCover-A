@@ -37,6 +37,8 @@ pub(super) mod audio_toolbox;
 pub(super) mod security;
 #[path = "a64_frameworks_system_configuration.rs"]
 pub(super) mod system_configuration;
+#[path = "a64_frameworks_unavailable.rs"]
+pub(super) mod unavailable;
 
 const PAGE: u64 = 4096;
 /// One RX trampoline page, the RW handle/string arena, then a RW guest I/O

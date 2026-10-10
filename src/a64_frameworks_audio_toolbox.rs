@@ -225,7 +225,6 @@ enum Phase {
 struct OpenOperation {
     client_data: u64,
     read_proc: u64,
-    get_size_proc: u64,
     out_file: u64,
     io: (u64, u64),
     size: u64,
@@ -321,13 +320,10 @@ impl AudioToolbox {
                 if size != expected || data == 0 {
                     return Ok(SESSION_BAD_PROPERTY_SIZE);
                 }
+                // 'hwsr' is a preference: the current rate ('chsr') stays
+                // the host mixer's.
                 let value = frame.read(data, size)?;
-                if &id.to_be_bytes() == b"hwsr" {
-                    // A preference: the current rate stays the host mixer's.
-                    self.session_properties.insert(id, value);
-                } else {
-                    self.session_properties.insert(id, value);
-                }
+                self.session_properties.insert(id, value);
                 NO_ERR
             }
             _ => unreachable!(),
@@ -608,7 +604,6 @@ impl Family for AudioToolbox {
         self.opening.push(OpenOperation {
             client_data,
             read_proc,
-            get_size_proc,
             out_file,
             io,
             size: 0,

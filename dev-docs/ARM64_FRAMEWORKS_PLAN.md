@@ -212,9 +212,49 @@ There is no flat `Mem`.
    - Only if they need unavailable daemons, own them with the 32-bit host
      rasteriser.
    - Test: decode a bundled PNG into an RGBA bitmap and compare pixels.
-5. **M5: SystemConfiguration, Security keychain and SecRandom owned. GameKit,
-   StoreKit, MessageUI, LocalAuthentication and DeviceCheck honest-unavailable
-   ObjC classes** via `a64_objc_namespace`.
+5. **M5 (partly done): reachability, Security and honest-unavailable classes.**
+   - SystemConfiguration (`a64_frameworks_system_configuration.rs`):
+     - `GetFlags` reports the host's real route to the internet.
+     - Callback and scheduling calls are recorded. No change is ever
+       observed, so no callback fires.
+     - The `Create*` constructors stay genuine, so targets are real CF
+       objects.
+     - Terraria's `_SCNetworkReachabilityGetFlags` import is now owned as
+       well.
+   - Security (`a64_frameworks_security.rs`):
+     - `SecRandomCopyBytes` uses `/dev/urandom`.
+     - `SecItem*` is **interim**, an honestly empty keychain: `Add`/`Update`
+       return errSecNotAvailable, and `CopyMatching`/`Delete` return
+       errSecItemNotFound.
+     - **Remaining:** a persisted keychain. It needs a decision on which CF
+       world the query dictionaries live in: genuine Foundation objects
+       versus the owned CF route (`a64_cf_terraria_services`).
+     - `SecTrust*`/`SecCertificate*`/`SecPolicy*` stay genuine. They are
+       only reached on TLS paths.
+   - Honest-unavailable ObjC classes (`a64_frameworks_unavailable.rs`):
+     - These classes live in UIKitCore's dependency cone, so they cannot load
+       genuinely. Their own synthetic objc2 image is built with the UIKit
+       layer's `uikit::image` builder, and per-class providers give
+       `Layout::exports()` triples for the binder.
+     - Covered: `SKPaymentQueue` (`canMakePayments` NO, `defaultQueue`,
+       observer add/remove), `SKStoreReviewController requestReview`,
+       `SKAdNetwork registerAppForAdNetworkAttribution`, `GKLocalPlayer`
+       (`localPlayer`, `isAuthenticated` NO, `isUnderage` NO),
+       `MFMail/MessageComposeViewController canSendMail/canSendText` NO,
+       `DCDevice` (`currentDevice`, `isSupported` NO) and
+       `LAContext canEvaluatePolicy:error:` NO.
+     - **Stored but not invoked, or absent:** anything that needs an
+       NSError, NSArray, NSString or a completion block. Examples: GameKit
+       authenticate handlers, `alias`/`playerID`, product requests, the
+       `*error` out-parameter of `canEvaluatePolicy:error:`, and SKAdNetwork
+       completion handlers. These need in-session NSError/NSString creation
+       through genuine Foundation. Sending them fails as an unrecognized
+       selector, never as a fake success.
+     - **Not wired yet:** binding the app's `_OBJC_CLASS_$_*` DATA imports to
+       this image, and adding it to the dyld ObjC mapped notification. Both
+       wait for the same loader hookup as UIKit's image (`route()` is
+       function-only). Desktop tests run the classes through the owned objc
+       runtime.
 6. **M6: CFNetwork** offline-honest errors first, then the host HTTP backend.
 7. **M7: MetalANGLE GLES forwarding** through a `gles` family.
 
@@ -236,3 +276,11 @@ There is no flat `Mem`.
 - Legacy iOS 11 check (Infinity Blade II, `session-image-info`): preparation
   and the boundary are identical with and without the framework hook. IBII
   routes no OpenAL imports through the cache.
+- Driven calls such as `AudioFileOpenWithCallbacks` run the guest read
+  procs inside the *outer* bridge call. They therefore spend that call's
+  shared tick budget: `call_inner` passes one `ticks` counter through nesting.
+  Reading an 8 MB track takes 32 chunk callbacks, each a genuine read/memcpy.
+  The owned runtime gives a nested call up to 1,000,000 ticks. Whether app
+  `main` gets enough budget for this has not been checked, because app main
+  is not wired yet. If not, a large open fails with "tick budget exhausted",
+  not with a clean status.
