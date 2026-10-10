@@ -202,3 +202,11 @@ There is no flat `Mem`.
   chunks; large predecoded sounds need a bridge bulk-copy API.
 - Calls from guest threads other than the main thread go through the same
   bridge. Scheduling belongs to the thread scheduler.
+- The owned `alSourceUnqueueBuffers` reads `alGetError()` before it unqueues.
+  It needs a clean read so that the guest array is written only on success,
+  and an error is raised again on failure. As a side effect, an AL error the
+  guest had not read yet from an earlier call is discarded. ALmixer checks
+  errors after each call, so this should not affect it.
+- Legacy iOS 11 check (Infinity Blade II, `session-image-info`): preparation
+  and the boundary are identical with and without the framework hook. IBII
+  routes no OpenAL imports through the cache.
