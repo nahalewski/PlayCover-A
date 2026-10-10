@@ -1,8 +1,8 @@
 # ARM64 UIKit layer plan (Coromon 1.4.1 first)
 
-Status: milestone 1 implemented and passing desktop tests (2026-10-10).
-Owner: UIKit agent. Files: `src/a64_uikit.rs`, `src/a64_uikit_image.rs`,
-`src/a64_uikit_state.rs`, `src/a64_uikit_tests.rs`. Shared-file hook: a single
+Status (2026-10-10): milestones 1, 3, 4 and part of 5 pass desktop tests. Nothing has run under genuine libobjc or on a device.
+Owner: UIKit agent. Files: `src/a64_uikit*.rs` (core, image, asm, state, quartz,
+mgl, app, tests). Shared-file hook: a single
 `mod uikit` line in `src/a64.rs`.
 
 ## 1. Why an emulator-owned UIKit
@@ -102,229 +102,244 @@ verified in the binary. SO means taken from source or standard UIKit behaviour.
 
 ## 3. Architecture
 
-### 3.1 A synthetic UIKit Mach-O image (implemented)
+### 3.1 A synthetic Mach-O image (implemented)
 
-`a64_uikit_image.rs` builds an `MH_DYLIB` image at a caller-chosen,
-16 KiB-aligned base. Its install name is
-`/System/Library/Frameworks/UIKit.framework/UIKit`. It has two segments.
+`a64_uikit_image.rs` builds one `MH_DYLIB` image at a caller-chosen base
+(16 KiB aligned). Its install name is
+`/System/Library/Frameworks/UIKit.framework/UIKit`. It holds the UIKit
+classes, the QuartzCore `CALayer`, and the MetalANGLE stand-in classes. Each
+class records its provider (UIKit, QuartzCore or `@rpath/MetalANGLE...`), so
+`Layout::exports()` yields `(provider, symbol, address)` entries for the binder.
 
 **`__TEXT` (RX)**
 - the header;
 - the load commands: `LC_SEGMENT_64` ×2, `LC_ID_DYLIB` and a synthetic `LC_UUID`;
-- the owned thunks in `__text`;
-- the `__objc_methname`, `__objc_classname` and `__objc_methtype` strings.
+- `__text`, which holds:
+  - a hub (`ldr x16,=service; br x16`);
+  - one 8-byte trampoline per method (`movz x17,#index; b hub`);
+  - the generated functions (`_UIApplicationMain`, `_touchHLE_UIKit_createLayer`);
+  - the owned `-dealloc` thunks;
+- `__objc_methname`, `__objc_classname` and `__objc_methtype`.
 
 **`__DATA` (RW)**
 - `__objc_classlist` and `__objc_imageinfo` (flags 0x40);
-- `__objc_selrefs`;
-- a `__got` slot for `objc_msgSendSuper2`;
+- `__objc_selrefs`, for every selector the host or generated code sends;
+- `__got`, the bound slots for `objc_msgSend`, `objc_msgSendSuper2` and
+  `objc_alloc_init`, written by `UiKit::link`;
 - `__objc_const` (`class_ro_t` and method lists with entsize 24);
 - `__objc_data` (`class_t` and metaclasses);
-- `__data`, which holds the static singleton instances.
+- `__data`: the static singletons, plus a 4 KiB scratch area used by the pump
+  record and the class-name string buffer.
 
-The metadata is the genuine LP64 objc2 layout, so one image serves two Objective-C runtimes:
+`a64_uikit_asm.rs` is a small AArch64 assembler for the generated code. Each
+encoding it uses was checked against capstone; its tests pin the exact words.
 
-- **Emulator-owned runtime** (desktop tests and the owned-Foundation path).
+The metadata is the genuine LP64 objc2 layout, so one image serves two
+Objective-C runtimes:
+
+- **The emulator-owned runtime** (desktop tests and the owned-Foundation path).
   Pass `Layout.class_list` plus the root to `Registry::register`, then apply
-  the returned `selector_fixups` to the image's `__objc_selrefs` slots.
-- **Genuine cached libobjc.** `ObjcImage::read` already accepts the header, as
-  a test proves. Add the image to the dyld ObjC "mapped" notification list
-  ahead of the app image. libobjc's `map_images` then realizes the classes,
-  fixes method-list and selref selectors in place (that is why everything is
-  RW), and initializes each class cache. The root and empty-cache addresses
-  come from the cached `_OBJC_CLASS_$_NSObject`, `_OBJC_METACLASS_$_NSObject`
-  and `__objc_empty_cache` exports.
+  `selector_fixups` to the image's `__objc_selrefs`.
+- **The genuine cached libobjc.** A test proves that `ObjcImage::read` accepts
+  the header. Put the image in the dyld ObjC "mapped" notification ahead of the
+  app image. libobjc's `map_images` then realizes the classes and fixes
+  selectors in place, which is why everything is RW. The root comes from the
+  cached `_OBJC_CLASS_$_NSObject` and `_OBJC_METACLASS_$_NSObject`, and the
+  empty cache from `__objc_empty_cache`.
 
-Constraints:
+**Constraints**
+- Classes and raw-isa singletons stay below 64 GiB. objc4's `ISA_MASK` on
+  non-ptrauth arm64 is `0xffffffff8`; the same mask is applied in the
+  layer-creation routine.
+- No ivar lists: every class has `instance_size` 8. objc4's
+  `reconcileInstanceVariables` only moves a subclass's ivars when
+  `instanceStart < super.instanceSize`, so app subclasses compiled against the
+  real SDK keep their compiled offsets. The owned heap also requires classes
+  without ivars.
 
-- **Address range.** Class addresses and the raw-isa singletons must stay below
-  64 GiB, because objc4 `ISA_MASK` is `0xffffffff8` on non-ptrauth arm64. The
-  builder rejects anything higher.
-- **No ivar lists.** Every UIKit class has an `instance_size` of 8. objc4's
-  `reconcileInstanceVariables` only slides a subclass's ivars when
-  `instanceStart < super.instanceSize`. App subclasses compiled against the
-  real SDK therefore keep their compiled offsets; the only cost is unused space.
-  The owned heap also requires classes without ivars.
+### 3.2 Dispatch: one bridge service and an index per method (implemented)
 
-### 3.2 Dispatch: one bridge service per class
+Every method IMP is its own trampoline. It loads its index into x17 and
+branches to the one service, `_touchHLE_UIKit`. The service reads the index
+with `ServiceFrame::dispatch_index()`, the frameworks agent's existing x17 hook.
 
-Each UIKit class gets one dispatcher service, `_touchHLE_UIKit_<Class>`. All of
-that class's method IMPs point to it. The handler works in three steps:
+The first four indices are internal entries:
 
-1. Read `x1` (the SEL). A SEL is a C-string pointer in both runtimes; the
-   handler caches the address-to-name mapping.
-2. Find the selector in that class's static `Method` table.
-3. Run a Rust handler with the arguments in AAPCS64 order: `x2..x7`, CGRect
-   and CGPoint in `d0..d3`, and BOOL in the low byte.
+| Index | Entry |
+| --- | --- |
+| 0 | dealloc cleanup |
+| 1 | pump start |
+| 2 | pump next |
+| 3 | attach layer |
 
-Results go back as `ReturnValues`. A CGRect returns as an HFA in `v0..v3`.
+The other indices map to a `(class, Method)` table entry. The handler receives
+the arguments in AAPCS64 order: `x2..x7`, CGRect/CGPoint in `d0..d3`, float in
+`s0`, and BOOL in the low byte. Results go back in `ReturnValues`; a CGRect is
+returned as an HFA in `v0..v3`.
 
-This uses 8 services for milestone 1, plus one shared `-dealloc` cleanup service.
+- **Bridge cost:** the whole layer uses one bridge slot.
+- **Current size:** 12 classes, about 260 methods.
+- **Swizzling is no longer a risk.** Dispatch follows the IMP, not the
+  selector name, so `method_exchangeImplementations` (Coromon's GULSwizzler
+  swizzles `viewDidAppear:`) behaves as it does on iOS.
 
-**Known risk: swizzling.** The app's `+load` (GULSwizzler) replaces
-`-viewDidAppear:` and `-viewDidDisappear:` on our UIViewController before main.
-If any swizzle uses `method_exchangeImplementations`, one of our IMPs could be
-reached under a foreign selector, and name-based dispatch would then fail with
-"no host method". Mitigation if that is confirmed: give each method an 8-byte
-`__text` thunk (`movz x17,#index; b dispatcher`), so the service dispatches by
-method index instead of by SEL name. This is not implemented yet. GULSwizzler's
-mechanism has not been checked.
-There are currently 7 classes, 116 table methods (plus 2 dealloc thunks) and 3 sent selectors.
-
-### 3.3 Calling back into guest code
-
-There are two mechanisms, and both run genuine guest code:
+### 3.3 Calling back into guest code (implemented)
 
 - **Queued calls.** `ServiceFrame::request_guest_call` runs `objc_msgSend`,
-  `objc_retain`, `objc_release` or `objc_alloc_init` after the handler returns.
-  This covers the retain/release of strong UIKit references (subviews,
-  `rootViewController`, `backgroundColor`, the controller's view) and
-  `-[UIViewController loadView]`.
-- **Tail re-dispatch.** `-[UIViewController view]` queues `[self loadView]` and
-  `[self viewDidLoad]`, then re-sends `view` through `objc_msgSend`, so a
-  guest override of either method runs. A test proves this.
-  - The SELs are read from the image's own fixed-up `__objc_selrefs` slots.
-  - A missing view after `-loadView` fails explicitly instead of recursing.
+  `objc_retain`/`objc_release` and `objc_alloc_init` after the handler
+  returns. Completions reach the UIKit state through a `Weak` reference.
+- **Tail re-dispatch.** `-[UIViewController view]` and `-[UIView layer]` queue
+  their work, then re-send themselves, so guest overrides of `-loadView`,
+  `-viewDidLoad` and `+layerClass` run.
+- **Generated guest routines.** `_touchHLE_UIKit_createLayer` performs
+  `[[object_getClass(view) layerClass] alloc] init` in guest code. The
+  `UIApplicationMain` pump is also generated code.
 
-### 3.4 Memory ownership
+### 3.4 Memory ownership (implemented)
 
-- **Instances.** Guest `+alloc` (inherited from NSObject) allocates every
-  instance, so the genuine allocator or the owned heap owns the memory.
-- **State.** Host state is keyed by object address in `state::Model`.
-- **Disposal.** UIView and UIViewController get an owned `-dealloc` thunk. In
-  compiled form it is `cleanup_service(self,_cmd); objc_msgSendSuper2(&{self,
-  cls}, @selector(dealloc))`, where `@selector(dealloc)` comes from the image
-  selref and the Super2 address from the `__got` slot.
-  - The cleanup removes the host state and queues releases of the strong
-    references the object held.
-  - A test exercises the chain window → root view controller → view.
-  - Current limit: at most 7 releases per dealloc (the bridge continuation
-    cap). A batched release thunk comes later.
+- **Instances.** Instances come from guest `+alloc`. Host state is keyed by
+  address (`state::Model`, `mgl::MglState`).
+- **Disposal.** UIView, UIViewController, CALayer and MGLContext get owned
+  `-dealloc` thunks: `cleanup(self,_cmd); objc_msgSendSuper2(&{self, cls},
+  @selector(dealloc))`.
+  - Cleanup releases the strong references the object held: subviews, the root
+    view controller, the background color, the backing layer, sublayers, the
+    controller's view, and an MGLKView's context.
+  - Limit: at most 7 releases per dealloc (the bridge continuation cap).
 - **Singletons.** UIApplication, UIScreen and UIDevice are static, immortal
-  16-byte objects in `__data` with a raw isa.
+  objects with a raw isa.
 
-### 3.5 Run loop and events (milestone 3)
+### 3.5 UIApplicationMain and the run loop (implemented, desktop)
 
-`UIApplicationMain` must never return and must run guest callbacks
-indefinitely. A service handler cannot do that, because it is bounded by depth
-and ticks. The design is an owned **guest-side event pump**:
+`_UIApplicationMain` is a generated guest loop:
 
-1. `UIApplicationMain`'s IMP is a thunk in `__text` that loops: `bl
-   next_event_service`.
-2. That service writes a work record (entry, `x0..x7`, `d0..d3`) into a per-pump
-   `__data` buffer and returns 1 to continue, or 0 to stop (tests only).
-3. The thunk loads the registers from the record and calls `blr entry`.
+1. Call the start entry.
+2. Call the next entry; stop if it returns 0.
+3. Load `x0..x7`, `d0..d3` and the entry address from the scratch record.
+4. Call the entry (`blr`), store `x0`/`x1`/`d0` back into the record, and repeat.
 
-The real CFRunLoop therefore lives in guest code on the guest's own main
-stack. The host decides what happens next:
+Every callback is therefore a genuine guest call on the guest's main stack, and
+the host only decides the next call (`app::Launcher`).
 
-- the launch sequence, as a script of delegate messages;
-- notification posts through the genuine NSNotificationCenter;
-- CADisplayLink targets, at vsync;
-- touch delivery;
-- timers.
+**Launch sequence.** This is UIKit's sequence for
+`UIApplicationMain(argc, argv, nil, nil)`, driven by a main-nib launch plan:
 
-Waiting between frames happens inside the `next_event` handler. The session
-owner (agent A) must allow a long-running, non-tick-limited main.
+1. `objc_getClass` on the nib's delegate class, then `objc_alloc_init` it.
+   `UIApplication.delegate` is set.
+2. `objc_alloc_init` the window, giving screen bounds (`UIResizesToFullScreen`).
+3. `-setWindow:` connects the outlet.
+4. `respondsToSelector:` is checked, then
+   `application:willFinishLaunchingWithOptions:` is called.
+5. The same check and call for `application:didFinishLaunchingWithOptions:`.
+6. The nib's visible window becomes key, and the application state becomes Active.
+7. `applicationDidBecomeActive:` is called if the delegate responds.
+8. `viewWillAppear:` and `viewDidAppear:` go to the key window's root view controller.
+9. Frames: each resumed MGLKViewController receives `frameStep` once per
+   frame. The virtual media clock advances 1/60 s per frame.
 
-### 3.6 What stays out of UIKit
+**Main-nib launch plan.** `app::parse_nib` reads compiled NIBArchive files.
+Applied to the real Coromon `MainWindow.nib`, it gives delegate `AppDelegate`,
+window `UIWindow`, visible. That is an `#[ignore]`d test that needs
+`PLAYCOVER_COROMON_NIB`.
 
-- **CALayer, CAMetalLayer, CAEAGLLayer, CADisplayLink and CACurrentMediaTime**
-  belong to agent B (QuartzCore). UIKit needs the interface
-  `layer_for_view(view_class) -> CALayer object` (`+layerClass` then
-  alloc/init), plus `setContentsScale:`, `setFrame:` and `setBounds:` forwarding.
-- **MetalANGLE.** The genuine embedded MetalANGLE subclasses *our* UIView and
-  UIViewController. Its MGLLayer probes `MTLCreateSystemDefaultDevice`. Agent B
-  decides between two paths: provide Metal/CAMetalLayer, or return nil so it
-  falls back to the CAEAGLLayer path backed by host GLES. The other option is a
-  stand-in that replaces MetalANGLE entirely. MGLKView and MGLKViewController
-  would then become owned classes that subclass ours, and agent B owns them.
+**Not done yet**
+- **Notifications.** Nothing is posted: DidFinishLaunching and DidBecomeActive
+  need the milestone 2 NSString constants. The launch log records this.
+- **Wall-clock pacing.** There is no real vsync wait yet.
+- **Idle stops.** With no frame source, the pump stops and logs "idle". On a
+  device it must wait for touch or timer events instead, which needs a
+  long-running, non-tick-limited main from agent A.
+
+### 3.6 CALayer and the MetalANGLE decision (implemented)
+
+**CALayer** is owned here (QuartzCore provider). It is a host record holding
+geometry, `contentsScale`, opacity, hierarchy and delegate. A view's backing
+layer is created at `-initWithFrame:`/`-init` through the guest
+`+layerClass`, so guest overrides are honoured (tested). The layer's bounds,
+position, scale, hidden and opaque state follow the view.
+
+**MetalANGLE decision: replace it with a stand-in; neither Metal nor EAGL.**
+MGLLayer selects CAMetalLayer with an MTLDevice, or its legacy GL backend
+(CAEAGLLayer plus EAGLContext from the cached OpenGLES.framework). Both paths
+need GPU kernel services (IOGPU and IOSurface) that this runtime does not have.
+
+Coromon imports exactly three MetalANGLE classes (MGLContext, MGLKView,
+MGLKViewController) and 72 `gl*` functions. So:
+
+- MGLContext, MGLKView, MGLKViewController and MGLLayer are owned classes,
+  following MetalANGLE's MGLKit sources. MGLKView subclasses our UIView and
+  MGLKViewController subclasses our UIViewController.
+- `-display` makes the context current on the view's MGLLayer surface, sends the
+  guest `-drawRect:` (CoronaView overrides it) and then presents.
+- Resume and pause register the controller as a frame target.
+- The bundled MetalANGLE binary must not be loaded.
+- **Interface with agent B:** `mgl::GlesHost`, which covers create/destroy
+  context, make-current with a surface, bind default framebuffer, and present.
+  Agent B implements it over host GLES, together with the `gl*` family (its
+  M7). `RecordingGles` is the desktop test double.
+
+**CADisplayLink objects** are not implemented. MGLKViewController's frame
+loop is driven directly. Corona's separate CADisplayLink/NSTimer timer is not
+on the startup path, according to the needs analysis.
 
 ## 4. Extensions needed in shared files
 
-- **`a64_objc_namespace.rs`: no change needed.** The UIKit image bypasses it
-  and attaches to any existing root. The limits the researcher reported
-  (64 classes, 64 KiB, 1024 methods, no ivars or categories) do not constrain
-  UIKit.
-- **`a64_bridge.rs`.** `MAX_SERVICES=128` per bridge, and only 255 trampolines
-  fit the 4 KiB page. UIKit uses about 10 to 15 services; agent B's frameworks
-  may need many more. Proposal: a second service page or one dispatcher per
-  framework. The continuation cap of 8 limits per-call fan-out.
-- **Binding (agents A and B).** Route the app's and MetalANGLE's
-  UIKit/UIKitCore imports to `Layout::exports()` plus the C-function and
-  constant export table (milestone 2). Also exclude the cached UIKitCore and its
-  initializers from the dependency closure. The main binary uses classic
-  dyld-info binds, so this goes through the legacy bind path.
-- **UIKitCore's dependency cone (agents A and B).** Excluding UIKitCore means
-  more than skipping its initializers. If libobjc ever sees UIKitCore's header,
-  the cache's preoptimized class table makes `objc_getClass("UIView")` return
-  Apple's class instead of ours. Coromon also hard-links GameKit, StoreKit,
-  MapKit, MessageUI, WebKit, SafariServices and MediaPlayer, and each of them
-  pulls in UIKitCore transitively. Every cached framework in UIKitCore's
-  dependency cone must therefore be stubbed, not loaded as genuine code.
-- **ObjC notification (agent A).** Append the UIKit image's `ObjcImage` to the
-  mapped notification before the app and MetalANGLE.
+- **`a64_objc_namespace.rs`:** no change.
+- **`a64_bridge.rs`:** no change. UIKit uses one slot and reuses the
+  frameworks agent's `dispatch_index()`.
+- **Binding (agent A's loader).** Route the app's UIKit, QuartzCore and
+  MetalANGLE imports to `Layout::exports()`.
+  - The constants come later, in milestone 2.
+  - Exclude the cached UIKitCore and the bundled MetalANGLE from the image
+    closure.
+  - The main binary uses classic dyld-info binds, so this goes through the
+    legacy bind path.
+- **UIKitCore's dependency cone.** If libobjc sees UIKitCore's header, the
+  cache's preoptimized class table makes `objc_getClass("UIView")` return
+  Apple's class. GameKit, StoreKit, MapKit, MessageUI, WebKit, SafariServices
+  and MediaPlayer all pull UIKitCore in, so they must be stubbed, not loaded as
+  genuine code.
+- **ObjC notification (agent A).** Append the image's `ObjcImage` ahead of the
+  app.
 
 ## 5. Milestones (each with a desktop test)
 
-1. **DONE.** Synthetic image, dispatch and core classes. Covered:
-   - UIResponder, UIApplication, UIScreen, UIDevice, UIView, UIWindow and
-     UIViewController;
-   - geometry, hierarchy, key window and root view controller;
-   - view loading with guest overrides;
-   - retain/release and dealloc cleanup.
-
-   Tests (`a64::uikit::*`):
-   - image validity through `ObjcImage::read` and `Registry::register`;
-   - builder rejections;
-   - the state model;
-   - the end-to-end guest subclass chain through the owned objc runtime,
-     including the dealloc chain.
-2. **C exports and constants.** Covered:
-   - `UIApplicationMain` symbol, UIGraphics stubs and UIAccessibility functions;
-   - static CFString constants in `__cfstring`, using an `isa` of
-     `___CFConstantStringClassReference`, for every imported NSString constant;
+1. **DONE.** Synthetic image, dispatch, core classes, view loading,
+   retain/release and dealloc.
+2. **C exports and constants: next.** Covered:
+   - stubs for the UIGraphics and UIAccessibility functions;
+   - static CFString constants (isa `___CFConstantStringClassReference`) for
+     every imported NSString constant;
    - stub classes for all 36 imported classes;
-   - an export table consumed by the binder.
+   - posting launch notifications through genuine NSNotificationCenter.
 
-   Test: bind the real Coromon import list against the table and assert no
-   missing UIKit symbols. This is a desktop test that parses the IPA, `#[ignore]`
-   when the IPA is absent.
-3. **UIApplicationMain pump and launch script.** Covered:
-   - a synthesized MainWindow.nib object graph: delegate class from the nib,
-     with the window assigned through `setWindow:`;
-   - `willFinish`/`didFinish` callbacks, the notifications (through queued
-     NSNotificationCenter calls), `viewDidAppear:` and `applicationDidBecomeActive:`.
-
-   Test: a guest delegate subclass records callback order. The pump stops after
-   N events.
-4. **Layer integration with QuartzCore (agent B).** Covered: `+layerClass`,
-   `-layer`, `contentScaleFactor` to `contentsScale`, and frame propagation.
-
-   Test: a guest `+layerClass` override is honoured.
-5. **Display link and run-loop pacing.** A CADisplayLink target fires from the
-   pump, together with B's CADisplayLink. Test: the virtual clock fires 3 frames.
-6. **Touches.** UITouch and UIEvent objects, NSSet delivery through queued calls,
-   and `locationInView:` using the view-hierarchy transform. Test: synthetic host
-   touch to a guest `touchesBegan:` override.
-7. **Genuine-libobjc integration.** The image is registered by the cached
-   libobjc in the cache-session harness. Test: the native `actual_ipa_regression`
-   probe reaches `-application:didFinishLaunchingWithOptions:`. This needs
-   agent A's initializer progress.
+   Test: bind Coromon's real import list (from the IPA, ignored when it is
+   absent) and assert that no UIKit, QuartzCore or MetalANGLE symbol is missing.
+3. **DONE (desktop): UIApplicationMain pump and nib launch.** Test: a guest
+   delegate records callback order and receives the window outlet.
+4. **DONE (desktop): CALayer and `+layerClass`.** Test: a guest `+layerClass`
+   override is honoured, and geometry and scale propagate.
+5. **Partly done: frame pacing.** MGLKViewController frames from the pump with
+   a virtual clock (3-frame test).
+   - Real vsync wait: open.
+   - CADisplayLink objects: open.
+6. **Touches.** Open: UITouch/UIEvent, NSSet delivery, and `locationInView:`.
+7. **Genuine-libobjc integration.** The cached libobjc registers the image in
+   the cache-session harness. Needs agent A's initializers.
+8. **Host GLES.** A `GlesHost` implementation over the device GL (agent B's
+   `gles` family). It renders on the tablet.
 
 ## 6. Dependencies on the other agents
 
-- **Agent A (initializers and session).**
+- **Agent A (initializers and loader).**
   - libobjc and Foundation initialized;
-  - the mapped notification includes the UIKit image;
-  - binds are redirected;
-  - UIKitCore is excluded;
+  - mapped notification includes the image;
+  - bind routing to `Layout::exports()`;
+  - UIKitCore and MetalANGLE excluded;
   - a non-tick-limited main for the pump;
-  - a `--a64-*` probe that calls `uikit::install` with a free base below
-    64 GiB.
+  - a probe that calls `uikit::install` with a free base below 64 GiB.
 - **Agent B (frameworks).**
-  - CALayer and its subclasses, CADisplayLink and CACurrentMediaTime;
-  - the Metal-or-EAGL decision for MetalANGLE;
-  - UIGraphics drawing helpers if the CoreGraphics context is shared;
-  - NSString and NSArray creation for UIKit returns (for example `windows`,
-    `systemVersion`), if agent B or A owns Foundation bridging.
+  - `GlesHost` plus `gl*` forwarding to host GLES;
+  - CoreGraphics for the UIGraphics text path;
+  - NSString/NSArray creation for UIKit returns (`windows`, `systemVersion`)
+    if agent B owns that Foundation bridging.

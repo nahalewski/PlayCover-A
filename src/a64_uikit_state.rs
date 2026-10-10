@@ -13,38 +13,38 @@
 //! 64-bit doubles (CGFloat is double on arm64).
 use std::collections::BTreeMap;
 
-pub(super) const MAX_VIEWS: usize = 65536;
-pub(super) const MAX_CONTROLLERS: usize = 4096;
+pub(in crate::a64) const MAX_VIEWS: usize = 65536;
+pub(in crate::a64) const MAX_CONTROLLERS: usize = 4096;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub(super) struct Point {
+pub(in crate::a64) struct Point {
     pub x: f64,
     pub y: f64,
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub(super) struct Size {
+pub(in crate::a64) struct Size {
     pub width: f64,
     pub height: f64,
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub(super) struct Rect {
+pub(in crate::a64) struct Rect {
     pub origin: Point,
     pub size: Size,
 }
 impl Rect {
-    pub(super) fn new(x: f64, y: f64, width: f64, height: f64) -> Self {
+    pub(in crate::a64) fn new(x: f64, y: f64, width: f64, height: f64) -> Self {
         Self {
             origin: Point { x, y },
             size: Size { width, height },
         }
     }
-    pub(super) fn center(&self) -> Point {
+    pub(in crate::a64) fn center(&self) -> Point {
         Point {
             x: self.origin.x + self.size.width / 2.0,
             y: self.origin.y + self.size.height / 2.0,
         }
     }
-    pub(super) fn is_finite(&self) -> bool {
+    pub(in crate::a64) fn is_finite(&self) -> bool {
         [self.origin.x, self.origin.y, self.size.width, self.size.height]
             .iter()
             .all(|v| v.is_finite())
@@ -53,28 +53,28 @@ impl Rect {
 
 /// UIInterfaceOrientation / UIDeviceOrientation raw values.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Orientation {
+pub(in crate::a64) enum Orientation {
     Portrait = 1,
     PortraitUpsideDown = 2,
     LandscapeRight = 3,
     LandscapeLeft = 4,
 }
 impl Orientation {
-    pub(super) fn is_landscape(self) -> bool {
+    pub(in crate::a64) fn is_landscape(self) -> bool {
         matches!(self, Self::LandscapeLeft | Self::LandscapeRight)
     }
 }
 
 /// UIApplicationState raw values.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum ApplicationState {
+pub(in crate::a64) enum ApplicationState {
     Active = 0,
     Inactive = 1,
     Background = 2,
 }
 
 #[derive(Clone, Debug)]
-pub(super) struct Screen {
+pub(in crate::a64) struct Screen {
     /// Portrait-native bounds in points (UIScreen.nativeBounds / scale).
     pub portrait_points: Size,
     pub scale: f64,
@@ -82,7 +82,7 @@ pub(super) struct Screen {
 }
 impl Screen {
     /// iOS 8+: UIScreen.bounds follows the interface orientation.
-    pub(super) fn bounds(&self, orientation: Orientation) -> Rect {
+    pub(in crate::a64) fn bounds(&self, orientation: Orientation) -> Rect {
         let Size { width, height } = self.portrait_points;
         if orientation.is_landscape() {
             Rect::new(0.0, 0.0, height, width)
@@ -91,7 +91,7 @@ impl Screen {
         }
     }
     /// UIScreen.nativeBounds is always portrait, in pixels.
-    pub(super) fn native_bounds(&self) -> Rect {
+    pub(in crate::a64) fn native_bounds(&self) -> Rect {
         Rect::new(
             0.0,
             0.0,
@@ -102,7 +102,7 @@ impl Screen {
 }
 
 #[derive(Clone, Debug)]
-pub(super) struct Device {
+pub(in crate::a64) struct Device {
     pub model: String,
     pub system_name: String,
     pub system_version: String,
@@ -112,13 +112,13 @@ pub(super) struct Device {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum ViewKind {
+pub(in crate::a64) enum ViewKind {
     View,
     Window,
 }
 
 #[derive(Clone, Debug)]
-pub(super) struct View {
+pub(in crate::a64) struct View {
     pub kind: ViewKind,
     pub frame: Rect,
     pub bounds: Rect,
@@ -159,8 +159,51 @@ impl View {
     }
 }
 
+/// CALayer state. Geometry follows the owning view (UIKit keeps
+/// layer.bounds == view.bounds and layer.position == view.center).
+#[derive(Clone, Debug)]
+pub(in crate::a64) struct Layer {
+    pub bounds: Rect,
+    pub position: Point,
+    pub contents_scale: f64,
+    pub hidden: bool,
+    pub opaque: bool,
+    pub opacity: f32,
+    pub superlayer: u64,
+    pub sublayers: Vec<u64>,
+    /// The view whose backing layer this is (UIView is the layer delegate).
+    pub view: u64,
+    pub delegate: u64,
+}
+impl Default for Layer {
+    fn default() -> Self {
+        Self {
+            bounds: Rect::default(),
+            position: Point::default(),
+            contents_scale: 1.0,
+            hidden: false,
+            opaque: false,
+            opacity: 1.0,
+            superlayer: 0,
+            sublayers: Vec::new(),
+            view: 0,
+            delegate: 0,
+        }
+    }
+}
+impl Layer {
+    pub(in crate::a64) fn frame(&self) -> Rect {
+        Rect::new(
+            self.position.x - self.bounds.size.width / 2.0,
+            self.position.y - self.bounds.size.height / 2.0,
+            self.bounds.size.width,
+            self.bounds.size.height,
+        )
+    }
+}
+
 #[derive(Clone, Debug, Default)]
-pub(super) struct Controller {
+pub(in crate::a64) struct Controller {
     pub view: u64,
     pub view_loaded: bool,
     pub parent: u64,
@@ -168,7 +211,7 @@ pub(super) struct Controller {
 }
 
 #[derive(Clone, Debug)]
-pub(super) struct Application {
+pub(in crate::a64) struct Application {
     pub object: u64,
     pub delegate: u64,
     pub key_window: u64,
@@ -181,18 +224,19 @@ pub(super) struct Application {
 }
 
 #[derive(Clone, Debug)]
-pub(super) struct Model {
+pub(in crate::a64) struct Model {
     pub screen: Screen,
     pub device: Device,
     pub application: Application,
     views: BTreeMap<u64, View>,
     controllers: BTreeMap<u64, Controller>,
+    layers: BTreeMap<u64, Layer>,
 }
 
 impl Model {
     /// Coromon's Info.plist targets iPhone; the default is a 2x 667x375pt
     /// landscape-capable phone. Real values come from the host display later.
-    pub(super) fn new(screen: Screen, device: Device) -> Result<Self, String> {
+    pub(in crate::a64) fn new(screen: Screen, device: Device) -> Result<Self, String> {
         if !(screen.scale.is_finite() && screen.scale >= 1.0 && screen.scale <= 4.0)
             || !(screen.portrait_points.width > 0.0 && screen.portrait_points.height > 0.0)
         {
@@ -215,17 +259,18 @@ impl Model {
             },
             views: BTreeMap::new(),
             controllers: BTreeMap::new(),
+            layers: BTreeMap::new(),
         })
     }
-    pub(super) fn screen_bounds(&self) -> Rect {
+    pub(in crate::a64) fn screen_bounds(&self) -> Rect {
         self.screen.bounds(self.application.status_bar_orientation)
     }
 
     // ---- views ----
-    pub(super) fn has_view(&self, object: u64) -> bool {
+    pub(in crate::a64) fn has_view(&self, object: u64) -> bool {
         self.views.contains_key(&object)
     }
-    pub(super) fn view(&self, object: u64) -> Result<&View, String> {
+    pub(in crate::a64) fn view(&self, object: u64) -> Result<&View, String> {
         self.views
             .get(&object)
             .ok_or_else(|| format!("UIKit view {object:#x} has no host state"))
@@ -237,7 +282,7 @@ impl Model {
     }
     /// -initWithFrame: (also used for lazily created state of views
     /// initialised through paths we do not intercept, e.g. -initWithCoder:).
-    pub(super) fn init_view(&mut self, object: u64, kind: ViewKind, frame: Rect) -> Result<(), String> {
+    pub(in crate::a64) fn init_view(&mut self, object: u64, kind: ViewKind, frame: Rect) -> Result<(), String> {
         if object == 0 || object & 7 != 0 {
             return Err("UIKit view identity invalid".into());
         }
@@ -259,24 +304,132 @@ impl Model {
                 self.views.insert(object, View::new(kind, frame, scale));
             }
         }
+        self.sync_layer(object);
         Ok(())
     }
-    pub(super) fn ensure_view(&mut self, object: u64, kind: ViewKind) -> Result<(), String> {
+    pub(in crate::a64) fn ensure_view(&mut self, object: u64, kind: ViewKind) -> Result<(), String> {
         if !self.views.contains_key(&object) {
             self.init_view(object, kind, Rect::default())?;
         }
         Ok(())
     }
-    pub(super) fn set_frame(&mut self, object: u64, frame: Rect) -> Result<(), String> {
+    pub(in crate::a64) fn set_frame(&mut self, object: u64, frame: Rect) -> Result<(), String> {
         if !frame.is_finite() {
             return Err("UIKit view frame is not finite".into());
         }
         let view = self.view_mut(object)?;
         view.frame = frame;
         view.bounds.size = frame.size;
+        self.sync_layer(object);
         Ok(())
     }
-    pub(super) fn set_bounds(&mut self, object: u64, bounds: Rect) -> Result<(), String> {
+    /// Keep a view's backing layer geometry and scale in step with the view.
+    pub(in crate::a64) fn sync_layer(&mut self, view: u64) {
+        let Some(v) = self.views.get(&view) else { return };
+        let (bounds, center, scale, hidden, opaque, layer) =
+            (v.bounds, v.frame.center(), v.content_scale_factor, v.hidden, v.opaque, v.layer);
+        if let Some(l) = self.layers.get_mut(&layer) {
+            l.bounds = bounds;
+            l.position = center;
+            l.contents_scale = scale;
+            l.hidden = hidden;
+            l.opaque = opaque;
+        }
+    }
+
+    // ---- layers ----
+    pub(in crate::a64) fn init_layer(&mut self, object: u64) -> Result<(), String> {
+        if object == 0 || object & 7 != 0 {
+            return Err("CALayer identity invalid".into());
+        }
+        if !self.layers.contains_key(&object) {
+            if self.layers.len() >= MAX_VIEWS {
+                return Err("CALayer limit exceeded".into());
+            }
+            self.layers.insert(object, Layer::default());
+        }
+        Ok(())
+    }
+    pub(in crate::a64) fn has_layer(&self, object: u64) -> bool {
+        self.layers.contains_key(&object)
+    }
+    pub(in crate::a64) fn layer(&self, object: u64) -> Result<&Layer, String> {
+        self.layers
+            .get(&object)
+            .ok_or_else(|| format!("CALayer {object:#x} has no host state"))
+    }
+    pub(in crate::a64) fn layer_mut(&mut self, object: u64) -> Result<&mut Layer, String> {
+        self.layers
+            .get_mut(&object)
+            .ok_or_else(|| format!("CALayer {object:#x} has no host state"))
+    }
+    /// Make `layer` the backing layer of `view` (UIView -layer).
+    pub(in crate::a64) fn attach_layer(&mut self, view: u64, layer: u64) -> Result<(), String> {
+        self.init_layer(layer)?;
+        let current = self.view(view)?.layer;
+        if current != 0 && current != layer {
+            return Err("UIKit view already has a different backing layer".into());
+        }
+        self.view_mut(view)?.layer = layer;
+        let l = self.layer_mut(layer)?;
+        l.view = view;
+        l.delegate = view;
+        self.sync_layer(view);
+        Ok(())
+    }
+    pub(in crate::a64) fn add_sublayer(&mut self, parent: u64, child: u64) -> Result<bool, String> {
+        if parent == child {
+            return Err("CALayer cannot be its own sublayer".into());
+        }
+        self.layer(parent)?;
+        let old = self.layer(child)?.superlayer;
+        let mut cursor = parent;
+        let mut steps = 0;
+        while cursor != 0 {
+            if cursor == child || steps > MAX_VIEWS {
+                return Err("CALayer sublayer would create a cycle".into());
+            }
+            steps += 1;
+            cursor = self.layer(cursor)?.superlayer;
+        }
+        if let Some(p) = self.layers.get_mut(&old) {
+            p.sublayers.retain(|&l| l != child);
+        }
+        self.layer_mut(parent)?.sublayers.push(child);
+        self.layer_mut(child)?.superlayer = parent;
+        Ok(old == 0)
+    }
+    pub(in crate::a64) fn remove_from_superlayer(&mut self, child: u64) -> Result<u64, String> {
+        let old = std::mem::replace(&mut self.layer_mut(child)?.superlayer, 0);
+        if let Some(p) = self.layers.get_mut(&old) {
+            p.sublayers.retain(|&l| l != child);
+        }
+        Ok(old)
+    }
+    /// Disposal: returns sublayers (released by the -dealloc cleanup).
+    pub(in crate::a64) fn forget_layer(&mut self, object: u64) -> Vec<u64> {
+        let Some(layer) = self.layers.remove(&object) else {
+            return Vec::new();
+        };
+        if let Some(p) = self.layers.get_mut(&layer.superlayer) {
+            p.sublayers.retain(|&l| l != object);
+        }
+        for child in &layer.sublayers {
+            if let Some(c) = self.layers.get_mut(child) {
+                c.superlayer = 0;
+            }
+        }
+        if let Some(v) = self.views.get_mut(&layer.view) {
+            if v.layer == object {
+                v.layer = 0;
+            }
+        }
+        layer.sublayers
+    }
+    pub(in crate::a64) fn layer_count(&self) -> usize {
+        self.layers.len()
+    }
+    pub(in crate::a64) fn set_bounds(&mut self, object: u64, bounds: Rect) -> Result<(), String> {
         if !bounds.is_finite() {
             return Err("UIKit view bounds is not finite".into());
         }
@@ -289,9 +442,10 @@ impl Model {
             x: center.x - bounds.size.width / 2.0,
             y: center.y - bounds.size.height / 2.0,
         };
+        self.sync_layer(object);
         Ok(())
     }
-    pub(super) fn set_center(&mut self, object: u64, center: Point) -> Result<(), String> {
+    pub(in crate::a64) fn set_center(&mut self, object: u64, center: Point) -> Result<(), String> {
         if !(center.x.is_finite() && center.y.is_finite()) {
             return Err("UIKit view center is not finite".into());
         }
@@ -300,10 +454,13 @@ impl Model {
             x: center.x - view.frame.size.width / 2.0,
             y: center.y - view.frame.size.height / 2.0,
         };
+        self.sync_layer(object);
         Ok(())
     }
-    pub(super) fn with_view<R>(&mut self, object: u64, f: impl FnOnce(&mut View) -> R) -> Result<R, String> {
-        Ok(f(self.view_mut(object)?))
+    pub(in crate::a64) fn with_view<R>(&mut self, object: u64, f: impl FnOnce(&mut View) -> R) -> Result<R, String> {
+        let result = f(self.view_mut(object)?);
+        self.sync_layer(object);
+        Ok(result)
     }
     fn detach(&mut self, child: u64) -> Result<(), String> {
         let parent = self.view(child)?.superview;
@@ -317,7 +474,7 @@ impl Model {
     }
     /// -addSubview: ; returns true if the hierarchy changed (caller retains
     /// the child in the guest when it was newly attached).
-    pub(super) fn add_subview(&mut self, parent: u64, child: u64) -> Result<bool, String> {
+    pub(in crate::a64) fn add_subview(&mut self, parent: u64, child: u64) -> Result<bool, String> {
         if parent == child {
             return Err("UIKit view cannot be its own subview".into());
         }
@@ -343,14 +500,14 @@ impl Model {
         Ok(!was_attached)
     }
     /// -removeFromSuperview ; returns the former superview (0 if none).
-    pub(super) fn remove_from_superview(&mut self, child: u64) -> Result<u64, String> {
+    pub(in crate::a64) fn remove_from_superview(&mut self, child: u64) -> Result<u64, String> {
         let parent = self.view(child)?.superview;
         self.detach(child)?;
         Ok(parent)
     }
     /// Disposal: remove the view and every reference to it. Subviews are
     /// detached (the guest's release of them is the -dealloc thunk's job).
-    pub(super) fn forget_view(&mut self, object: u64) -> Vec<u64> {
+    pub(in crate::a64) fn forget_view(&mut self, object: u64) -> Vec<u64> {
         let Some(view) = self.views.remove(&object) else {
             return Vec::new();
         };
@@ -361,6 +518,10 @@ impl Model {
             if let Some(c) = self.views.get_mut(&child) {
                 c.superview = 0;
             }
+        }
+        if let Some(l) = self.layers.get_mut(&view.layer) {
+            l.view = 0;
+            l.delegate = 0;
         }
         self.application.windows.retain(|&w| w != object);
         if self.application.key_window == object {
@@ -377,7 +538,7 @@ impl Model {
 
     // ---- windows / application ----
     /// -makeKeyAndVisible
-    pub(super) fn make_key_and_visible(&mut self, window: u64) -> Result<(), String> {
+    pub(in crate::a64) fn make_key_and_visible(&mut self, window: u64) -> Result<(), String> {
         let view = self.view_mut(window)?;
         if view.kind != ViewKind::Window {
             return Err("makeKeyAndVisible receiver is not a UIWindow".into());
@@ -389,7 +550,7 @@ impl Model {
         self.application.key_window = window;
         Ok(())
     }
-    pub(super) fn set_root_view_controller(&mut self, window: u64, controller: u64) -> Result<u64, String> {
+    pub(in crate::a64) fn set_root_view_controller(&mut self, window: u64, controller: u64) -> Result<u64, String> {
         let view = self.view_mut(window)?;
         if view.kind != ViewKind::Window {
             return Err("rootViewController receiver is not a UIWindow".into());
@@ -403,7 +564,7 @@ impl Model {
     }
 
     // ---- view controllers ----
-    pub(super) fn ensure_controller(&mut self, object: u64) -> Result<(), String> {
+    pub(in crate::a64) fn ensure_controller(&mut self, object: u64) -> Result<(), String> {
         if object == 0 || object & 7 != 0 {
             return Err("UIKit view controller identity invalid".into());
         }
@@ -415,10 +576,10 @@ impl Model {
         }
         Ok(())
     }
-    pub(super) fn controller(&self, object: u64) -> Option<&Controller> {
+    pub(in crate::a64) fn controller(&self, object: u64) -> Option<&Controller> {
         self.controllers.get(&object)
     }
-    pub(super) fn set_controller_view(&mut self, object: u64, view: u64) -> Result<u64, String> {
+    pub(in crate::a64) fn set_controller_view(&mut self, object: u64, view: u64) -> Result<u64, String> {
         self.ensure_controller(object)?;
         let controller = self.controllers.get_mut(&object).unwrap();
         let old = controller.view;
@@ -426,7 +587,7 @@ impl Model {
         controller.view_loaded = view != 0;
         Ok(old)
     }
-    pub(super) fn forget_controller(&mut self, object: u64) -> Option<Controller> {
+    pub(in crate::a64) fn forget_controller(&mut self, object: u64) -> Option<Controller> {
         let removed = self.controllers.remove(&object);
         for view in self.views.values_mut() {
             if view.root_view_controller == object {
@@ -435,10 +596,10 @@ impl Model {
         }
         removed
     }
-    pub(super) fn view_count(&self) -> usize {
+    pub(in crate::a64) fn view_count(&self) -> usize {
         self.views.len()
     }
-    pub(super) fn controller_count(&self) -> usize {
+    pub(in crate::a64) fn controller_count(&self) -> usize {
         self.controllers.len()
     }
 }
@@ -482,6 +643,25 @@ mod tests {
         assert_eq!(m.view(0x1000).unwrap().frame, Rect::new(-10.0, -5.0, 20.0, 10.0));
         assert!(m.set_frame(0x1000, Rect::new(f64::NAN, 0.0, 1.0, 1.0)).is_err());
         assert!(m.set_frame(0x2000, Rect::default()).is_err());
+    }
+    #[test]
+    fn backing_layer_follows_view_geometry_and_scale() {
+        let mut m = model();
+        m.init_view(0x1000, ViewKind::View, Rect::new(10.0, 20.0, 100.0, 50.0)).unwrap();
+        m.attach_layer(0x1000, 0x2000).unwrap();
+        assert_eq!(m.layer(0x2000).unwrap().frame(), Rect::new(10.0, 20.0, 100.0, 50.0));
+        assert_eq!(m.layer(0x2000).unwrap().contents_scale, 2.0);
+        m.with_view(0x1000, |v| v.content_scale_factor = 3.0).unwrap();
+        m.set_center(0x1000, Point { x: 0.0, y: 0.0 }).unwrap();
+        let l = m.layer(0x2000).unwrap();
+        assert_eq!((l.contents_scale, l.position, l.delegate), (3.0, Point { x: 0.0, y: 0.0 }, 0x1000));
+        assert!(m.attach_layer(0x1000, 0x3000).is_err());
+        m.init_layer(0x4000).unwrap();
+        assert!(m.add_sublayer(0x2000, 0x4000).unwrap());
+        assert!(m.add_sublayer(0x4000, 0x2000).is_err());
+        assert_eq!(m.forget_layer(0x2000), vec![0x4000]);
+        assert_eq!(m.view(0x1000).unwrap().layer, 0);
+        assert_eq!(m.layer(0x4000).unwrap().superlayer, 0);
     }
     #[test]
     fn hierarchy_rejects_cycles_and_disposal_clears_every_reference() {

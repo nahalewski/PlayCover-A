@@ -4,11 +4,11 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 //! Desktop tests for the ARM64 UIKit layer. They execute real guest ARM64
-//! instructions (owned NSObject lifecycle, bridge trampolines, the owned
-//! -dealloc thunks and a guest subclass override) through the emulator-owned
-//! Objective-C services; no Apple binary or device is involved.
+//! instructions (owned NSObject lifecycle, index trampolines, the owned
+//! thunks, UIApplicationMain's pump and guest subclass overrides) through the
+//! emulator-owned Objective-C services. No Apple binary or device is used.
 use super::super::{
-    bridge::{GuestBridge, GuestCall},
+    bridge::{GuestBridge, GuestCall, ReturnValues},
     dyld_objc_callbacks::ObjcImage,
     objc_execution::Initialization,
     objc_execution_services::{self, ObjectRuntime, Selectors},
@@ -19,16 +19,19 @@ use super::super::{
     A64Cpu,
 };
 use super::{
-    image::{self, ClassDef, External, MethodDef, StaticObject},
+    app::{self, LaunchPlan},
+    asm::Asm,
+    image::{self, ClassDef, External, FunctionDef, ImageSpec, MethodDef, StaticObject},
+    mgl::RecordingGles,
     state::{Device, Model, Orientation, Rect, Screen, Size},
-    Links,
+    Links, UiKit,
 };
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
 
 const IMAGE_BASE: u64 = 0x20_0000;
 const GUEST_CODE: u64 = 0x40000;
-const GUEST_MARKER: u64 = 0x41000;
-const GUEST_CLASS: u64 = 0x50000;
+const MARK: u64 = 0x41000;
+const GUEST_META: u64 = 0x50000;
 
 fn model() -> Model {
     Model::new(
@@ -63,6 +66,29 @@ fn root_namespace(cpu: &mut A64Cpu) -> Namespace {
     .unwrap()
 }
 
+fn read_bytes(cpu: &A64Cpu) -> impl FnMut(u64, usize) -> Result<Vec<u8>, String> + '_ {
+    move |address, length| {
+        let mut bytes = vec![0; length];
+        cpu.read_guest_into(address, &mut bytes)?;
+        Ok(bytes)
+    }
+}
+fn rx_only(cpu: &A64Cpu) -> impl FnMut(u64, usize) -> Result<(), String> + '_ {
+    move |address, _| {
+        if cpu.mapped_permissions(address).is_some_and(|p| p & 4 != 0) {
+            Ok(())
+        } else {
+            Err("non-executable".into())
+        }
+    }
+}
+
+fn nop_generator(_: &image::Symbols<'_>) -> Asm {
+    let mut a = Asm::default();
+    a.ret();
+    a
+}
+
 #[test]
 fn synthetic_image_is_a_valid_objc_macho_and_registers_against_an_external_root() {
     let mut cpu = A64Cpu::new_sparse();
@@ -77,31 +103,47 @@ fn synthetic_image_is_a_valid_objc_macho_and_registers_against_an_external_root(
     let defs = [
         ClassDef {
             name: "UIResponder",
+            provider: super::INSTALL_NAME,
             parent: None,
             instance_size: 8,
-            dispatcher: 0x10000,
-            instance_methods: vec![MethodDef { selector: "nextResponder", types: "@16@0:8" }],
+            instance_methods: vec![MethodDef { selector: "nextResponder", types: "@16@0:8", index: 1 }],
             class_methods: vec![],
-            dealloc_cleanup: None,
+            dealloc_cleanup: false,
+        },
+        ClassDef {
+            name: "CALayer",
+            provider: super::QUARTZCORE,
+            parent: None,
+            instance_size: 8,
+            instance_methods: vec![],
+            class_methods: vec![],
+            dealloc_cleanup: false,
         },
         ClassDef {
             name: "UIView",
+            provider: super::INSTALL_NAME,
             parent: Some("UIResponder"),
             instance_size: 8,
-            dispatcher: 0x10000,
-            instance_methods: vec![MethodDef { selector: "frame", types: "{CGRect={CGPoint=dd}{CGSize=dd}}16@0:8" }],
-            class_methods: vec![MethodDef { selector: "layerClass", types: "#16@0:8" }],
-            dealloc_cleanup: Some(0x10000),
+            instance_methods: vec![MethodDef { selector: "frame", types: "{CGRect={CGPoint=dd}{CGSize=dd}}16@0:8", index: 2 }],
+            class_methods: vec![MethodDef { selector: "layerClass", types: "#16@0:8", index: 3 }],
+            dealloc_cleanup: true,
         },
     ];
-    let built = image::build(
-        IMAGE_BASE,
-        super::INSTALL_NAME,
-        &defs,
-        &[StaticObject { class: "UIView", size: 16 }],
-        &["loadView"],
+    let functions = [FunctionDef { symbol: "_UIApplicationMain", provider: Some(super::INSTALL_NAME), generate: nop_generator }];
+    let built = image::build(&ImageSpec {
+        base: IMAGE_BASE,
+        install_name: super::INSTALL_NAME,
+        classes: &defs,
+        statics: &[StaticObject { class: "UIView", size: 16 }],
+        functions: &functions,
+        send_selectors: &["loadView"],
+        got: &["objc_msgSend"],
+        entry_count: 4,
+        cleanup_entry: Some(0),
+        dispatcher: 0x10000,
+        scratch_bytes: 256,
         external,
-    )
+    })
     .unwrap();
     built.map(&mut cpu).unwrap();
     let layout = &built.layout;
@@ -110,314 +152,508 @@ fn synthetic_image_is_a_valid_objc_macho_and_registers_against_an_external_root(
         .unwrap()
         .expect("synthetic image must carry __objc_imageinfo");
     assert!(notified.readonly_ranges().is_empty());
-    // Strict LP64 metadata parsing: graph reaches the external root.
     let mut classes = vec![external.root_class];
     classes.extend(&layout.class_list);
-    let registration = Registry::register(
-        &classes,
-        &layout.selector_refs.values().copied().collect::<Vec<_>>(),
-        |address, length| {
-            let mut bytes = vec![0; length];
-            cpu.read_guest_into(address, &mut bytes)?;
-            Ok(bytes)
-        },
-        |address, _| {
-            if cpu.mapped_permissions(address).is_some_and(|p| p & 4 != 0) {
-                Ok(())
-            } else {
-                Err("non-executable".into())
-            }
-        },
-    )
-    .unwrap();
-    let registry = registration.registry;
+    let selrefs: Vec<u64> = layout.selector_refs.values().copied().collect();
+    let registry = Registry::register(&classes, &selrefs, read_bytes(&cpu), rx_only(&cpu)).unwrap().registry;
     let view = layout.class("UIView").unwrap();
     assert_eq!(registry.lookup_class("UIView"), Some(view));
     assert_eq!(cpu.read_u64(view + 8), layout.class("UIResponder"));
     assert_eq!(cpu.read_u64(layout.metaclass("UIView").unwrap()), Some(external.root_metaclass));
-    assert_eq!(cpu.read_u64(layout.class("UIResponder").unwrap() + 8), Some(external.root_class));
     assert!(registry.selector_named("dealloc").is_some());
-    assert!(registry.selector_named("loadView").is_some());
-    // Static object isa and exports.
+    // Every IMP is its own index trampoline: movz x17,#index; b hub.
+    let frame_imp = layout.entry(2);
+    assert_eq!(cpu.read_bytes(frame_imp, 4).unwrap(), (0xd2800000u32 | 2 << 5 | 17).to_le_bytes());
+    let exports = layout.exports();
+    assert!(exports.contains(&(super::QUARTZCORE.into(), "_OBJC_CLASS_$_CALayer".into(), layout.class("CALayer").unwrap())));
+    assert!(exports.iter().any(|(p, s, _)| p == super::INSTALL_NAME && s == "_UIApplicationMain"));
     assert_eq!(cpu.read_u64(layout.static_object("UIView").unwrap()), Some(view));
-    assert_eq!(layout.exports()["_OBJC_CLASS_$_UIView"], view);
-    assert_eq!(layout.exports()["_OBJC_METACLASS_$_UIView"], layout.metaclass("UIView").unwrap());
-    // __TEXT is RX, __DATA is RW and the image stays below the isa mask.
     assert_eq!(cpu.mapped_permissions(layout.text.0), Some(5));
     assert_eq!(cpu.mapped_permissions(layout.data.0), Some(3));
-    assert!(layout.data.0 + layout.data.1 <= image::ISA_ADDRESS_LIMIT);
-    assert_eq!(layout.thunks.len(), 1);
-    assert!(layout.contains_code(layout.thunks[0].1, image::DEALLOC_THUNK_BYTES as u64));
+    assert!(layout.got.contains_key("objc_msgSendSuper2"));
+    assert!(layout.contains_code(layout.thunks[0].1, 64));
 }
 
 #[test]
 fn image_builder_rejects_bad_parents_selectors_and_placement() {
     let external = External { root_class: 0x1000, root_metaclass: 0x1028, empty_cache: 0 };
-    let def = |name: &'static str, parent: Option<&'static str>, selector: &'static str| ClassDef {
+    let def = |name: &'static str, parent: Option<&'static str>, selector: &'static str, index: u16| ClassDef {
         name,
+        provider: super::INSTALL_NAME,
         parent,
         instance_size: 8,
-        dispatcher: 0x10000,
-        instance_methods: vec![MethodDef { selector, types: "v16@0:8" }],
+        instance_methods: vec![MethodDef { selector, types: "v16@0:8", index }],
         class_methods: vec![],
-        dealloc_cleanup: None,
+        dealloc_cleanup: false,
     };
-    let build = |defs: &[ClassDef], base: u64| image::build(base, super::INSTALL_NAME, defs, &[], &[], external);
-    assert!(build(&[def("UIView", Some("UIResponder"), "frame")], IMAGE_BASE).is_err());
-    assert!(build(&[def("UIView", None, "bad selector")], IMAGE_BASE).is_err());
-    assert!(build(&[def("UIView", None, "a"), def("UIView", None, "b")], IMAGE_BASE).is_err());
-    assert!(build(&[def("UIView", None, "frame")], IMAGE_BASE + 0x1000).is_err());
-    assert!(build(&[def("UIView", None, "frame")], image::ISA_ADDRESS_LIMIT).is_err());
-    let mut with_dealloc = def("UIView", None, "dealloc");
-    with_dealloc.dealloc_cleanup = Some(0x10000);
-    assert!(build(&[with_dealloc], IMAGE_BASE).is_err());
-    assert!(build(&[def("UIView", None, "frame")], IMAGE_BASE).is_ok());
+    let build = |defs: &[ClassDef], base: u64| {
+        image::build(&ImageSpec {
+            base,
+            install_name: super::INSTALL_NAME,
+            classes: defs,
+            statics: &[],
+            functions: &[],
+            send_selectors: &[],
+            got: &[],
+            entry_count: 4,
+            cleanup_entry: None,
+            dispatcher: 0x10000,
+            scratch_bytes: 0,
+            external,
+        })
+    };
+    assert!(build(&[def("UIView", Some("UIResponder"), "frame", 1)], IMAGE_BASE).is_err());
+    assert!(build(&[def("UIView", None, "bad selector", 1)], IMAGE_BASE).is_err());
+    assert!(build(&[def("UIView", None, "a", 1), def("UIView", None, "b", 2)], IMAGE_BASE).is_err());
+    assert!(build(&[def("UIView", None, "frame", 4)], IMAGE_BASE).is_err(), "index out of range");
+    assert!(build(&[def("UIView", None, "frame", 1)], IMAGE_BASE + 0x1000).is_err());
+    assert!(build(&[def("UIView", None, "frame", 1)], image::ISA_ADDRESS_LIMIT).is_err());
+    let mut cleanup = def("UIView", None, "frame", 1);
+    cleanup.dealloc_cleanup = true;
+    assert!(build(&[cleanup], IMAGE_BASE).is_err(), "cleanup thunk needs a cleanup entry");
+    assert!(build(&[def("UIView", None, "frame", 1)], IMAGE_BASE).is_ok());
 }
 
-/// Write a guest subclass `GameViewController : UIViewController` whose
-/// -viewDidLoad is real guest code storing 1 to GUEST_MARKER.
-fn guest_subclass(cpu: &mut A64Cpu, parent: u64, parent_meta: u64, root_meta: u64) -> u64 {
-    cpu.map_zeroed(GUEST_CODE, 4096, 5).unwrap();
-    cpu.map_zeroed(GUEST_MARKER, 4096, 3).unwrap();
-    cpu.map_zeroed(GUEST_CLASS, 4096, 3).unwrap();
-    let mut code: Vec<u8> = [0x5800_0089u32, 0xd280_002a, 0xf900_012a, 0xd65f_03c0]
-        .iter()
-        .flat_map(|w| w.to_le_bytes())
-        .collect();
-    code.extend_from_slice(&GUEST_MARKER.to_le_bytes());
-    cpu.try_write_bytes(GUEST_CODE, &code).unwrap();
-    let (class, meta, ro, meta_ro, list, name, sel, types) = (
-        GUEST_CLASS,
-        GUEST_CLASS + 0x40,
-        GUEST_CLASS + 0x80,
-        GUEST_CLASS + 0xd0,
-        GUEST_CLASS + 0x120,
-        GUEST_CLASS + 0x200,
-        GUEST_CLASS + 0x240,
-        GUEST_CLASS + 0x260,
-    );
-    let w64 = |cpu: &mut A64Cpu, a: u64, v: u64| cpu.write_bytes(a, &v.to_le_bytes());
-    let w32 = |cpu: &mut A64Cpu, a: u64, v: u32| cpu.write_bytes(a, &v.to_le_bytes());
-    w64(cpu, class, meta);
-    w64(cpu, class + 8, parent);
-    w64(cpu, class + 32, ro);
-    w64(cpu, meta, root_meta);
-    w64(cpu, meta + 8, parent_meta);
-    w64(cpu, meta + 32, meta_ro);
-    // Compiled against the real SDK: instance_start is larger than our
-    // eight-byte UIViewController, so no ivar sliding is ever needed.
-    for (ro, flags, start, size, methods) in [(ro, 0u32, 0x3f0u32, 0x400u32, list), (meta_ro, 1, 40, 40, 0)] {
-        w32(cpu, ro, flags);
-        w32(cpu, ro + 4, start);
-        w32(cpu, ro + 8, size);
-        w64(cpu, ro + 24, name);
-        w64(cpu, ro + 32, methods);
+/// A guest class written into fixture memory, compiled-SDK style.
+struct GuestClass {
+    name: &'static str,
+    parent: &'static str,
+    /// (selector, types, code)
+    instance: Vec<(&'static str, &'static str, Asm)>,
+    class: Vec<(&'static str, &'static str, Asm)>,
+}
+
+struct Fixture {
+    cpu: A64Cpu,
+    bridge: GuestBridge,
+    kit: Rc<RefCell<UiKit>>,
+    layout: image::Layout,
+    registry: Rc<Registry>,
+    services: BTreeMap<&'static str, u64>,
+    lifetime: Rc<RefCell<Lifetime>>,
+    guests: BTreeMap<&'static str, u64>,
+    gles: Rc<RefCell<Vec<String>>>,
+}
+
+impl Fixture {
+    fn new(launch: Option<LaunchPlan>, guests: Vec<GuestClass>) -> Self {
+        let mut cpu = A64Cpu::new_sparse();
+        let mut bridge = GuestBridge::map(&mut cpu, 0x20000).unwrap();
+        let lifetime = Rc::new(RefCell::new(Lifetime::default()));
+        let lifetime_services =
+            super::super::objc_lifetime_services::install_without_release(&mut bridge, &mut cpu, lifetime.clone()).unwrap();
+        let mut root = root_namespace(&mut cpu);
+        let external = External {
+            root_class: root.class_address("NSObject").unwrap(),
+            root_metaclass: root.metaclass_address("NSObject").unwrap(),
+            empty_cache: 0,
+        };
+        let gles = Rc::new(RefCell::new(Vec::new()));
+        let installed = super::install(
+            &mut cpu,
+            &mut bridge,
+            IMAGE_BASE,
+            external,
+            model(),
+            Box::new(RecordingGles::new(gles.clone())),
+            launch,
+        )
+        .unwrap();
+        let layout = installed.layout.clone();
+        // Guest classes (code page + metadata), parents from the image.
+        cpu.map_zeroed(GUEST_CODE, 0x1000, 5).unwrap();
+        cpu.map_zeroed(MARK, 0x1000, 3).unwrap();
+        cpu.map_zeroed(GUEST_META, 0x4000, 3).unwrap();
+        let mut code_cursor = GUEST_CODE;
+        let mut meta_cursor = GUEST_META;
+        let mut guest_addresses = BTreeMap::new();
+        for guest in guests {
+            let mut alloc = |size: u64| {
+                let at = meta_cursor;
+                meta_cursor += (size + 15) & !15;
+                at
+            };
+            let (class, meta, ro, meta_ro) = (alloc(40), alloc(40), alloc(72), alloc(72));
+            let name = alloc(guest.name.len() as u64 + 1);
+            cpu.write_bytes(name, guest.name.as_bytes());
+            let mut list = |methods: &[(&str, &str, Asm)], cpu: &mut A64Cpu| -> u64 {
+                if methods.is_empty() {
+                    return 0;
+                }
+                let list = alloc(8 + 24 * methods.len() as u64);
+                cpu.write_bytes(list, &24u32.to_le_bytes());
+                cpu.write_bytes(list + 4, &(methods.len() as u32).to_le_bytes());
+                for (i, (sel, types, code)) in methods.iter().enumerate() {
+                    let s = alloc(sel.len() as u64 + 1);
+                    cpu.write_bytes(s, sel.as_bytes());
+                    let t = alloc(types.len() as u64 + 1);
+                    cpu.write_bytes(t, types.as_bytes());
+                    let bytes = code.finish();
+                    let imp = code_cursor;
+                    cpu.try_write_bytes(imp, &bytes).unwrap();
+                    code_cursor += (bytes.len() as u64 + 15) & !15;
+                    let at = list + 8 + 24 * i as u64;
+                    for (o, v) in [(0, s), (8, t), (16, imp)] {
+                        cpu.write_bytes(at + o, &v.to_le_bytes());
+                    }
+                }
+                list
+            };
+            let instance_list = list(&guest.instance, &mut cpu);
+            let class_list = list(&guest.class, &mut cpu);
+            let (parent, parent_meta) = match guest_addresses.get(guest.parent) {
+                Some(&(c, m)) => (c, m),
+                None => (layout.class(guest.parent).unwrap(), layout.metaclass(guest.parent).unwrap()),
+            };
+            for (a, v) in [
+                (class, meta),
+                (class + 8, parent),
+                (class + 32, ro),
+                (meta, external.root_metaclass),
+                (meta + 8, parent_meta),
+                (meta + 32, meta_ro),
+            ] {
+                cpu.write_bytes(a, &v.to_le_bytes());
+            }
+            // Compiled against the real SDK: instance_start larger than our
+            // eight-byte classes, so no ivar sliding is ever needed.
+            for (ro, flags, start, size, methods) in
+                [(ro, 0u32, 0x3f0u32, 0x400u32, instance_list), (meta_ro, 1, 40, 40, class_list)]
+            {
+                cpu.write_bytes(ro, &flags.to_le_bytes());
+                cpu.write_bytes(ro + 4, &start.to_le_bytes());
+                cpu.write_bytes(ro + 8, &size.to_le_bytes());
+                cpu.write_bytes(ro + 24, &name.to_le_bytes());
+                cpu.write_bytes(ro + 32, &methods.to_le_bytes());
+            }
+            guest_addresses.insert(guest.name, (class, meta));
+        }
+        let mut classes = vec![external.root_class];
+        classes.extend(guest_addresses.values().map(|&(c, _)| c));
+        classes.extend(&layout.class_list);
+        let selrefs: Vec<u64> = layout.selector_refs.values().copied().collect();
+        let registration = Registry::register(&classes, &selrefs, read_bytes(&cpu), rx_only(&cpu)).unwrap();
+        // Apply the runtime's selector-reference fixups, as libobjc would.
+        for fixup in &registration.selector_fixups {
+            cpu.write_bytes(fixup.slot, &fixup.canonical.to_le_bytes());
+        }
+        let registry = Rc::new(registration.registry);
+        let initialization = Rc::new(RefCell::new(Initialization::new(registry.classes().cloned()).unwrap()));
+        let heap = GuestObjectHeap::map(&mut cpu, 0x80000, 0x10000).unwrap();
+        let runtime = Rc::new(RefCell::new(
+            ObjectRuntime::new(registry.clone(), initialization, lifetime.clone(), heap, external.root_class).unwrap(),
+        ));
+        let mut allowed = bridge.instruction_ranges();
+        allowed.push(root.code_range());
+        allowed.push((layout.text.0, layout.text.0 + layout.text.1));
+        allowed.push((GUEST_CODE, GUEST_CODE + 0x1000));
+        let executable = Rc::new(move |address: u64, length: usize| {
+            if allowed
+                .iter()
+                .any(|&(start, end)| address >= start && address.checked_add(length as u64).is_some_and(|e| e <= end))
+            {
+                Ok(())
+            } else {
+                Err("test: outside owned executable ranges".into())
+            }
+        });
+        let execution = objc_execution_services::install(
+            &mut cpu,
+            &mut bridge,
+            runtime.clone(),
+            Selectors::from_registry(&registry).unwrap(),
+            executable,
+            0x90000,
+        )
+        .unwrap();
+        let mut services: BTreeMap<&'static str, u64> =
+            execution.iter().map(|(n, id)| (*n, id.guest_address())).collect();
+        let release = services["_objc_release"];
+        let arc = super::super::objc_arc_services::install(&mut bridge, &mut cpu, runtime.clone(), release).unwrap();
+        services.extend(arc.iter().map(|(n, id)| (*n, id.guest_address())));
+        services.extend(lifetime_services.iter().map(|(n, id)| (*n, id.guest_address())));
+        root.link_root_services(&mut cpu, services["_class_createInstance"], services["_object_dispose"]).unwrap();
+        for class in registry.classes() {
+            lifetime.borrow_mut().register_immortal(class.address).unwrap();
+        }
+        for (_, object) in &layout.static_objects {
+            lifetime.borrow_mut().register_immortal(*object).unwrap();
+        }
+        installed
+            .state
+            .borrow_mut()
+            .link(
+                &mut cpu,
+                Links {
+                    msg_send: services["_objc_msgSend"],
+                    msg_send_super2: services["_objc_msgSendSuper2"],
+                    retain: services["_objc_retain"],
+                    release: services["_objc_release"],
+                    alloc_init: services["_objc_alloc_init"],
+                    get_class: services["_objc_getClass"],
+                },
+            )
+            .unwrap();
+        Self {
+            cpu,
+            bridge,
+            kit: installed.state,
+            layout,
+            registry,
+            services,
+            lifetime,
+            guests: guest_addresses.into_iter().map(|(n, (c, _))| (n, c)).collect(),
+            gles,
+        }
     }
-    w32(cpu, list, 24);
-    w32(cpu, list + 4, 1);
-    w64(cpu, list + 8, sel);
-    w64(cpu, list + 16, types);
-    w64(cpu, list + 24, GUEST_CODE);
-    cpu.write_bytes(name, b"GameViewController\0");
-    cpu.write_bytes(sel, b"viewDidLoad\0");
-    cpu.write_bytes(types, b"v16@0:8\0");
-    class
+    fn call(&mut self, entry: u64, integers: Vec<u64>, vectors: Vec<f64>) -> ReturnValues {
+        self.bridge
+            .call(
+                &mut self.cpu,
+                &GuestCall { entry, integers, vectors: vectors.iter().map(|v| [v.to_bits(), 0]).collect(), ..Default::default() },
+                1_000_000,
+            )
+            .unwrap()
+    }
+    fn sel(&self, name: &str) -> u64 {
+        self.registry.selector_named(name).unwrap_or_else(|| panic!("selector {name}"))
+    }
+    fn send(&mut self, receiver: u64, selector: &str, args: &[u64]) -> ReturnValues {
+        let mut integers = vec![receiver, self.sel(selector)];
+        integers.extend_from_slice(args);
+        self.call(self.services["_objc_msgSend"], integers, vec![])
+    }
+    fn send_f(&mut self, receiver: u64, selector: &str, args: &[u64], floats: &[f64]) -> ReturnValues {
+        let mut integers = vec![receiver, self.sel(selector)];
+        integers.extend_from_slice(args);
+        self.call(self.services["_objc_msgSend"], integers, floats.to_vec())
+    }
+    fn alloc_init(&mut self, class: u64) -> u64 {
+        self.call(self.services["_objc_alloc_init"], vec![class], vec![]).integers[0]
+    }
+    fn class(&self, name: &str) -> u64 {
+        self.guests.get(name).copied().or_else(|| self.layout.class(name)).unwrap()
+    }
+    fn mark(&self, slot: u64) -> u64 {
+        self.cpu.read_u64(MARK + 8 * slot).unwrap()
+    }
+}
+
+fn f64s(values: &ReturnValues, count: usize) -> Vec<f64> {
+    values.vectors[..count].iter().map(|v| f64::from_bits(v[0])).collect()
+}
+
+/// Guest method: counter at MARK += 1, stamp it into MARK[slot]; optionally
+/// store x2 into MARK[store_x2]; return YES.
+fn stamp(slot: u32, store_x2: Option<u32>) -> Asm {
+    let mut a = Asm::default();
+    a.ldr_literal(9, MARK).ldr(10, 9, 0).add_imm(10, 10, 1).str(10, 9, 0).str(10, 9, 8 * slot);
+    if let Some(at) = store_x2 {
+        a.str(2, 9, 8 * at);
+    }
+    a.movz(0, 1).ret();
+    a
+}
+fn returns(value: u64) -> Asm {
+    let mut a = Asm::default();
+    a.ldr_literal(0, value).ret();
+    a
 }
 
 #[test]
 fn guest_subclass_chains_into_owned_uikit_and_disposal_clears_host_state() {
-    let mut cpu = A64Cpu::new_sparse();
-    let mut bridge = GuestBridge::map(&mut cpu, 0x20000).unwrap();
-    let lifetime = Rc::new(RefCell::new(Lifetime::default()));
-    let arc = super::super::objc_lifetime_services::install_without_release(&mut bridge, &mut cpu, lifetime.clone()).unwrap();
-    let mut root = root_namespace(&mut cpu);
-    let external = External {
-        root_class: root.class_address("NSObject").unwrap(),
-        root_metaclass: root.metaclass_address("NSObject").unwrap(),
-        empty_cache: 0,
-    };
-    let installed = super::install(&mut cpu, &mut bridge, IMAGE_BASE, external, model()).unwrap();
-    let layout = installed.layout.clone();
-    let kit = installed.state.clone();
-    let game = guest_subclass(
-        &mut cpu,
-        layout.class("UIViewController").unwrap(),
-        layout.metaclass("UIViewController").unwrap(),
-        external.root_metaclass,
+    let mut f = Fixture::new(
+        None,
+        vec![GuestClass {
+            name: "GameViewController",
+            parent: "UIViewController",
+            instance: vec![("viewDidLoad", "v16@0:8", stamp(1, None))],
+            class: vec![],
+        }],
     );
-    let mut classes = vec![external.root_class, game];
-    classes.extend(&layout.class_list);
-    let registration = Registry::register(
-        &classes,
-        &layout.selector_refs.values().copied().collect::<Vec<_>>(),
-        |address, length| {
-            let mut bytes = vec![0; length];
-            cpu.read_guest_into(address, &mut bytes)?;
-            Ok(bytes)
-        },
-        |address, _| {
-            if cpu.mapped_permissions(address).is_some_and(|p| p & 4 != 0) {
-                Ok(())
-            } else {
-                Err("non-executable".into())
-            }
-        },
-    )
-    .unwrap();
-    // Apply the runtime's selector-reference fixups, as libobjc would.
-    for fixup in &registration.selector_fixups {
-        cpu.write_bytes(fixup.slot, &fixup.canonical.to_le_bytes());
-    }
-    let registry = Rc::new(registration.registry);
-    let initialization = Rc::new(RefCell::new(Initialization::new(registry.classes().cloned()).unwrap()));
-    let heap = GuestObjectHeap::map(&mut cpu, 0x80000, 65536).unwrap();
-    let runtime = Rc::new(RefCell::new(
-        ObjectRuntime::new(registry.clone(), initialization.clone(), lifetime.clone(), heap, external.root_class).unwrap(),
-    ));
-    let mut allowed = bridge.instruction_ranges();
-    allowed.push(root.code_range());
-    allowed.push((layout.text.0, layout.text.0 + layout.text.1));
-    allowed.push((GUEST_CODE, GUEST_CODE + 4096));
-    let executable = Rc::new(move |address: u64, length: usize| {
-        if allowed
-            .iter()
-            .any(|&(start, end)| address >= start && address.checked_add(length as u64).is_some_and(|e| e <= end))
-        {
-            Ok(())
-        } else {
-            Err("test: outside owned executable ranges".into())
-        }
-    });
-    let execution = objc_execution_services::install(
-        &mut cpu,
-        &mut bridge,
-        runtime.clone(),
-        Selectors::from_registry(&registry).unwrap(),
-        executable,
-        0x90000,
-    )
-    .unwrap();
-    let service = |name: &str| execution.iter().find(|(n, _)| *n == name).unwrap().1.guest_address();
-    root.link_root_services(&mut cpu, service("_class_createInstance"), service("_object_dispose")).unwrap();
-    for class in registry.classes() {
-        lifetime.borrow_mut().register_immortal(class.address).unwrap();
-    }
-    for (_, object) in &layout.static_objects {
-        lifetime.borrow_mut().register_immortal(*object).unwrap();
-    }
-    kit.borrow_mut()
-        .link(
-            &mut cpu,
-            Links {
-                msg_send: service("_objc_msgSend"),
-                msg_send_super2: service("_objc_msgSendSuper2"),
-                retain: arc.iter().find(|(n, _)| *n == "_objc_retain").unwrap().1.guest_address(),
-                release: service("_objc_release"),
-                alloc_init: service("_objc_alloc_init"),
-            },
-        )
-        .unwrap();
-    let pool = arc.iter().find(|(n, _)| *n == "_objc_autoreleasePoolPush").unwrap().1.guest_address();
-    let msg = service("_objc_msgSend");
-    let sel = |name: &str| registry.selector_named(name).unwrap_or_else(|| panic!("selector {name}"));
-    let _ = pool;
-    fn invoke(bridge: &mut GuestBridge, cpu: &mut A64Cpu, entry: u64, integers: Vec<u64>) -> super::super::bridge::ReturnValues {
-        bridge
-            .call(cpu, &GuestCall { entry, integers, ..Default::default() }, 1_000_000)
-            .unwrap()
-    }
-    macro_rules! send {
-        ($integers:expr) => {
-            invoke(&mut bridge, &mut cpu, msg, $integers)
-        };
-    }
-
     // Singletons and screen metrics.
-    let screen_class = layout.class("UIScreen").unwrap();
-    let screen = send!(vec![screen_class, sel("mainScreen")]).integers[0];
-    assert_eq!(screen, layout.static_object("UIScreen").unwrap());
-    let bounds = send!(vec![screen, sel("bounds")]);
-    let rect: Vec<f64> = bounds.vectors.iter().map(|v| f64::from_bits(v[0])).collect();
-    assert_eq!(rect, vec![0.0, 0.0, 667.0, 375.0]);
-    let scale = send!(vec![screen, sel("scale")]);
-    assert_eq!(f64::from_bits(scale.vectors[0][0]), 2.0);
-    let app_class = layout.class("UIApplication").unwrap();
-    let app = send!(vec![app_class, sel("sharedApplication")]).integers[0];
-    assert_eq!(app, layout.static_object("UIApplication").unwrap());
-    send!(vec![app, sel("setIdleTimerDisabled:"), 1]);
-    assert_eq!(send!(vec![app, sel("isIdleTimerDisabled")]).integers[0], 1);
-    let device = send!(vec![layout.class("UIDevice").unwrap(), sel("currentDevice")]).integers[0];
-    assert_eq!(send!(vec![device, sel("userInterfaceIdiom")]).integers[0], 0);
+    let screen = f.send(f.class("UIScreen"), "mainScreen", &[]).integers[0];
+    assert_eq!(screen, f.layout.static_object("UIScreen").unwrap());
+    assert_eq!(f64s(&f.send(screen, "bounds", &[]), 4), vec![0.0, 0.0, 667.0, 375.0]);
+    assert_eq!(f64s(&f.send(screen, "scale", &[]), 1), vec![2.0]);
+    let app = f.send(f.class("UIApplication"), "sharedApplication", &[]).integers[0];
+    assert_eq!(app, f.layout.static_object("UIApplication").unwrap());
+    f.send(app, "setIdleTimerDisabled:", &[1]);
+    assert_eq!(f.send(app, "isIdleTimerDisabled", &[]).integers[0], 1);
+    let device = f.send(f.class("UIDevice"), "currentDevice", &[]).integers[0];
+    assert_eq!(f.send(device, "userInterfaceIdiom", &[]).integers[0], 0);
 
-    // Guest subclass: alloc/init via owned runtime; -view runs the default
-    // -loadView (genuine guest objc_alloc_init of UIView) and the GUEST
-    // -viewDidLoad override, then re-dispatches -view.
-    let controller = bridge
-        .call(&mut cpu, &GuestCall { entry: service("_objc_alloc_init"), integers: vec![game], ..Default::default() }, 200_000)
-        .unwrap()
-        .integers[0];
-    assert_ne!(controller, 0);
-    assert_eq!(cpu.read_u64(controller), Some(game));
-    assert_eq!(cpu.read_u64(GUEST_MARKER), Some(0));
-    let view = bridge
-        .call(&mut cpu, &GuestCall { entry: msg, integers: vec![controller, sel("view")], ..Default::default() }, 400_000)
-        .unwrap()
-        .integers[0];
+    // Guest subclass: -view runs the default -loadView (guest
+    // objc_alloc_init of UIView, whose init creates a CALayer through guest
+    // +layerClass code) and the GUEST -viewDidLoad override.
+    let controller = f.alloc_init(f.class("GameViewController"));
+    assert_eq!(f.cpu.read_u64(controller), Some(f.class("GameViewController")));
+    let view = f.send(controller, "view", &[]).integers[0];
     assert_ne!(view, 0);
-    assert_eq!(cpu.read_u64(view), layout.class("UIView"));
-    assert_eq!(cpu.read_u64(GUEST_MARKER), Some(1), "guest -viewDidLoad override must run");
-    let again = bridge
-        .call(&mut cpu, &GuestCall { entry: msg, integers: vec![controller, sel("view")], ..Default::default() }, 200_000)
-        .unwrap()
-        .integers[0];
-    assert_eq!(again, view);
-    let frame = bridge
-        .call(&mut cpu, &GuestCall { entry: msg, integers: vec![view, sel("frame")], ..Default::default() }, 200_000)
-        .unwrap();
-    assert_eq!(f64::from_bits(frame.vectors[2][0]), 667.0);
+    assert_eq!(f.cpu.read_u64(view), Some(f.class("UIView")));
+    assert_eq!(f.mark(1), 1, "guest -viewDidLoad override must run");
+    assert_eq!(f.send(controller, "view", &[]).integers[0], view);
+    assert_eq!(f64s(&f.send(view, "frame", &[]), 4), vec![0.0, 0.0, 667.0, 375.0]);
+    let layer = f.send(view, "layer", &[]).integers[0];
+    assert_ne!(layer, 0);
+    assert_eq!(f.cpu.read_u64(layer), Some(f.class("CALayer")));
+    assert_eq!(f64s(&f.send(layer, "contentsScale", &[]), 1), vec![2.0]);
 
     // Window: init uses screen bounds; root view controller is retained.
-    let window = bridge
-        .call(&mut cpu, &GuestCall { entry: service("_objc_alloc_init"), integers: vec![layout.class("UIWindow").unwrap()], ..Default::default() }, 200_000)
-        .unwrap()
-        .integers[0];
-    let call = |bridge: &mut GuestBridge, cpu: &mut A64Cpu, integers: Vec<u64>| {
-        bridge.call(cpu, &GuestCall { entry: msg, integers, ..Default::default() }, 400_000).unwrap()
-    };
-    call(&mut bridge, &mut cpu, vec![window, sel("setRootViewController:"), controller]);
-    call(&mut bridge, &mut cpu, vec![window, sel("makeKeyAndVisible")]);
-    assert_eq!(call(&mut bridge, &mut cpu, vec![app, sel("keyWindow")]).integers[0], window);
-    assert_eq!(call(&mut bridge, &mut cpu, vec![window, sel("rootViewController")]).integers[0], controller);
-    let set_frame = GuestCall {
-        entry: msg,
-        integers: vec![view, sel("setFrame:")],
-        vectors: [1.0f64, 2.0, 30.0, 40.0].iter().map(|v| [v.to_bits(), 0]).collect(),
-        ..Default::default()
-    };
-    bridge.call(&mut cpu, &set_frame, 200_000).unwrap();
-    let center = call(&mut bridge, &mut cpu, vec![view, sel("center")]);
-    assert_eq!((f64::from_bits(center.vectors[0][0]), f64::from_bits(center.vectors[1][0])), (16.0, 22.0));
-    call(&mut bridge, &mut cpu, vec![window, sel("addSubview:"), view]);
-    assert_eq!(call(&mut bridge, &mut cpu, vec![view, sel("window")]).integers[0], window);
+    let window = f.alloc_init(f.class("UIWindow"));
+    f.send(window, "setRootViewController:", &[controller]);
+    f.send(window, "makeKeyAndVisible", &[]);
+    assert_eq!(f.send(app, "keyWindow", &[]).integers[0], window);
+    assert_eq!(f.send(window, "rootViewController", &[]).integers[0], controller);
+    f.send_f(view, "setFrame:", &[], &[1.0, 2.0, 30.0, 40.0]);
+    assert_eq!(f64s(&f.send(view, "center", &[]), 2), vec![16.0, 22.0]);
+    assert_eq!(f64s(&f.send(layer, "position", &[]), 2), vec![16.0, 22.0]);
+    f.send(window, "addSubview:", &[view]);
+    assert_eq!(f.send(view, "window", &[]).integers[0], window);
     {
-        let k = kit.borrow();
+        let k = f.kit.borrow();
         assert_eq!(k.model.view_count(), 2);
-        assert_eq!(k.model.controller_count(), 1);
+        assert_eq!(k.model.layer_count(), 2);
         assert_eq!(k.model.view(view).unwrap().frame, Rect::new(1.0, 2.0, 30.0, 40.0));
     }
-    // The caller drops its own (+1 alloc) reference to the controller; the
-    // -view result was +0. The window's -dealloc thunk then releases its
-    // subview and root controller, whose thunk releases the last view owner.
-    let release = service("_objc_release");
-    bridge.call(&mut cpu, &GuestCall { entry: release, integers: vec![controller], ..Default::default() }, 200_000).unwrap();
-    assert!(lifetime.borrow().contains_identity(controller));
-    bridge.call(&mut cpu, &GuestCall { entry: release, integers: vec![window], ..Default::default() }, 1_000_000).unwrap();
-    for object in [window, controller, view] {
-        assert!(!lifetime.borrow().contains_identity(object), "{object:#x} must be disposed");
+    // Drop the caller's +1 controller; the window's -dealloc thunk releases
+    // its subview, root controller and layer; the controller's releases its
+    // view; each view's releases its layer.
+    let release = f.services["_objc_release"];
+    f.call(release, vec![controller], vec![]);
+    assert!(f.lifetime.borrow().contains_identity(controller));
+    f.call(release, vec![window], vec![]);
+    for object in [window, controller, view, layer] {
+        assert!(!f.lifetime.borrow().contains_identity(object), "{object:#x} must be disposed");
     }
-    let k = kit.borrow();
-    assert_eq!(k.model.view_count(), 0);
-    assert_eq!(k.model.controller_count(), 0);
+    let k = f.kit.borrow();
+    assert_eq!((k.model.view_count(), k.model.controller_count(), k.model.layer_count()), (0, 0, 0));
     assert_eq!(k.model.application.key_window, 0);
     assert!(k.first_use.iter().any(|s| s == "-[UIViewController loadView]"));
+    assert!(k.first_use.iter().any(|s| s == "+[UIView layerClass]"));
+}
+
+#[test]
+fn guest_layer_class_override_and_mglkit_stand_in_draw_and_present() {
+    let mut f = Fixture::new(
+        None,
+        vec![
+            GuestClass {
+                name: "MetalBackedView",
+                parent: "UIView",
+                instance: vec![],
+                // Filled in below once the MGLLayer address is known.
+                class: vec![("layerClass", "#16@0:8", returns(0))],
+            },
+            GuestClass {
+                name: "CoronaLikeView",
+                parent: "MGLKView",
+                instance: vec![("drawRect:", "v48@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16", stamp(2, None))],
+                class: vec![],
+            },
+        ],
+    );
+    // Patch the guest +layerClass literal to return MGLLayer.
+    let mgl_layer = f.class("MGLLayer");
+    let meta = f.cpu.read_u64(f.class("MetalBackedView")).unwrap();
+    let ro = f.cpu.read_u64(meta + 32).unwrap();
+    let list = f.cpu.read_u64(ro + 32).unwrap();
+    let imp = f.cpu.read_u64(list + 24).unwrap();
+    f.cpu.try_write_bytes(imp + 8, &mgl_layer.to_le_bytes()).unwrap();
+    let custom = f.alloc_init(f.class("MetalBackedView"));
+    let layer = f.send(custom, "layer", &[]).integers[0];
+    assert_eq!(f.cpu.read_u64(layer), Some(mgl_layer), "guest +layerClass override honoured");
+
+    // MGLContext + MGLKView subclass (Corona's CoronaView shape).
+    let context = f.call(f.services["_objc_alloc"], vec![f.class("MGLContext")], vec![]).integers[0];
+    assert_eq!(f.send(context, "initWithAPI:", &[2]).integers[0], context);
+    let view = f.call(f.services["_objc_alloc"], vec![f.class("CoronaLikeView")], vec![]).integers[0];
+    let view = f.send_f(view, "initWithFrame:context:", &[context], &[0.0, 0.0, 667.0, 375.0]).integers[0];
+    assert_eq!(f.send(view, "context", &[]).integers[0], context);
+    let gl_layer = f.send(view, "glLayer", &[]).integers[0];
+    assert_eq!(f.cpu.read_u64(gl_layer), Some(mgl_layer));
+    f.send(view, "setDrawableDepthFormat:", &[24]);
+    f.send_f(view, "setContentScaleFactor:", &[], &[3.0]);
+    assert_eq!(f.send(view, "drawableWidth", &[]).integers[0], 2001);
+    assert_eq!(f.send(view, "drawableHeight", &[]).integers[0], 1125);
+    f.send(view, "display", &[]);
+    assert_eq!(f.mark(2), 1, "guest -drawRect: override ran from -display");
+    let log = f.gles.borrow().clone();
+    assert_eq!(log, vec!["create 1 api=2", "current 1 2001x1125", "present 1 2001x1125"]);
+    assert!(f.send(context, "API", &[]).integers[0] == 2);
+}
+
+#[test]
+fn ui_application_main_runs_nib_launch_sequence_and_display_link_frames() {
+    let plan = app::parse_nib(&app::tests::coromon_like_nib("TestDelegate")).unwrap();
+    let mut f = Fixture::new(
+        Some(plan),
+        vec![
+            GuestClass {
+                name: "TestDelegate",
+                parent: "UIResponder",
+                instance: vec![
+                    ("respondsToSelector:", "B24@0:8:16", returns(1)),
+                    ("setWindow:", "v24@0:8@16", stamp(1, Some(20))),
+                    ("application:willFinishLaunchingWithOptions:", "B32@0:8@16@24", stamp(2, Some(21))),
+                    ("application:didFinishLaunchingWithOptions:", "B32@0:8@16@24", stamp(3, None)),
+                    ("applicationDidBecomeActive:", "v24@0:8@16", stamp(4, None)),
+                ],
+                class: vec![],
+            },
+            GuestClass {
+                name: "CoronaLikeView",
+                parent: "MGLKView",
+                instance: vec![("drawRect:", "v48@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16", stamp(5, None))],
+                class: vec![],
+            },
+        ],
+    );
+    let main = f.layout.function("_UIApplicationMain").unwrap();
+    // UIApplicationMain(argc, argv, nil, nil): no frame source yet, so the
+    // pump stops after the launch sequence (an explicit, logged idle stop).
+    assert_eq!(f.call(main, vec![1, 0, 0, 0], vec![]).integers[0], 0);
+    let (delegate, window) = {
+        let k = f.kit.borrow();
+        (k.launcher.delegate(), k.launcher.window())
+    };
+    assert_eq!(f.cpu.read_u64(delegate), Some(f.class("TestDelegate")));
+    assert_eq!(f.cpu.read_u64(window), Some(f.class("UIWindow")));
+    // Order: setWindow:, willFinish, didFinish, didBecomeActive.
+    assert_eq!((f.mark(1), f.mark(2), f.mark(3), f.mark(4)), (1, 2, 3, 4));
+    assert_eq!(f.mark(20), window, "nib window outlet connected");
+    assert_eq!(f.mark(21), f.layout.static_object("UIApplication").unwrap());
+    let app = f.send(f.class("UIApplication"), "sharedApplication", &[]).integers[0];
+    assert_eq!(f.send(app, "delegate", &[]).integers[0], delegate);
+    assert_eq!(f.send(app, "keyWindow", &[]).integers[0], window);
+    assert_eq!(f.send(app, "applicationState", &[]).integers[0], 0, "active");
+    assert!(f.kit.borrow().launcher.log.iter().any(|l| l.contains("no frame source")));
+
+    // What Corona's didFinishLaunching sets up: MGLKViewController + view.
+    let controller = f.alloc_init(f.class("MGLKViewController"));
+    let context = f.call(f.services["_objc_alloc"], vec![f.class("MGLContext")], vec![]).integers[0];
+    f.send(context, "initWithAPI:", &[2]);
+    let view = f.call(f.services["_objc_alloc"], vec![f.class("CoronaLikeView")], vec![]).integers[0];
+    f.send_f(view, "initWithFrame:context:", &[context], &[0.0, 0.0, 667.0, 375.0]);
+    f.send(controller, "setView:", &[view]);
+    assert_eq!(f.send(controller, "glView", &[]).integers[0], view);
+    f.send(window, "setRootViewController:", &[controller]);
+    f.send(controller, "setPreferredFramesPerSecond:", &[60]);
+    assert_eq!(f.send(controller, "isPaused", &[]).integers[0], 0);
+    // A second UIApplicationMain entry continues the run loop for 3 frames.
+    f.kit.borrow_mut().launcher.continue_frames(3);
+    assert_eq!(f.call(main, vec![1, 0, 0, 0], vec![]).integers[0], 0);
+    assert_eq!(f.mark(5), 3 + 4, "guest -drawRect: ran once per frame");
+    assert_eq!(f.send(controller, "framesDisplayed", &[]).integers[0], 3);
+    let presents = f.gles.borrow().iter().filter(|l| l.starts_with("present 1 1334x750")).count();
+    assert_eq!(presents, 3);
+    let since = f64s(&f.send(controller, "timeSinceLastUpdate", &[]), 1)[0];
+    assert!((since - 1.0 / 60.0).abs() < 1e-9);
+}
+
+#[test]
+fn table_budget_fits_single_service_and_entry_limit() {
+    let (classes, methods) = super::table_counts();
+    assert!(classes <= image::MAX_CLASSES);
+    assert!(methods + 4 <= image::MAX_ENTRIES);
 }

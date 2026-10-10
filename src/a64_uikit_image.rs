@@ -3,23 +3,29 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
-//! Synthetic, emulator-owned UIKit Mach-O image with genuine LP64 objc2
-//! metadata (class_t, class_ro_t, method lists, __objc_classlist,
-//! __objc_imageinfo, __objc_selrefs).
+//! Synthetic, emulator-owned Mach-O image (UIKit, the QuartzCore classes and
+//! the MetalANGLE MGLKit stand-in) with genuine LP64 objc2 metadata:
+//! class_t, class_ro_t, method lists, __objc_classlist, __objc_imageinfo,
+//! __objc_selrefs.
 //!
-//! The image is laid out exactly like a compiled MH_DYLIB so that it can be
-//! handed either to the emulator's own Objective-C registry (desktop tests and
-//! the owned-Foundation path) or, later, to the genuine cached libobjc through
-//! the ordinary dyld ObjC "mapped" notification (see ARM64_UIKIT_PLAN.md).
-//! Nothing here is an Apple binary: every method IMP is either a registered
-//! bridge service trampoline or a small owned thunk in this image's __text.
+//! The image is laid out like a compiled MH_DYLIB so that it can be handed
+//! either to the emulator's own Objective-C registry (desktop tests, owned
+//! Foundation path) or to the genuine cached libobjc through the ordinary dyld
+//! ObjC "mapped" notification (see dev-docs/ARM64_UIKIT_PLAN.md). Nothing here
+//! is an Apple binary.
+//!
+//! Every method IMP is its own 8-byte trampoline `movz x17,#index; b hub`,
+//! and the hub branches to ONE bridge service. The service dispatches on the
+//! index, not on the selector, so swizzling (method_exchangeImplementations)
+//! keeps working and the whole layer costs a single bridge slot.
 //!
 //! Classes carry no ivar list. Instances are `isa` plus inherited storage;
-//! all UIKit state lives host-side keyed by object address. A guest subclass
-//! compiled against the real SDK keeps its compiled ivar offsets, because its
+//! all state lives host-side keyed by object address. A guest subclass
+//! compiled against the real SDK keeps its compiled ivar offsets because its
 //! instance_start is never smaller than our (tiny) instance_size.
 use super::super::A64Cpu;
-use std::collections::BTreeMap;
+use super::asm::Asm;
+use std::collections::{BTreeMap, BTreeSet};
 
 const PAGE: u64 = 0x4000;
 const MH_MAGIC_64: u32 = 0xfeed_facf;
@@ -30,15 +36,15 @@ const LC_ID_DYLIB: u32 = 0xd;
 const LC_UUID: u32 = 0x1b;
 /// libobjc's `ISA_MASK` on arm64 (non-ptrauth) keeps bits 3..35. Raw-isa
 /// static objects and class pointers must therefore stay below 64 GiB.
-pub(super) const ISA_ADDRESS_LIMIT: u64 = 0x10_0000_0000;
-/// Limits are explicit, not open-ended (raise deliberately when needed).
-pub(super) const MAX_CLASSES: usize = 256;
-pub(super) const MAX_METHODS: usize = 8192;
-pub(super) const MAX_IMAGE_BYTES: u64 = 4 * 1024 * 1024;
+pub(in crate::a64) const ISA_ADDRESS_LIMIT: u64 = 0x10_0000_0000;
+/// Explicit limits (raise deliberately when needed).
+pub(in crate::a64) const MAX_CLASSES: usize = 256;
+pub(in crate::a64) const MAX_ENTRIES: usize = 8192;
+pub(in crate::a64) const MAX_IMAGE_BYTES: u64 = 4 * 1024 * 1024;
 
 /// Addresses the image refers to but does not own.
 #[derive(Clone, Copy, Debug)]
-pub(super) struct External {
+pub(in crate::a64) struct External {
     /// Root class (NSObject) and its metaclass; genuine cached or owned.
     pub root_class: u64,
     pub root_metaclass: u64,
@@ -46,82 +52,148 @@ pub(super) struct External {
     pub empty_cache: u64,
 }
 
-pub(super) struct MethodDef {
+pub(in crate::a64) struct MethodDef {
     pub selector: &'static str,
     pub types: &'static str,
+    /// Dispatcher entry index (trampoline number).
+    pub index: u16,
 }
 
-pub(super) struct ClassDef {
+pub(in crate::a64) struct ClassDef {
     pub name: &'static str,
+    /// Install name the class is exported from (UIKit, QuartzCore, MetalANGLE).
+    pub provider: &'static str,
     /// `None` attaches the class directly to the external root (NSObject).
     pub parent: Option<&'static str>,
     pub instance_size: u32,
-    /// Every method of this class traps to this one dispatcher service; the
-    /// handler switches on the selector name.
-    pub dispatcher: u64,
     pub instance_methods: Vec<MethodDef>,
     pub class_methods: Vec<MethodDef>,
-    /// When set, `-dealloc` is an owned thunk: call this host service with
+    /// `-dealloc` becomes an owned thunk: call the cleanup entry with
     /// (self, _cmd), then `[super dealloc]` through objc_msgSendSuper2.
-    pub dealloc_cleanup: Option<u64>,
+    pub dealloc_cleanup: bool,
 }
 
-/// A static, immortal instance (e.g. the shared UIApplication) whose only
-/// storage is its isa word plus zero padding.
-pub(super) struct StaticObject {
+/// A static, immortal instance whose only storage is its isa word.
+pub(in crate::a64) struct StaticObject {
     pub class: &'static str,
     pub size: u32,
 }
 
+/// Addresses available to generated code.
+pub(in crate::a64) struct Symbols<'a> {
+    pub entries: u64,
+    pub got: &'a BTreeMap<String, u64>,
+    pub selector_refs: &'a BTreeMap<String, u64>,
+    pub classes: &'a BTreeMap<String, (u64, u64)>,
+    pub scratch: u64,
+}
+impl Symbols<'_> {
+    pub(in crate::a64) fn entry(&self, index: u16) -> u64 {
+        self.entries + 8 * index as u64
+    }
+    pub(in crate::a64) fn got(&self, name: &str) -> u64 {
+        self.got.get(name).copied().unwrap_or(0)
+    }
+    pub(in crate::a64) fn selref(&self, name: &str) -> u64 {
+        self.selector_refs.get(name).copied().unwrap_or(0)
+    }
+    pub(in crate::a64) fn class(&self, name: &str) -> u64 {
+        self.classes.get(name).map_or(0, |&(c, _)| c)
+    }
+}
+
+/// Owned code exported as a C function (e.g. `_UIApplicationMain`) or used
+/// internally. The generator is run twice (sizing, then final addresses);
+/// it must emit the same number of instructions and literals each time.
+pub(in crate::a64) struct FunctionDef {
+    pub symbol: &'static str,
+    /// Some(install name) to export; None for internal code.
+    pub provider: Option<&'static str>,
+    pub generate: fn(&Symbols<'_>) -> Asm,
+}
+
+pub(in crate::a64) struct ImageSpec<'a> {
+    pub base: u64,
+    pub install_name: &'a str,
+    pub classes: &'a [ClassDef],
+    pub statics: &'a [StaticObject],
+    pub functions: &'a [FunctionDef],
+    /// Selectors the host or generated code sends (fixed-up selrefs).
+    pub send_selectors: &'a [&'static str],
+    /// Named pointer slots bound at link time (like GOT entries).
+    pub got: &'a [&'static str],
+    /// Number of dispatcher entries (trampolines) to emit.
+    pub entry_count: u16,
+    /// Entry used by the -dealloc thunks.
+    pub cleanup_entry: Option<u16>,
+    /// The single bridge service every trampoline reaches.
+    pub dispatcher: u64,
+    pub scratch_bytes: u64,
+    pub external: External,
+}
+
 #[derive(Debug, Clone)]
-pub(super) struct Layout {
+pub(in crate::a64) struct Layout {
     pub header: u64,
     pub text: (u64, u64),
     pub data: (u64, u64),
     pub install_name: String,
     /// name -> (class, metaclass)
     pub classes: BTreeMap<String, (u64, u64)>,
+    pub class_providers: BTreeMap<String, String>,
     pub class_list: Vec<u64>,
-    /// selector name -> __objc_selrefs slot (only selectors the thunks use)
     pub selector_refs: BTreeMap<String, u64>,
-    /// selector name -> address of its name string in __objc_methname
-    pub selector_names: BTreeMap<String, u64>,
     pub static_objects: Vec<(String, u64)>,
     pub thunks: Vec<(String, u64)>,
-    /// Bound pointer slot for `objc_msgSendSuper2` (written at link time,
-    /// like a GOT entry), read by the -dealloc thunks.
-    pub msg_send_super2_slot: u64,
+    pub functions: BTreeMap<String, (Option<String>, u64)>,
+    pub got: BTreeMap<String, u64>,
+    pub entries: u64,
+    pub entry_count: u16,
+    pub scratch: (u64, u64),
 }
 
-pub(super) struct BuiltImage {
+pub(in crate::a64) struct BuiltImage {
     pub layout: Layout,
     text: Vec<u8>,
     data: Vec<u8>,
 }
 
 impl Layout {
-    pub(super) fn class(&self, name: &str) -> Option<u64> {
+    pub(in crate::a64) fn class(&self, name: &str) -> Option<u64> {
         self.classes.get(name).map(|&(c, _)| c)
     }
-    pub(super) fn metaclass(&self, name: &str) -> Option<u64> {
+    pub(in crate::a64) fn metaclass(&self, name: &str) -> Option<u64> {
         self.classes.get(name).map(|&(_, m)| m)
     }
-    pub(super) fn static_object(&self, class: &str) -> Option<u64> {
+    pub(in crate::a64) fn static_object(&self, class: &str) -> Option<u64> {
         self.static_objects
             .iter()
             .find(|(c, _)| c == class)
             .map(|&(_, a)| a)
     }
-    /// `_OBJC_CLASS_$_X` / `_OBJC_METACLASS_$_X` substitutes for app binds.
-    pub(super) fn exports(&self) -> BTreeMap<String, u64> {
-        let mut result = BTreeMap::new();
+    pub(in crate::a64) fn function(&self, symbol: &str) -> Option<u64> {
+        self.functions.get(symbol).map(|&(_, a)| a)
+    }
+    pub(in crate::a64) fn entry(&self, index: u16) -> u64 {
+        self.entries + 8 * index as u64
+    }
+    /// (provider install name, symbol, address) substitutes for app binds:
+    /// `_OBJC_CLASS_$_X`, `_OBJC_METACLASS_$_X` and exported functions.
+    pub(in crate::a64) fn exports(&self) -> Vec<(String, String, u64)> {
+        let mut result = Vec::new();
         for (name, &(class, meta)) in &self.classes {
-            result.insert(format!("_OBJC_CLASS_$_{name}"), class);
-            result.insert(format!("_OBJC_METACLASS_$_{name}"), meta);
+            let provider = &self.class_providers[name];
+            result.push((provider.clone(), format!("_OBJC_CLASS_$_{name}"), class));
+            result.push((provider.clone(), format!("_OBJC_METACLASS_$_{name}"), meta));
+        }
+        for (symbol, (provider, address)) in &self.functions {
+            if let Some(provider) = provider {
+                result.push((provider.clone(), symbol.clone(), *address));
+            }
         }
         result
     }
-    pub(super) fn contains_code(&self, address: u64, length: u64) -> bool {
+    pub(in crate::a64) fn contains_code(&self, address: u64, length: u64) -> bool {
         address >= self.text.0
             && address
                 .checked_add(length)
@@ -158,8 +230,17 @@ impl Buffer {
     fn u64(&mut self, address: u64, value: u64) {
         self.put(address, &value.to_le_bytes());
     }
-    fn len(&self) -> u64 {
-        self.bytes.len() as u64
+    fn end(&self) -> u64 {
+        self.base + self.bytes.len() as u64
+    }
+    fn string(&mut self, table: &mut BTreeMap<String, u64>, s: &str) -> Result<u64, String> {
+        if let Some(&a) = table.get(s) {
+            return Ok(a);
+        }
+        let a = self.reserve(s.len() + 1, 1)?;
+        self.put(a, s.as_bytes());
+        table.insert(s.to_string(), a);
+        Ok(a)
     }
 }
 
@@ -171,111 +252,105 @@ fn valid_identifier(name: &str, allow_colon: bool) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || (allow_colon && b == b':'))
 }
 
-/// Owned `-dealloc` thunk, equivalent to compiled
-/// `{ cleanup(self, _cmd); [super dealloc]; }`. The selector is loaded from
-/// this image's own __objc_selrefs slot so the registering runtime's fixup
-/// (genuine libobjc map_images or the owned Registry plan) is honoured.
-fn dealloc_thunk(cleanup: u64, class: u64, selref: u64, super2_slot: u64) -> Vec<u8> {
-    // Instructions occupy bytes 0..64; the literal pool is at 64..96.
-    let literal = |index: u64, register: u32, instruction: u64| -> u32 {
-        let offset = 64 + index * 8 - instruction * 4;
-        0x5800_0000 | (((offset / 4) as u32 & 0x7ffff) << 5) | register
-    };
-    let words: [u32; 16] = [
-        0xa9be_7bfd,        // stp x29, x30, [sp, #-32]!
-        0x9100_03fd,        // mov x29, sp
-        0xf900_0be0,        // str x0, [sp, #16]
-        literal(0, 16, 3),  // ldr x16, =cleanup service (x0=self, x1=_cmd)
-        0xd63f_0200,        // blr x16
-        0xf940_0be0,        // ldr x0, [sp, #16]
-        literal(1, 9, 6),   // ldr x9, =this class
-        0xa901_27e0,        // stp x0, x9, [sp, #16]   ; objc_super2
-        0x9100_43e0,        // add x0, sp, #16
-        literal(2, 1, 9),   // ldr x1, =&selref
-        0xf940_0021,        // ldr x1, [x1]
-        literal(3, 16, 11), // ldr x16, =&objc_msgSendSuper2 slot
-        0xf940_0210,        // ldr x16, [x16]
-        0xd63f_0200,        // blr x16
-        0xa8c2_7bfd,        // ldp x29, x30, [sp], #32
-        0xd65f_03c0,        // ret
-    ];
-    let mut bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
-    for value in [cleanup, class, selref, super2_slot] {
-        bytes.extend_from_slice(&value.to_le_bytes());
-    }
-    bytes
+/// Owned `-dealloc`: `{ cleanup(self, _cmd); [super dealloc]; }`. The SEL
+/// comes from this image's own selref (fixed up by the registering runtime)
+/// and objc_msgSendSuper2 from a bound GOT slot.
+fn dealloc_thunk(cleanup: u64, class: u64, selref: u64, super2_slot: u64) -> Asm {
+    let mut a = Asm::default();
+    a.prologue(32)
+        .str(0, 31, 16)
+        .ldr_literal(16, cleanup)
+        .blr(16)
+        .ldr(0, 31, 16)
+        .ldr_literal(9, class)
+        .stp(0, 9, 31, 16) // objc_super2 { receiver, current class }
+        .add_imm(0, 31, 16)
+        .ldr_indirect(1, selref)
+        .ldr_indirect(16, super2_slot)
+        .blr(16)
+        .epilogue(32);
+    a
 }
-pub(super) const DEALLOC_THUNK_BYTES: usize = 96;
 
-pub(super) fn build(
-    base: u64,
-    install_name: &str,
-    classes: &[ClassDef],
-    statics: &[StaticObject],
-    send_selectors: &[&'static str],
-    external: External,
-) -> Result<BuiltImage, String> {
-    if base == 0 || base % PAGE != 0 || base.checked_add(MAX_IMAGE_BYTES * 2).is_none_or(|end| end > ISA_ADDRESS_LIMIT) {
+pub(in crate::a64) fn build(spec: &ImageSpec<'_>) -> Result<BuiltImage, String> {
+    let base = spec.base;
+    if base == 0
+        || base % PAGE != 0
+        || base
+            .checked_add(MAX_IMAGE_BYTES * 2)
+            .is_none_or(|end| end > ISA_ADDRESS_LIMIT)
+    {
         return Err("UIKit image base must be 16 KiB aligned and below the 64 GiB isa limit".into());
     }
+    let classes = spec.classes;
     if classes.is_empty() || classes.len() > MAX_CLASSES {
         return Err("UIKit image class count invalid".into());
     }
-    if install_name.is_empty() || !install_name.starts_with('/') || install_name.len() > 512 || install_name.contains('\0') {
+    let install_name = spec.install_name;
+    if !install_name.starts_with('/') || install_name.len() > 512 || install_name.contains('\0') {
         return Err("UIKit image install name invalid".into());
     }
+    let external = spec.external;
     for address in [external.root_class, external.root_metaclass] {
         if address == 0 || address & 7 != 0 || address >= ISA_ADDRESS_LIMIT {
             return Err("UIKit image external root class identity invalid".into());
         }
     }
-    // Validate names, parents and selector sets before any layout work.
+    if spec.dispatcher == 0 || spec.dispatcher & 3 != 0 {
+        return Err("UIKit image dispatcher invalid".into());
+    }
+    if spec.entry_count as usize > MAX_ENTRIES || spec.scratch_bytes > 256 * 1024 {
+        return Err("UIKit image entry/scratch budget exceeded".into());
+    }
+    let any_cleanup = classes.iter().any(|c| c.dealloc_cleanup);
+    let cleanup = match (any_cleanup, spec.cleanup_entry) {
+        (false, _) => None,
+        (true, Some(index)) if index < spec.entry_count => Some(index),
+        _ => return Err("UIKit dealloc thunks need a valid cleanup entry".into()),
+    };
+    // ---- validation ----
     let mut seen = BTreeMap::new();
-    let mut method_total = 0usize;
     for (index, class) in classes.iter().enumerate() {
         if !valid_identifier(class.name, false) || seen.insert(class.name, index).is_some() {
             return Err(format!("invalid or duplicate UIKit class name {}", class.name));
+        }
+        if !class.provider.starts_with('/') && !class.provider.starts_with('@') {
+            return Err(format!("UIKit class {} provider invalid", class.name));
         }
         if let Some(parent) = class.parent {
             let Some(&parent_index) = seen.get(parent) else {
                 return Err(format!("UIKit class {} parent {parent} must precede it", class.name));
             };
-            if parent_index == index {
-                return Err("UIKit class cannot be its own parent".into());
-            }
-            if class.instance_size < classes[parent_index].instance_size {
-                return Err(format!("UIKit class {} smaller than its parent", class.name));
+            if parent_index == index || class.instance_size < classes[parent_index].instance_size {
+                return Err(format!("UIKit class {} parent/size invalid", class.name));
             }
         }
         if class.instance_size < 8 || class.instance_size > 4096 || class.instance_size % 8 != 0 {
             return Err(format!("UIKit class {} instance size invalid", class.name));
         }
-        if class.dispatcher == 0 || class.dispatcher & 3 != 0 {
-            return Err(format!("UIKit class {} dispatcher invalid", class.name));
-        }
         for list in [&class.instance_methods, &class.class_methods] {
-            let mut names = std::collections::BTreeSet::new();
+            let mut names = BTreeSet::new();
             for method in list.iter() {
                 if !valid_identifier(method.selector, true)
                     || method.types.is_empty()
                     || method.types.len() > 255
                     || method.types.contains('\0')
+                    || method.index >= spec.entry_count
                     || !names.insert(method.selector)
                 {
-                    return Err(format!("UIKit class {} has invalid/duplicate selector {}", class.name, method.selector));
+                    return Err(format!(
+                        "UIKit class {} has invalid/duplicate method {}",
+                        class.name, method.selector
+                    ));
                 }
             }
-            method_total += list.len();
         }
-        if class.dealloc_cleanup.is_some() && class.instance_methods.iter().any(|m| m.selector == "dealloc") {
-            return Err("UIKit class declares both host dealloc and a cleanup thunk".into());
+        if class.dealloc_cleanup && class.instance_methods.iter().any(|m| m.selector == "dealloc") {
+            return Err("UIKit class declares both a host dealloc and a cleanup thunk".into());
         }
     }
-    if method_total > MAX_METHODS {
-        return Err("UIKit image method budget exceeded".into());
-    }
-    let mut referenced: Vec<&str> = send_selectors.to_vec();
-    if classes.iter().any(|c| c.dealloc_cleanup.is_some()) {
+    let mut referenced: Vec<&str> = spec.send_selectors.to_vec();
+    if any_cleanup {
         referenced.push("dealloc");
     }
     referenced.sort_unstable();
@@ -283,69 +358,90 @@ pub(super) fn build(
     if referenced.len() > 1024 || referenced.iter().any(|s| !valid_identifier(s, true)) {
         return Err("UIKit image sent-selector list invalid".into());
     }
-    for object in statics {
+    let mut got_names: Vec<&str> = spec.got.to_vec();
+    if any_cleanup {
+        got_names.push("objc_msgSendSuper2");
+    }
+    got_names.sort_unstable();
+    got_names.dedup();
+    for object in spec.statics {
         if !seen.contains_key(object.class) || object.size < 8 || object.size % 8 != 0 || object.size > 4096 {
             return Err(format!("invalid static UIKit object of class {}", object.class));
         }
     }
+    let mut function_names = BTreeSet::new();
+    for function in spec.functions {
+        if !valid_identifier(function.symbol, false) || !function_names.insert(function.symbol) {
+            return Err(format!("invalid or duplicate UIKit function {}", function.symbol));
+        }
+    }
 
-    // ---- __TEXT: header, load commands, __text (thunks), cstrings ----
+    // ---- sizing pass for generated code ----
+    let empty = BTreeMap::new();
+    let empty_classes = BTreeMap::new();
+    let dummy = Symbols {
+        entries: 0,
+        got: &empty,
+        selector_refs: &empty,
+        classes: &empty_classes,
+        scratch: 0,
+    };
+    let function_sizes: Vec<usize> = spec.functions.iter().map(|f| (f.generate)(&dummy).finish().len()).collect();
+    let thunk_size = dealloc_thunk(0, 0, 0, 0).finish().len();
+    let thunk_count = classes.iter().filter(|c| c.dealloc_cleanup).count();
+
+    // ---- __TEXT layout ----
+    let text_sections = ["__text", "__objc_methname", "__objc_classname", "__objc_methtype"];
     let data_sections = [
-        ("__objc_classlist", 3u32, 0x1000_0000u32),
-        ("__objc_imageinfo", 2, 0),
-        ("__objc_selrefs", 3, 0x1000_0005),
-        ("__got", 3, 6),
-        ("__objc_const", 3, 0),
-        ("__objc_data", 3, 0),
-        ("__data", 3, 0),
+        "__objc_classlist",
+        "__objc_imageinfo",
+        "__objc_selrefs",
+        "__got",
+        "__objc_const",
+        "__objc_data",
+        "__data",
     ];
-    let text_sections = [("__text", 2u32, 0x8000_0400u32), ("__objc_methname", 0, 2), ("__objc_classname", 0, 2), ("__objc_methtype", 0, 2)];
     let id_len = (24 + install_name.len() + 1 + 7) & !7;
     let commands_len = (72 + 80 * text_sections.len()) + (72 + 80 * data_sections.len()) + id_len + 24;
     let mut text = Buffer { base, bytes: Vec::new() };
     text.reserve(32 + commands_len, 8)?;
-    // Thunk code first (fixed-size per class) so later literal values are known.
-    let thunk_count = classes.iter().filter(|c| c.dealloc_cleanup.is_some()).count();
-    let code_start = text.reserve(DEALLOC_THUNK_BYTES * thunk_count.max(1), 16)?;
-    let code_len = (DEALLOC_THUNK_BYTES * thunk_count) as u64;
+    let code_start = text.reserve(16, 16)?; // hub: ldr x16,=svc; br x16; .quad svc
+    let entries = text.reserve(8 * spec.entry_count as usize, 8)?;
+    let mut function_addresses = Vec::new();
+    for size in &function_sizes {
+        function_addresses.push(text.reserve(*size, 16)?);
+    }
+    let mut thunk_addresses = Vec::new();
+    for _ in 0..thunk_count {
+        thunk_addresses.push(text.reserve(thunk_size, 16)?);
+    }
+    let code_end = text.end();
     let mut methname = BTreeMap::new();
-    let strings_of = |text: &mut Buffer, table: &mut BTreeMap<String, u64>, s: &str| -> Result<u64, String> {
-        if let Some(&a) = table.get(s) {
-            return Ok(a);
-        }
-        let a = text.reserve(s.len() + 1, 1)?;
-        text.put(a, s.as_bytes());
-        table.insert(s.to_string(), a);
-        Ok(a)
-    };
-    let methname_start = text.len() + base;
-    let mut all_selectors: Vec<&str> = classes
+    let methname_start = text.end();
+    for s in classes
         .iter()
         .flat_map(|c| c.instance_methods.iter().chain(c.class_methods.iter()).map(|m| m.selector))
-        .collect();
-    all_selectors.extend(referenced.iter().copied());
-    for s in &all_selectors {
-        strings_of(&mut text, &mut methname, s)?;
+        .chain(referenced.iter().copied())
+    {
+        text.string(&mut methname, s)?;
     }
-    let methname_end = text.len() + base;
+    let methname_end = text.end();
     let mut classname = BTreeMap::new();
     for class in classes {
-        strings_of(&mut text, &mut classname, class.name)?;
+        text.string(&mut classname, class.name)?;
     }
-    let classname_end = text.len() + base;
+    let classname_end = text.end();
     let mut methtype = BTreeMap::new();
-    for class in classes {
-        for m in class.instance_methods.iter().chain(class.class_methods.iter()) {
-            strings_of(&mut text, &mut methtype, m.types)?;
-        }
+    for m in classes.iter().flat_map(|c| c.instance_methods.iter().chain(c.class_methods.iter())) {
+        text.string(&mut methtype, m.types)?;
     }
-    if thunk_count > 0 {
-        strings_of(&mut text, &mut methtype, "v16@0:8")?;
+    if any_cleanup {
+        text.string(&mut methtype, "v16@0:8")?;
     }
-    let methtype_end = text.len() + base;
-    let text_size = (text.len() + PAGE - 1) & !(PAGE - 1);
+    let methtype_end = text.end();
+    let text_size = (text.end() - base + PAGE - 1) & !(PAGE - 1);
 
-    // ---- __DATA ----
+    // ---- __DATA layout ----
     let data_base = base + text_size;
     let mut data = Buffer { base: data_base, bytes: Vec::new() };
     let classlist = data.reserve(8 * classes.len(), 8)?;
@@ -358,24 +454,22 @@ pub(super) fn build(
         data.u64(slot, methname[*name]);
         selector_refs.insert(name.to_string(), slot);
     }
-    let selrefs_end = data.len() + data_base;
-    let super2_slot = data.reserve(8, 8)?;
-    let got_end = data.len() + data_base;
-    // __objc_const: class_ro_t pairs and method lists; addresses are assigned
-    // after __objc_data is sized, so reserve __objc_data first in a scratch
-    // pass: each class_t is 40 bytes, metaclass 40 bytes.
-    let const_start = data.len() + data_base;
-    debug_assert_eq!(const_start, got_end);
-    let mut ro_addresses = Vec::new();
-    for _ in classes {
-        let ro = data.reserve(72, 8)?;
-        let meta_ro = data.reserve(72, 8)?;
-        ro_addresses.push((ro, meta_ro));
-    }
+    let got_start = data.reserve(8 * got_names.len(), 8)?;
+    let got: BTreeMap<String, u64> = got_names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.to_string(), got_start + 8 * i as u64))
+        .collect();
+    let got_end = data.end();
+    let const_start = data.end();
+    let ro_addresses: Vec<(u64, u64)> = classes
+        .iter()
+        .map(|_| Ok((data.reserve(72, 8)?, data.reserve(72, 8)?)))
+        .collect::<Result<_, String>>()?;
     let mut method_lists = Vec::new();
     for class in classes {
         let mut lists = [0u64; 2];
-        let instance_count = class.instance_methods.len() + usize::from(class.dealloc_cleanup.is_some());
+        let instance_count = class.instance_methods.len() + usize::from(class.dealloc_cleanup);
         for (slot, count) in [(0, instance_count), (1, class.class_methods.len())] {
             if count > 0 {
                 lists[slot] = data.reserve(8 + 24 * count, 8)?;
@@ -383,37 +477,37 @@ pub(super) fn build(
         }
         method_lists.push(lists);
     }
-    let const_end = data.len() + data_base;
-    let objc_data_start = data.len() + data_base;
-    let mut class_addresses = Vec::new();
-    for _ in classes {
-        let class = data.reserve(40, 8)?;
-        let meta = data.reserve(40, 8)?;
-        class_addresses.push((class, meta));
-    }
-    let objc_data_end = data.len() + data_base;
+    let const_end = data.end();
+    let class_addresses: Vec<(u64, u64)> = classes
+        .iter()
+        .map(|_| Ok((data.reserve(40, 8)?, data.reserve(40, 8)?)))
+        .collect::<Result<_, String>>()?;
+    let objc_data_end = data.end();
     let mut static_objects = Vec::new();
-    for object in statics {
-        let address = data.reserve(object.size as usize, 16)?;
-        static_objects.push((object.class.to_string(), address));
+    for object in spec.statics {
+        static_objects.push((object.class.to_string(), data.reserve(object.size as usize, 16)?));
     }
-    let data_data_end = data.len() + data_base;
-    let data_size = (data.len().max(8) + PAGE - 1) & !(PAGE - 1);
+    let scratch = data.reserve(spec.scratch_bytes as usize, 16)?;
+    let data_end = data.end();
+    let data_size = ((data_end - data_base).max(8) + PAGE - 1) & !(PAGE - 1);
     if text_size + data_size > MAX_IMAGE_BYTES {
         return Err("UIKit image exceeds byte budget".into());
     }
 
-    // ---- populate classes ----
+    // ---- classes ----
     let mut names = BTreeMap::new();
+    for (index, class) in classes.iter().enumerate() {
+        names.insert(class.name.to_string(), class_addresses[index]);
+    }
     let mut thunks = Vec::new();
-    let mut thunk_cursor = code_start;
+    let mut thunk_cursor = thunk_addresses.iter();
     for (index, class) in classes.iter().enumerate() {
         let (normal, meta) = class_addresses[index];
         let (ro, meta_ro) = ro_addresses[index];
         let (parent, parent_meta, parent_size) = match class.parent {
             Some(parent) => {
-                let parent_index = seen[parent];
-                (class_addresses[parent_index].0, class_addresses[parent_index].1, classes[parent_index].instance_size)
+                let p = seen[parent];
+                (class_addresses[p].0, class_addresses[p].1, classes[p].instance_size)
             }
             None => (external.root_class, external.root_metaclass, 8),
         };
@@ -437,26 +531,24 @@ pub(super) fn build(
             data.u64(ro + 24, name);
             data.u64(ro + 32, list);
         }
+        let entry = |i: u16| entries + 8 * i as u64;
         let mut instance: Vec<(u64, u64, u64)> = class
             .instance_methods
             .iter()
-            .map(|m| (methname[m.selector], methtype[m.types], class.dispatcher))
+            .map(|m| (methname[m.selector], methtype[m.types], entry(m.index)))
             .collect();
-        if let Some(cleanup) = class.dealloc_cleanup {
-            if cleanup == 0 || cleanup & 3 != 0 {
-                return Err("UIKit dealloc cleanup service invalid".into());
-            }
-            let code = dealloc_thunk(cleanup, normal, selector_refs["dealloc"], super2_slot);
-            debug_assert_eq!(code.len(), DEALLOC_THUNK_BYTES);
-            text.put(thunk_cursor, &code);
-            instance.push((methname["dealloc"], methtype["v16@0:8"], thunk_cursor));
-            thunks.push((class.name.to_string(), thunk_cursor));
-            thunk_cursor += DEALLOC_THUNK_BYTES as u64;
+        if class.dealloc_cleanup {
+            let at = *thunk_cursor.next().unwrap();
+            let code = dealloc_thunk(entry(cleanup.unwrap()), normal, selector_refs["dealloc"], got["objc_msgSendSuper2"]).finish();
+            debug_assert_eq!(code.len(), thunk_size);
+            text.put(at, &code);
+            instance.push((methname["dealloc"], methtype["v16@0:8"], at));
+            thunks.push((class.name.to_string(), at));
         }
         let class_methods: Vec<(u64, u64, u64)> = class
             .class_methods
             .iter()
-            .map(|m| (methname[m.selector], methtype[m.types], class.dispatcher))
+            .map(|m| (methname[m.selector], methtype[m.types], entry(m.index)))
             .collect();
         for (list, methods) in [(instance_list, instance), (class_list, class_methods)] {
             if list == 0 {
@@ -472,10 +564,36 @@ pub(super) fn build(
             }
         }
         data.u64(classlist + 8 * index as u64, normal);
-        names.insert(class.name.to_string(), (normal, meta));
     }
     for (class, address) in &static_objects {
         data.u64(*address, names[class].0);
+    }
+
+    // ---- code: hub, trampolines, functions ----
+    let mut hub = Asm::default();
+    hub.ldr_literal(16, spec.dispatcher).br(16);
+    text.put(code_start, &hub.finish());
+    for index in 0..spec.entry_count as u64 {
+        let at = entries + 8 * index;
+        let branch = 0x1400_0000u32 | (((code_start as i64 - (at + 4) as i64) / 4) as u32 & 0x3ff_ffff);
+        text.u32(at, 0xd280_0000 | (index as u32) << 5 | 17); // movz x17, #index
+        text.u32(at + 4, branch); // b hub
+    }
+    let symbols = Symbols {
+        entries,
+        got: &got,
+        selector_refs: &selector_refs,
+        classes: &names,
+        scratch,
+    };
+    let mut functions = BTreeMap::new();
+    for (function, &at) in spec.functions.iter().zip(&function_addresses) {
+        let code = (function.generate)(&symbols).finish();
+        if code.len() != function_sizes[functions.len()] {
+            return Err(format!("UIKit function {} changed size between passes", function.symbol));
+        }
+        text.put(at, &code);
+        functions.insert(function.symbol.to_string(), (function.provider.map(str::to_string), at));
     }
 
     // ---- header and load commands ----
@@ -504,23 +622,37 @@ pub(super) fn build(
         }
         *cursor += len;
     };
-    let text_section_values = [
-        (text_sections[0].0, code_start, code_len, text_sections[0].1, text_sections[0].2),
-        (text_sections[1].0, methname_start, methname_end - methname_start, 0, 2),
-        (text_sections[2].0, methname_end, classname_end - methname_end, 0, 2),
-        (text_sections[3].0, classname_end, methtype_end - classname_end, 0, 2),
-    ];
-    write_segment(&mut text, &mut cursor, "__TEXT", base, text_size, 5, &text_section_values);
-    let data_section_values = [
-        (data_sections[0].0, classlist, 8 * classes.len() as u64, 3, data_sections[0].2),
-        (data_sections[1].0, imageinfo, 8, 2, 0),
-        (data_sections[2].0, selrefs_start, selrefs_end - selrefs_start, 3, data_sections[2].2),
-        (data_sections[3].0, super2_slot, 8, 3, data_sections[3].2),
-        (data_sections[4].0, const_start, const_end - const_start, 3, 0),
-        (data_sections[5].0, objc_data_start, objc_data_end - objc_data_start, 3, 0),
-        (data_sections[6].0, objc_data_end, data_data_end - objc_data_end, 4, 0),
-    ];
-    write_segment(&mut text, &mut cursor, "__DATA", data_base, data_size, 3, &data_section_values);
+    write_segment(
+        &mut text,
+        &mut cursor,
+        "__TEXT",
+        base,
+        text_size,
+        5,
+        &[
+            (text_sections[0], code_start, code_end - code_start, 4, 0x8000_0400),
+            (text_sections[1], methname_start, methname_end - methname_start, 0, 2),
+            (text_sections[2], methname_end, classname_end - methname_end, 0, 2),
+            (text_sections[3], classname_end, methtype_end - classname_end, 0, 2),
+        ],
+    );
+    write_segment(
+        &mut text,
+        &mut cursor,
+        "__DATA",
+        data_base,
+        data_size,
+        3,
+        &[
+            (data_sections[0], classlist, 8 * classes.len() as u64, 3, 0x1000_0000),
+            (data_sections[1], imageinfo, 8, 2, 0),
+            (data_sections[2], selrefs_start, 8 * referenced.len() as u64, 3, 0x1000_0005),
+            (data_sections[3], got_start, got_end - got_start, 3, 6),
+            (data_sections[4], const_start, const_end - const_start, 3, 0),
+            (data_sections[5], const_end, objc_data_end - const_end, 3, 0),
+            (data_sections[6], objc_data_end, data_end - objc_data_end, 4, 0),
+        ],
+    );
     text.u32(cursor, LC_ID_DYLIB);
     text.u32(cursor + 4, id_len as u32);
     text.u32(cursor + 8, 24);
@@ -530,19 +662,16 @@ pub(super) fn build(
     cursor += id_len as u64;
     text.u32(cursor, LC_UUID);
     text.u32(cursor + 4, 24);
-    // Deterministic, recognisably synthetic UUID ("touchHLE UIKit  ").
-    text.put(cursor + 8, b"touchHLE UIKit\x00\x01");
+    text.put(cursor + 8, b"touchHLE UIKit\x00\x02");
     cursor += 24;
     debug_assert_eq!(cursor, base + 32 + commands_len as u64);
     for (offset, value) in [
         (0u64, MH_MAGIC_64),
         (4, CPU_TYPE_ARM64),
-        (8, 0),
         (12, MH_DYLIB),
         (16, 4),
         (20, commands_len as u32),
-        // MH_NOUNDEFS | MH_DYLDLINK | MH_TWOLEVEL
-        (24, 0x1 | 0x4 | 0x80),
+        (24, 0x1 | 0x4 | 0x80), // MH_NOUNDEFS | MH_DYLDLINK | MH_TWOLEVEL
     ] {
         text.u32(base + offset, value);
     }
@@ -555,12 +684,19 @@ pub(super) fn build(
             data: (data_base, data_size),
             install_name: install_name.to_string(),
             class_list: class_addresses.iter().map(|&(c, _)| c).collect(),
+            class_providers: classes
+                .iter()
+                .map(|c| (c.name.to_string(), c.provider.to_string()))
+                .collect(),
             classes: names,
             selector_refs,
-            selector_names: methname,
             static_objects,
             thunks,
-            msg_send_super2_slot: super2_slot,
+            functions,
+            got,
+            entries,
+            entry_count: spec.entry_count,
+            scratch: (scratch, spec.scratch_bytes),
         },
         text: text.bytes,
         data: data.bytes,
@@ -569,7 +705,7 @@ pub(super) fn build(
 
 impl BuiltImage {
     /// Map __TEXT read/execute and __DATA read/write. Placement must be free.
-    pub(super) fn map(&self, cpu: &mut A64Cpu) -> Result<(), String> {
+    pub(in crate::a64) fn map(&self, cpu: &mut A64Cpu) -> Result<(), String> {
         let (text, text_len) = self.layout.text;
         let (data, data_len) = self.layout.data;
         for address in (text..data + data_len).step_by(4096) {
