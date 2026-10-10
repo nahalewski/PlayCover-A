@@ -335,8 +335,13 @@ fn getsockname(
             let udp_socket = socket_host_object.udp_socket.as_ref().unwrap();
             let socket_addr = udp_socket.local_addr().unwrap();
             let local_guest_addr = sockaddr::from_sockaddr_v4(&socket_addr);
-            assert_eq!(env.mem.read(address_len), guest_size_of::<sockaddr>());
-            env.mem.write(address, local_guest_addr);
+            // The caller's buffer may be larger (e.g. a sockaddr_storage); the
+            // address is truncated if it is smaller, and the real length is
+            // reported back.
+            if env.mem.read(address_len) >= guest_size_of::<sockaddr>() {
+                env.mem.write(address, local_guest_addr);
+            }
+            env.mem.write(address_len, guest_size_of::<sockaddr>());
         }
         SOCK_STREAM => {
             let local = socket_host_object
@@ -507,6 +512,32 @@ fn connect(
         return -1;
     };
     let type_ = socket_host_object.type_;
+    if type_ == SOCK_DGRAM {
+        if address_len < guest_size_of::<sockaddr>() {
+            set_errno(env, EINVAL);
+            return -1;
+        }
+        let peer = env.mem.read(address).to_sockaddr_v4();
+        let socket_options = State::get(env).sockets.get(&socket).unwrap().options.clone();
+        let host_socket = match State::get(env).sockets.get(&socket).unwrap().udp_socket.as_ref() {
+            Some(existing) => existing.try_clone().ok(),
+            None => UdpSocket::bind("0.0.0.0:0").ok(),
+        };
+        let Some(host_socket) = host_socket else {
+            set_errno(env, EINVAL);
+            return -1;
+        };
+        let _ = host_socket.set_nonblocking(true);
+        if socket_options.contains(&SO_BROADCAST) {
+            let _ = host_socket.set_broadcast(true);
+        }
+        if let Err(error) = host_socket.connect(peer) {
+            set_errno(env, io_error_to_errno(&error));
+            return -1;
+        }
+        State::get_mut(env).sockets.get_mut(&socket).unwrap().udp_socket = Some(host_socket);
+        return 0;
+    }
     assert!(type_ == SOCK_STREAM);
     if socket_host_object.tcp_stream.is_some() {
         set_errno(env, EISCONN);
@@ -684,7 +715,13 @@ fn select_once(
                             false
                         }
                         Err(e) => {
-                            panic!("select: Peek for socket {fd} failed: {e:?}")
+                            // A pending error (e.g. ECONNREFUSED after an ICMP
+                            // port-unreachable on a connected UDP socket): the
+                            // socket counts as readable, and the next recv
+                            // reports the error.
+                            log!("select: Peek for socket {} failed: {:?}, reporting it as readable", fd, e);
+                            *bits |= 1 << bit_index;
+                            true
                         }
                     }
                 }
@@ -996,7 +1033,13 @@ fn recvfrom(
     let type_ = State::get(env).sockets.get(&socket).unwrap().type_;
     assert!(type_ == SOCK_STREAM || type_ == SOCK_DGRAM);
 
-    assert_eq!(flags, 0); // TODO
+    // MSG_PEEK (0x2) and MSG_DONTWAIT (0x80; host UDP sockets never block).
+    const MSG_PEEK: i32 = 0x2;
+    const MSG_DONTWAIT: i32 = 0x80;
+    if flags & !(MSG_PEEK | MSG_DONTWAIT) != 0 {
+        log!("Warning: socket recv flags {:#x} are partly ignored", flags);
+    }
+    let peek = flags & MSG_PEEK != 0;
 
     let (num_bytes_read, addr) = match type_ {
         SOCK_DGRAM => {
@@ -1010,7 +1053,8 @@ fn recvfrom(
                 .as_ref()
                 .unwrap();
             let buf = env.mem.bytes_at_mut(buffer.cast(), length);
-            let (read, addr) = match udp_socket.recv_from(buf) {
+            let received = if peek { udp_socket.peek_from(buf) } else { udp_socket.recv_from(buf) };
+            let (read, addr) = match received {
                 Ok(n) => n,
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                     // No data is ready
@@ -1023,17 +1067,28 @@ fn recvfrom(
                     log_dbg!("recvfrom: UDP socket {} would block, returning EAGAIN", socket);
                     return -1
                 }
-                Err(e) => panic!("recvfrom: UDP socket {socket} encountered IO error: {e}"),
+                Err(e) => {
+                    let errno = io_error_to_errno(&e);
+                    log!("recvfrom: UDP socket {} IO error: {} => errno {}", socket, e, errno);
+                    set_errno(env, errno);
+                    return -1;
+                }
             };
             if !address.is_null() {
+                // The caller's buffer may be larger (e.g. a sockaddr_storage);
+                // the address is only stored if it fits.
                 let guest_addr = sockaddr::from_sockaddr_v4(&addr);
-                env.mem.write(address, guest_addr);
-                assert_eq!(guest_size_of::<sockaddr>(), env.mem.read(address_len));
-                env.mem.write(address_len, guest_size_of::<sockaddr>());
+                if address_len.is_null() || env.mem.read(address_len) >= guest_size_of::<sockaddr>() {
+                    env.mem.write(address, guest_addr);
+                }
+                if !address_len.is_null() {
+                    env.mem.write(address_len, guest_size_of::<sockaddr>());
+                }
             }
             (read, Ok(addr))
         }
         SOCK_STREAM => {
+            assert!(!peek); // TODO: MSG_PEEK on TCP sockets
             assert!(address.is_null());
             assert!(address_len.is_null());
             if env
@@ -1111,13 +1166,33 @@ fn send(
         return -1;
     };
     let type_ = socket_host_object.type_;
+    if type_ == SOCK_DGRAM {
+        let Some(udp_socket) = socket_host_object.udp_socket.as_ref() else {
+            set_errno(env, ENOTCONN);
+            return -1;
+        };
+        let buf = env.mem.bytes_at(buffer.cast(), length);
+        return match udp_socket.send(buf) {
+            Ok(written) => written as i32,
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                set_errno(env, EAGAIN);
+                -1
+            }
+            Err(e) => {
+                set_errno(env, io_error_to_errno(&e));
+                -1
+            }
+        };
+    }
     assert!(type_ == SOCK_STREAM);
     if socket_host_object.tcp_stream.is_none() {
         set_errno(env, ENOTCONN);
         return -1;
     }
 
-    assert_eq!(flags, 0); // TODO
+    if flags != 0 {
+        log!("Warning: socket send flags {:#x} are ignored", flags);
+    }
 
     let num_bytes_written = match type_ {
         SOCK_STREAM => {
@@ -1176,7 +1251,9 @@ fn sendto(
     let type_ = State::get(env).sockets.get(&socket).unwrap().type_;
     assert!(type_ == SOCK_DGRAM);
 
-    assert_eq!(flags, 0); // TODO
+    if flags != 0 {
+        log!("Warning: socket send flags {:#x} are ignored", flags);
+    }
 
     assert_eq!(dest_address_len, guest_size_of::<sockaddr>());
     let sockaddr_val = env.mem.read(dest_address);
