@@ -17,8 +17,9 @@ pointers and the touchHLE ObjC runtime.
 
 ## 2. What Coromon needs
 
-Evidence comes from a Mach-O and nib analysis of the IPA. The scripts and raw
-dumps are in the session scratchpad `uikit_needs/` (`REPORT.txt`). BV means
+Evidence comes from a Mach-O and nib analysis of the IPA. The full report and
+the exact UIKit/QuartzCore import lists (main binary and MetalANGLE) are in
+`dev-docs/ARM64_UIKIT_COROMON_NEEDS.md`. BV means
 verified in the binary. SO means taken from source or standard UIKit behaviour.
 
 ### Load-time facts
@@ -159,6 +160,15 @@ that class's method IMPs point to it. The handler works in three steps:
 Results go back as `ReturnValues`. A CGRect returns as an HFA in `v0..v3`.
 
 This uses 8 services for milestone 1, plus one shared `-dealloc` cleanup service.
+
+**Known risk: swizzling.** The app's `+load` (GULSwizzler) replaces
+`-viewDidAppear:` and `-viewDidDisappear:` on our UIViewController before main.
+If any swizzle uses `method_exchangeImplementations`, one of our IMPs could be
+reached under a foreign selector, and name-based dispatch would then fail with
+"no host method". Mitigation if that is confirmed: give each method an 8-byte
+`__text` thunk (`movz x17,#index; b dispatcher`), so the service dispatches by
+method index instead of by SEL name. This is not implemented yet. GULSwizzler's
+mechanism has not been checked.
 There are currently 7 classes, 116 table methods (plus 2 dealloc thunks) and 3 sent selectors.
 
 ### 3.3 Calling back into guest code
@@ -245,6 +255,13 @@ owner (agent A) must allow a long-running, non-tick-limited main.
   constant export table (milestone 2). Also exclude the cached UIKitCore and its
   initializers from the dependency closure. The main binary uses classic
   dyld-info binds, so this goes through the legacy bind path.
+- **UIKitCore's dependency cone (agents A and B).** Excluding UIKitCore means
+  more than skipping its initializers. If libobjc ever sees UIKitCore's header,
+  the cache's preoptimized class table makes `objc_getClass("UIView")` return
+  Apple's class instead of ours. Coromon also hard-links GameKit, StoreKit,
+  MapKit, MessageUI, WebKit, SafariServices and MediaPlayer, and each of them
+  pulls in UIKitCore transitively. Every cached framework in UIKitCore's
+  dependency cone must therefore be stubbed, not loaded as genuine code.
 - **ObjC notification (agent A).** Append the UIKit image's `ObjcImage` to the
   mapped notification before the app and MetalANGLE.
 
