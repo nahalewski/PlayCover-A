@@ -225,6 +225,9 @@ mod objc_image_load;
 mod objc_cached_root;
 #[path = "a64_foundation_startup.rs"]
 mod foundation_startup;
+// UIKit agent: emulator-owned UIKit layer (src/a64_uikit*.rs).
+#[path = "a64_uikit.rs"]
+mod uikit;
 #[path = "a64_pthread_create_prepare.rs"]
 mod pthread_create_prepare;
 #[path = "a64_thread_register_tests.rs"]
