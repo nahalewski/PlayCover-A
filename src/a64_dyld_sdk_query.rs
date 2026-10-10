@@ -32,7 +32,14 @@ impl ProgramSdk {
   let platform=packed as u32;let version=(packed>>32) as u32;
   match platform {
    2=>Ok(self.sdk>=version),
-   u32::MAX=>{if version!=0x07e40901{return Err(format!("unsupported dyld SDK version set {version:#x}"));}Ok(self.sdk>=0x000e0000)},
+   u32::MAX => match version {
+    0x07e20901 => Ok(self.sdk >= 0x000c0000),
+    0x07e30901 => Ok(self.sdk >= 0x000d0000),
+    0x07e40901 => Ok(self.sdk >= 0x000e0000),
+    0x07e50901 => Ok(self.sdk >= 0x000f0000),
+    0x07e60901 => Ok(self.sdk >= 0x00100000),
+    _ => Err(format!("unsupported dyld SDK version set {version:#x}")),
+   },
    _=>Ok(false),
   }
  }
@@ -46,7 +53,7 @@ pub(super) fn install(cpu:&mut A64Cpu,bridge:&mut GuestBridge,entry:u64,program:
  use super::*;
  fn executable(sdk:u32,legacy:bool)->Vec<u8>{let mut bytes=vec![0;32];for(offset,value)in[(0,0xfeedfacfu32),(4,0x100000c),(12,2),(16,1),(20,if legacy{16}else{24})]{bytes[offset..offset+4].copy_from_slice(&value.to_le_bytes());}let words=if legacy{vec![0x25,16,0x90000,sdk]}else{vec![0x32,24,2,0x90000,sdk,0]};for value in words{bytes.extend_from_slice(&value.to_le_bytes());}bytes}
  #[test]fn actual_main_sdk_controls_version_checks_not_minimum_or_virtual_os(){
-  for legacy in [false,true]{let old=ProgramSdk::parse(&executable(0xd0000,legacy)).unwrap();let current=ProgramSdk::parse(&executable(0xe0000,legacy)).unwrap();assert!(!old.at_least(0x07e40901ffffffff).unwrap());assert!(current.at_least(0x07e40901ffffffff).unwrap());assert!(old.at_least((0xc0000u64<<32)|2).unwrap());assert!(!old.at_least((0xc0000u64<<32)|1).unwrap());assert!(old.at_least(0x07e50901ffffffff).is_err());}
+  for legacy in [false,true]{let old=ProgramSdk::parse(&executable(0xd0000,legacy)).unwrap();let current=ProgramSdk::parse(&executable(0xe0000,legacy)).unwrap();assert!(!old.at_least(0x07e40901ffffffff).unwrap());assert!(current.at_least(0x07e40901ffffffff).unwrap());assert!(old.at_least((0xc0000u64<<32)|2).unwrap());assert!(!old.at_least((0xc0000u64<<32)|1).unwrap());assert!(old.at_least(0x07e70901ffffffff).is_err());}
  }
  #[test]fn unspecified_truncated_and_wrong_platform_metadata_is_not_guessed(){assert!(ProgramSdk::parse(&executable(0,false)).is_err());let mut file=executable(0xe0000,false);file[40..44].copy_from_slice(&7u32.to_le_bytes());assert!(ProgramSdk::parse(&file).is_err());assert!(ProgramSdk::parse(&executable(0xe0000,false)[..50]).is_err());}
 }

@@ -59,6 +59,18 @@ pub fn poll(env: &mut Environment) {
                 env.options.network_access = value != "off";
                 log!("Settings: network = {}", value);
             }
+            "store" | "unlock_store_purchases" => {
+                env.options.unlock_store_purchases = value == "unlock" || value == "on" || value == "true";
+                log!("Settings: unlock_store_purchases = {}", env.options.unlock_store_purchases);
+            }
+            "app_version" | "reported_app_version" => {
+                if value.is_empty() || value == "default" || value == "off" {
+                    env.options.reported_app_version = None;
+                } else {
+                    env.options.reported_app_version = Some(value.to_string());
+                }
+                log!("Settings: reported_app_version = {:?}", env.options.reported_app_version);
+            }
             _ => {}
         }
     }

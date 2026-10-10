@@ -23,8 +23,10 @@ pub fn construct(cpu: &mut A64Cpu, ports: &mut MachIdentity, args: [u64; 4]) -> 
     let mut options = [0; 24];
     cpu.read_guest_into(options_address, &mut options)?;
     let flags = u32::from_le_bytes(options[..4].try_into().unwrap());
-    if flags != 0x1000 || options[4..].iter().any(|&byte| byte != 0) || context != 0 {
-        return Err("Unsupported Mach reply construction options/context".into());
+    if !(flags == 0x1000 && options[4..].iter().all(|&byte| byte == 0) && context == 0)
+        && !(flags & !0x31 == 0 && options[4..].iter().all(|&byte| byte == 0) && (flags & 1 == 0 || context != 0))
+    {
+        return Err(format!("Unsupported Mach port construction options/context: flags={flags:#x} options={options:02x?} context={context:#x}"));
     }
     // Validate the entire output before allocating a right. Exclusive CPU access
     // prevents guest changes between this preflight and the final four-byte copy.
@@ -88,4 +90,24 @@ mod tests {
         cpu.read_guest_into(0x10100, &mut output).unwrap();
         assert_eq!(u32::from_le_bytes(output), 0xfeed_beef);
     }
+    #[test]
+    fn guarded_port_construction_allocates_guarded_port_right() {
+        let mut cpu = A64Cpu::new_sparse();
+        cpu.map_zeroed(0x10000, 0x4000, 3).unwrap();
+        // flags = 0x31 (MPO_CONTEXT_AS_GUARD | MPO_INSERT_SEND_RIGHT | MPO_STRICT)
+        cpu.write_guest_into(0x10000, &0x31u32.to_le_bytes()).unwrap();
+        let mut ports = MachIdentity::new(8).unwrap();
+        let task = ports.trap(-28).unwrap() as u64;
+        let guard_cookie = 0x71b7_5ace_u64;
+        assert_eq!(construct(&mut cpu, &mut ports, [task, 0x10000, guard_cookie, 0x10100]).unwrap(), 0);
+        let mut output = [0; 4];
+        cpu.read_guest_into(0x10100, &mut output).unwrap();
+        let name = u32::from_le_bytes(output);
+        assert_eq!(ports.right(name), Some(PortRight::GuardedPort {
+            guard: guard_cookie,
+            strict: true,
+            send_references: 1,
+        }));
+    }
 }
+

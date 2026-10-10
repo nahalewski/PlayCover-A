@@ -761,19 +761,47 @@ impl AuditedResolvers {
                         .find(|entry| entry.0 == stub && entry.1 == resolver)
                         .ok_or_else(|| format!("unaudited cache resolver {resolver:#x} (stub {stub:#x})"))?;
                     (&entry.2[..], entry.3)
+                } else if self.uuid == IOS16_UUID {
+                    if let Some(entry) = TERRARIA_CAPABILITY_SELECTORS
+                        .iter()
+                        .chain(BATCH_CAPABILITY_SELECTORS.iter())
+                        .find(|entry| entry.0 == stub && entry.1 == resolver)
+                    {
+                        (&entry.2[..], entry.3)
+                    } else {
+                        self.check_executable(stub)?;
+                        self.check_executable(resolver)?;
+                        let mut stub_bytes = [0u8; 4];
+                        cpu.read_guest_into(stub, &mut stub_bytes)?;
+                        let stub_inst = u32::from_le_bytes(stub_bytes);
+                        if stub_inst == 0 {
+                            return Err(format!("unaudited cache resolver {resolver:#x} (stub {stub:#x})"));
+                        }
+                        let mut actual = [0u8; 40];
+                        cpu.read_guest_into(resolver, &mut actual)?;
+                        if let Some(target) = decode_capability_selector(resolver, &actual) {
+                            super::commpage::ensure_mapped(cpu)?;
+                            if let Some(address) = self.cached_targets.borrow().get(&(stub, resolver)) {
+                                return Ok(*address);
+                            }
+                            let result = call_at(cpu, resolver, &[], 10_000, self.trap, self.stack_top)?;
+                            self.check_executable(result)?;
+                            if result != target {
+                                return Err(format!(
+                                    "audited capability resolver returned unexpected target {result:#x}"
+                                ));
+                            }
+                            self.cached_targets
+                                .borrow_mut()
+                                .insert((stub, resolver), result);
+                            self.executions.set(self.executions.get() + 1);
+                            return Ok(result);
+                        } else {
+                            return Err(format!("unaudited cache resolver {resolver:#x} (stub {stub:#x})"));
+                        }
+                    }
                 } else {
-                let entry = (self.uuid == IOS16_UUID)
-                    .then(|| {
-                        TERRARIA_CAPABILITY_SELECTORS
-                            .iter()
-                            .chain(BATCH_CAPABILITY_SELECTORS.iter())
-                            .find(|entry| entry.0 == stub && entry.1 == resolver)
-                    })
-                    .flatten()
-                    .ok_or_else(|| {
-                        format!("unaudited cache resolver {resolver:#x} (stub {stub:#x})")
-                    })?;
-                (&entry.2[..], entry.3)
+                    return Err(format!("unaudited cache resolver {resolver:#x} (stub {stub:#x})"));
                 }
             }
         };
@@ -802,6 +830,45 @@ impl AuditedResolvers {
         self.executions.set(self.executions.get() + 1);
         Ok(result)
     }
+}
+
+pub(super) fn decode_capability_selector(pc: u64, bytes: &[u8]) -> Option<u64> {
+    if bytes.len() != 40 {
+        return None;
+    }
+    let mut words = [0u32; 10];
+    for (i, chunk) in bytes.chunks_exact(4).enumerate() {
+        words[i] = u32::from_le_bytes(chunk.try_into().ok()?);
+    }
+    let fixed = [
+        (0, 0xb2704fe8), // mov x8, #0xffff0023
+        (1, 0xf2980468), // movk x8, #0xf, lsl #32
+        (4, 0x39400108), // ldrb w8, [x8]
+        (7, 0x721f011f), // tst w8, #0x2
+        (8, 0x9a890140), // csel x0, x10, x9, ne
+        (9, 0xd65f03c0), // ret
+    ];
+    for (idx, expected) in fixed {
+        if words[idx] != expected {
+            return None;
+        }
+    }
+    if words[2] & 0x9f00001f != 0x90000009 || words[3] & 0xffc003ff != 0x91000129 {
+        return None;
+    }
+    if words[5] & 0x9f00001f != 0x9000000a || words[6] & 0xffc003ff != 0x9100014a {
+        return None;
+    }
+    let immhi = ((words[5] >> 5) & 0x7ffff) as i64;
+    let immlo = ((words[5] >> 29) & 0x3) as i64;
+    let mut imm = (immhi << 2) | immlo;
+    if imm & (1 << 20) != 0 {
+        imm -= 1 << 21;
+    }
+    let pc_at_adrp = pc.checked_add(20)?;
+    let base = ((pc_at_adrp as i64) & !0xfff) + (imm << 12);
+    let add_imm = ((words[6] >> 10) & 0xfff) as i64;
+    Some((base + add_imm) as u64)
 }
 
 fn call(cpu: &mut A64Cpu, entry: u64, args: &[u64], budget: u64) -> Result<u64, String> {
@@ -1198,5 +1265,56 @@ mod tests {
         assert!(check_target(&plan, 0x10000).is_ok());
         assert!(check_target(&plan, 0x10001).is_err());
         assert!(check_target(&plan, 0x11000).is_err());
+    }
+    #[test]
+    fn dynamic_capability_selector_decodes_and_executes_safely() {
+        let mut cpu = cpu(0xd65f03c0);
+        let stub = 0x18dba1898;
+        let resolver = 0x18db91960;
+        let target = 0x18db33e00;
+        for address in [stub, resolver, target] {
+            let page = address & !4095;
+            if cpu.mapped_permissions(page).is_none() {
+                cpu.map_zeroed(page, 4096, 5).unwrap();
+            }
+        }
+        cpu.try_write_bytes(stub, &0xd503201fu32.to_le_bytes()).unwrap();
+
+        let pc_adrp = resolver + 20;
+        let imm_pages = ((target as i64 & !4095) - (pc_adrp as i64 & !4095)) >> 12;
+        let immlo = ((imm_pages as u32) & 3) << 29;
+        let immhi = (((imm_pages as u32) >> 2) & 0x7ffff) << 5;
+        let adrp_x10 = 0x9000000a | immlo | immhi;
+        let add_x10 = 0x9100014a | (((target as u32) & 0xfff) << 10);
+
+        let selector_bytes: [u8; 40] = [
+            0xe8, 0x4f, 0x70, 0xb2,
+            0x68, 0x04, 0x98, 0xf2,
+            0x09, 0x00, 0x00, 0x90,
+            0x29, 0x01, 0x00, 0x91,
+            0x08, 0x01, 0x40, 0x39,
+            adrp_x10.to_le_bytes()[0], adrp_x10.to_le_bytes()[1], adrp_x10.to_le_bytes()[2], adrp_x10.to_le_bytes()[3],
+            add_x10.to_le_bytes()[0], add_x10.to_le_bytes()[1], add_x10.to_le_bytes()[2], add_x10.to_le_bytes()[3],
+            0x1f, 0x01, 0x1f, 0x72,
+            0x40, 0x01, 0x89, 0x9a,
+            0xc0, 0x03, 0x5f, 0xd6,
+        ];
+        cpu.try_write_bytes(resolver, &selector_bytes).unwrap();
+        let service = AuditedResolvers {
+            uuid: IOS16_UUID,
+            trap: TRAP,
+            stack_top: STACK + 0xff0,
+            executable_regions: vec![
+                (stub & !4095, (stub & !4095) + 4096),
+                (resolver & !4095, (resolver & !4095) + 4096),
+                (target & !4095, (target & !4095) + 4096),
+            ],
+            cached_targets: std::cell::RefCell::new(std::collections::HashMap::new()),
+            executions: std::cell::Cell::new(0),
+        };
+        assert_eq!(service.resolve(&mut cpu, stub, resolver), Ok(target));
+        assert_eq!(service.executions(), 1);
+        assert_eq!(service.resolve(&mut cpu, stub, resolver), Ok(target));
+        assert_eq!(service.executions(), 1);
     }
 }

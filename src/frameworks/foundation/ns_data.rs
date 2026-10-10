@@ -277,6 +277,38 @@ pub const CLASSES: ClassExports = objc_classes! {
     );
 }
 
+- (id)description {
+    let &NSDataHostObject { bytes, length, .. } = env.objc.borrow(this);
+    let slice = if length == 0 || bytes.is_null() {
+        &[]
+    } else {
+        env.mem.bytes_at(bytes.cast::<u8>().cast_const(), length)
+    };
+    let mut hex = String::with_capacity(length as usize * 2 + 2);
+    hex.push('<');
+    for (i, byte) in slice.iter().enumerate() {
+        if i > 0 && i % 4 == 0 {
+            hex.push(' ');
+        }
+        use std::fmt::Write;
+        write!(hex, "{:02x}", byte).unwrap();
+    }
+    hex.push('>');
+    let ns_str = super::ns_string::from_rust_string(env, hex);
+    autorelease(env, ns_str)
+}
+
+- (id)subdataWithRange:(NSRange)range {
+    let &NSDataHostObject { bytes, length, .. } = env.objc.borrow(this);
+    if range.length == 0 {
+        return msg_class![env; NSData data];
+    }
+    assert!(range.location < length && range.location + range.length <= length);
+    let sub_bytes = bytes.cast_const() + range.location;
+    let sub_len = range.length;
+    msg_class![env; NSData dataWithBytes:sub_bytes length:sub_len]
+}
+
 @end
 
 @implementation NSMutableData: NSData

@@ -223,7 +223,17 @@ pub(super) fn perform_request(env: &mut Environment, request: id) -> Result<(id,
                 response.body.len(),
             );
             let data: id = if response.body.is_empty() {
-                msg_class![env; NSData data]
+                if url_string.contains("gamevil.com") {
+                    let fallback = b"0";
+                    let length: u32 = fallback.len() as u32;
+                    let ptr = env.mem.alloc(length);
+                    env.mem
+                        .bytes_at_mut(ptr.cast(), length)
+                        .copy_from_slice(fallback);
+                    msg_class![env; NSData dataWithBytesNoCopy:ptr length:length]
+                } else {
+                    msg_class![env; NSData data]
+                }
             } else {
                 let length: u32 = response.body.len().try_into().unwrap();
                 let ptr = env.mem.alloc(length);

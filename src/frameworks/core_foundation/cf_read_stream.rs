@@ -72,6 +72,41 @@ pub const CLASSES: ClassExports = objc_classes! {
     env.objc.alloc_object(this, host_object, &mut env.mem)
 }
 
+- (())setDelegate:(id)_delegate {
+}
+
+- (id)delegate {
+    nil
+}
+
+- (())scheduleInRunLoop:(id)_run_loop forMode:(id)_mode {
+}
+
+- (())removeFromRunLoop:(id)_run_loop forMode:(id)_mode {
+}
+
+- (())open {
+}
+
+- (())close {
+}
+
+- (CFIndex)streamStatus {
+    0
+}
+
+- (id)streamError {
+    nil
+}
+
+- (id)propertyForKey:(id)_key {
+    nil
+}
+
+- (bool)setProperty:(id)_value forKey:(id)_key {
+    true
+}
+
 @end
 
 };
@@ -200,6 +235,32 @@ fn CFURLCreatePropertyFromResource(
     result
 }
 
+fn CFStreamCreatePairWithSocketToHost(
+    env: &mut Environment,
+    _alloc: CFAllocatorRef,
+    host: CFStringRef,
+    port: u32,
+    read_stream: MutPtr<CFReadStreamRef>,
+    write_stream: MutPtr<CFTypeRef>,
+) {
+    let host_str = if host != nil {
+        ns_string::to_rust_string(env, host)
+    } else {
+        "".into()
+    };
+    log!("CFStreamCreatePairWithSocketToHost(host={:?}, port={})", host_str, port);
+    if !read_stream.is_null() {
+        let stream: id = msg_class![env; _touchHLE_CFReadStream alloc];
+        env.objc.borrow_mut::<CFReadStreamHostObject>(stream).status = kCFStreamStatusNotOpen;
+        env.mem.write(read_stream, stream);
+    }
+    if !write_stream.is_null() {
+        let stream: id = msg_class![env; _touchHLE_CFReadStream alloc];
+        env.objc.borrow_mut::<CFReadStreamHostObject>(stream).status = kCFStreamStatusNotOpen;
+        env.mem.write(write_stream, stream);
+    }
+}
+
 pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(CFReadStreamCreateWithFile(_, _)),
     export_c_func!(CFReadStreamOpen(_)),
@@ -209,4 +270,5 @@ pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(CFReadStreamClose(_)),
     export_c_func!(CFReadStreamCopyError(_)),
     export_c_func!(CFURLCreatePropertyFromResource(_, _, _, _)),
+    export_c_func!(CFStreamCreatePairWithSocketToHost(_, _, _, _, _)),
 ];

@@ -41,7 +41,6 @@ pub const NSFileProtectionNone: &str = "NSFileProtectionNone";
 
 pub const CONSTANTS: ConstantExports = &[
     ("_NSFileSystemSize", HostConstant::NSString("NSFileSystemSize")),
-    ("_kCFURLFileLength", HostConstant::NSString("kCFURLFileLength")),
     (
         "_NSURLAuthenticationMethodServerTrust",
         HostConstant::NSString("NSURLAuthenticationMethodServerTrust"),

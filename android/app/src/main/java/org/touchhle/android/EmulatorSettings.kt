@@ -7,7 +7,8 @@ internal data class EmulatorSettings(
     val scale: String = "default",
     val orientation: String = "default",
     val controllerTilt: Boolean = true,
-    val networkAccess: Boolean = false
+    val networkAccess: Boolean = false,
+    val autoDownloadRuntime: Boolean = true
 ) {
     fun runtimeArguments(): Array<String> = buildList {
         if (scale in listOf("1", "2", "3", "4")) add("--scale-hack=$scale")
@@ -25,5 +26,6 @@ internal data class EmulatorSettings(
         const val ORIENTATION = "runtime_orientation"
         const val CONTROLLER_TILT = "runtime_controller_tilt"
         const val NETWORK = "runtime_network"
+        const val AUTO_DOWNLOAD_RUNTIME = "runtime_auto_download_cache"
     }
 }

@@ -43,3 +43,6 @@ ios-runtime/
 pixel-fold-tests/
 runtime-sources/
 apple-store-state/
+*.png
+data_*.json
+download_batch.sh

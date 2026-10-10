@@ -477,7 +477,7 @@ impl HeapAllocator {
     }
 
     fn align(size: GuestUSize, align: GuestUSize) -> GuestUSize {
-        if !size.is_multiple_of(align) {
+        if size % align != 0 {
             size + align - (size % align)
         } else {
             size
@@ -609,8 +609,8 @@ impl VMAllocator {
     }
 
     fn allocate_at(&mut self, address: VAddr, size: GuestUSize) -> Result<Chunk, VMAllocError> {
-        assert!(address.is_multiple_of(PAGE_SIZE));
-        assert!(size.is_multiple_of(PAGE_SIZE) && size >= PAGE_SIZE);
+        assert!(address % PAGE_SIZE == 0);
+        assert!(size % PAGE_SIZE == 0 && size >= PAGE_SIZE);
         let chunk = Chunk::new(address, size);
 
         let to_trisect = self
@@ -633,7 +633,7 @@ impl VMAllocator {
     }
 
     fn allocate_any(&mut self, size: GuestUSize) -> Result<Chunk, VMAllocError> {
-        assert!(size.is_multiple_of(PAGE_SIZE) && size >= PAGE_SIZE);
+        assert!(size % PAGE_SIZE == 0 && size >= PAGE_SIZE);
 
         let alloc = self
             .unused_chunks

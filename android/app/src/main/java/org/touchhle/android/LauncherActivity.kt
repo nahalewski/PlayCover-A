@@ -733,13 +733,88 @@ class LauncherActivity : AppCompatActivity() {
         }
         compat.clearCrash(app.name)
         prefs.edit().putString("last_launch_name", app.name).putLong("last_launch_time", System.currentTimeMillis()).apply()
-        val runtimeOptions = currentEmulatorSettings().runtimeArguments().toMutableList()
-        infoCache[key]?.minimumIosVersion?.let { runtimeOptions.add("--reported-ios-version=$it") }
+        val settings = currentEmulatorSettings()
+        val runtimeOptions = settings.runtimeArguments().toMutableList()
+        val info = infoCache[key] ?: (if (app.isFile) try { IpaInfo.read(app) } catch (_: Exception) { null } else null)?.also { infoCache[key] = it }
+        info?.minimumIosVersion?.let { runtimeOptions.add("--reported-ios-version=$it") }
         prefs.getInt(fpsKey(app), 0).takeIf { it in 1..240 }?.let { runtimeOptions.add("--fps-limit=$it") }
+        val cacheFile = RuntimeCacheManager.getMainCacheFile(this)
+        val is64BitApp = info?.is64Bit == true || (info?.minimumIosVersion?.split('.')?.firstOrNull()?.toIntOrNull() ?: 0) >= 11
+        if (is64BitApp) {
+            if (cacheFile.exists()) {
+                runtimeOptions.add("--a64-cache-prepare=${cacheFile.absolutePath}")
+            } else if (settings.autoDownloadRuntime) {
+                showRuntimeDownloadPrompt(app, runtimeOptions)
+                return
+            }
+        }
         startActivity(Intent(this, MainActivity::class.java).apply {
             putExtra(MainActivity.EXTRA_APP_PATH, app.absolutePath)
             putExtra(MainActivity.EXTRA_COMPAT, prefs.getBoolean(PREF_COMPAT, true))
             putExtra(MainActivity.EXTRA_RUNTIME_OPTIONS, runtimeOptions.toTypedArray())
+        })
+    }
+
+    private fun showRuntimeDownloadPrompt(app: File, runtimeOptions: List<String>) {
+        val appName = prettyName(app)
+        val customUrl = prefs.getString(RuntimeCacheManager.PREF_CACHE_URL, null)
+        val downloadUrl = if (!customUrl.isNullOrBlank()) customUrl else RuntimeCacheManager.DEFAULT_IPSW_URL
+
+        AlertDialog.Builder(this)
+            .setTitle("iOS 16 Runtime Cache Required")
+            .setMessage("$appName is a 64-bit app that requires the Apple iOS 16 dyld shared cache.\n\nWould you like to automatically download and prepare the required runtime cache now?")
+            .setPositiveButton("Download & Prepare") { _, _ ->
+                startRuntimeCacheDownload(downloadUrl) {
+                    startGame(app)
+                }
+            }
+            .setNegativeButton("Cancel") { _, _ ->
+                startActivity(Intent(this, MainActivity::class.java).apply {
+                    putExtra(MainActivity.EXTRA_APP_PATH, app.absolutePath)
+                    putExtra(MainActivity.EXTRA_COMPAT, prefs.getBoolean(PREF_COMPAT, true))
+                    putExtra(MainActivity.EXTRA_RUNTIME_OPTIONS, runtimeOptions.toTypedArray())
+                })
+            }
+            .show()
+    }
+
+    private fun startRuntimeCacheDownload(url: String, onFinished: (() -> Unit)? = null) {
+        @Suppress("DEPRECATION")
+        val progressDialog = android.app.ProgressDialog(this).apply {
+            setTitle("iOS 16 Runtime Cache")
+            setMessage("Connecting...")
+            setProgressStyle(android.app.ProgressDialog.STYLE_HORIZONTAL)
+            max = 100
+            progress = 0
+            setCancelable(false)
+            show()
+        }
+
+        RuntimeCacheManager.downloadAndExtract(this, url, object : RuntimeCacheManager.ProgressCallback {
+            override fun onProgress(message: String, progressPercent: Int) {
+                progressDialog.setMessage(message)
+                progressDialog.progress = progressPercent
+            }
+
+            override fun onSuccess(fileCount: Int) {
+                progressDialog.dismiss()
+                AlertDialog.Builder(this@LauncherActivity)
+                    .setTitle("Runtime Cache Ready")
+                    .setMessage("Successfully prepared $fileCount iOS 16 runtime cache files.")
+                    .setPositiveButton("Continue") { _, _ ->
+                        onFinished?.invoke()
+                    }
+                    .show()
+            }
+
+            override fun onError(error: String) {
+                progressDialog.dismiss()
+                AlertDialog.Builder(this@LauncherActivity)
+                    .setTitle("Download Failed")
+                    .setMessage("Could not prepare iOS 16 runtime cache:\n$error")
+                    .setPositiveButton("OK", null)
+                    .show()
+            }
         })
     }
 
@@ -988,6 +1063,22 @@ class LauncherActivity : AppCompatActivity() {
         addSettingSwitch(content, "Allow network access", "Allow the running iOS app to access the internet and local network.",
             EmulatorSettings.NETWORK, false)
         content.addView(sectionLabel("EMULATION"))
+        addSettingSwitch(content, "Auto-download iOS 16 runtime cache",
+            "Automatically acquire and prepare the Apple iOS 16 ARM64 system runtime cache when launching 64-bit games.",
+            EmulatorSettings.AUTO_DOWNLOAD_RUNTIME, true)
+        val cacheStatusView = TextView(this).apply {
+            text = "iOS 16 Cache: ${RuntimeCacheManager.getCacheStatusDescription(this@LauncherActivity)}"
+            setTextColor(TEXT_DIM); textSize = 13f
+            setPadding(dp(16), dp(4), dp(16), dp(8))
+        }
+        content.addView(cacheStatusView)
+        content.addView(actionButton("Download or update runtime cache") {
+            val customUrl = prefs.getString(RuntimeCacheManager.PREF_CACHE_URL, null)
+            val downloadUrl = if (!customUrl.isNullOrBlank()) customUrl else RuntimeCacheManager.DEFAULT_IPSW_URL
+            startRuntimeCacheDownload(downloadUrl) {
+                cacheStatusView.text = "iOS 16 Cache: ${RuntimeCacheManager.getCacheStatusDescription(this@LauncherActivity)}"
+            }
+        })
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
             background = rounded(CARD, 14); setPadding(dp(16), dp(16), dp(16), dp(16))
@@ -1009,7 +1100,8 @@ class LauncherActivity : AppCompatActivity() {
         prefs.getString(EmulatorSettings.SCALE, "default") ?: "default",
         prefs.getString(EmulatorSettings.ORIENTATION, "default") ?: "default",
         prefs.getBoolean(EmulatorSettings.CONTROLLER_TILT, true),
-        prefs.getBoolean(EmulatorSettings.NETWORK, false)
+        prefs.getBoolean(EmulatorSettings.NETWORK, false),
+        prefs.getBoolean(EmulatorSettings.AUTO_DOWNLOAD_RUNTIME, true)
     )
 
     private fun addSettingChoice(parent: LinearLayout, title: String, detail: String,

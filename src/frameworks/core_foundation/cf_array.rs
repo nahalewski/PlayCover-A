@@ -12,7 +12,7 @@ use super::cf_allocator::{kCFAllocatorDefault, CFAllocatorRef};
 use super::CFIndex;
 use crate::dyld::{export_c_func, FunctionExports};
 use crate::frameworks::foundation::NSUInteger;
-use crate::mem::{ConstVoidPtr, Ptr};
+use crate::mem::{ConstVoidPtr, MutPtr, Ptr};
 use crate::objc::{id, msg, msg_class};
 use crate::Environment;
 
@@ -73,6 +73,21 @@ fn CFArrayRemoveValueAtIndex(env: &mut Environment, array: CFMutableArrayRef, id
     msg![env; array removeObjectAtIndex:idx]
 }
 
+fn CFArrayGetValues(
+    env: &mut Environment,
+    array: CFArrayRef,
+    range: super::CFRange,
+    values: MutPtr<ConstVoidPtr>,
+) {
+    let loc: usize = range.location.try_into().unwrap();
+    let len: usize = range.length.try_into().unwrap();
+    for i in 0..len {
+        let idx: NSUInteger = (loc + i).try_into().unwrap();
+        let value: id = msg![env; array objectAtIndex:idx];
+        env.mem.write(values + i as u32, value.cast().cast_const());
+    }
+}
+
 use crate::dyld::{ConstantExports, HostConstant};
 
 pub const CONSTANTS: ConstantExports = &[(
@@ -94,4 +109,5 @@ pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(CFArrayGetValueAtIndex(_, _)),
     export_c_func!(CFArrayAppendValue(_, _)),
     export_c_func!(CFArrayRemoveValueAtIndex(_, _)),
+    export_c_func!(CFArrayGetValues(_, _, _)),
 ];

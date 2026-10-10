@@ -1,9 +1,9 @@
 """Stage unchanged original ARM64 cache on the authorized tablet, SHA verified."""
 from pathlib import Path
 import subprocess,hashlib,json,shlex
-source=Path('ios-runtime/cache/System/Library/Caches/com.apple.dyld')
+source=Path('ios-runtime/cache')
 remote='/sdcard/Android/data/org.touchhle.android.a64test/files/ios-runtime/cache'
-prefix=['adb','-P','5038','-s','R52Y8066STA']
+prefix=['adb','-P','5037','-s','192.168.0.56:39897']
 def adb(*args):return subprocess.check_output(prefix+list(args),timeout=300,text=True)
 assert adb('shell','getprop','ro.product.device').strip()=='gts11uwifi'
 print(adb('shell','df','-h','/sdcard'),flush=True)

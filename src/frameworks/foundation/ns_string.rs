@@ -155,7 +155,7 @@ impl StringHostObject {
             NSUTF16StringEncoding
             | NSUTF16BigEndianStringEncoding
             | NSUTF16LittleEndianStringEncoding => {
-                assert!(bytes.len().is_multiple_of(2));
+                assert!(bytes.len() % 2 == 0);
 
                 let is_big_endian = match encoding {
                     NSUTF16BigEndianStringEncoding => true,

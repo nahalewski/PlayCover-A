@@ -1715,10 +1715,6 @@ pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(glIsBuffer(_)),
     export_c_func!(glGenBuffers(_, _)),
     export_c_func!(glDeleteBuffers(_, _)),
-    export_c_func!(glGenVertexArraysOES(_, _)),
-    export_c_func!(glBindVertexArrayOES(_)),
-    export_c_func!(glDeleteVertexArraysOES(_, _)),
-    export_c_func!(glIsVertexArrayOES(_)),
     export_c_func!(glBindBuffer(_, _)),
     export_c_func!(glBufferData(_, _, _, _)),
     export_c_func!(glBufferSubData(_, _, _, _)),
@@ -1812,6 +1808,11 @@ pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(glGetBufferParameteriv(_, _, _)),
     export_c_func!(glMapBufferOES(_, _)),
     export_c_func!(glUnmapBufferOES(_)),
+    // OES_vertex_array_object
+    export_c_func!(glGenVertexArraysOES(_, _)),
+    export_c_func!(glBindVertexArrayOES(_)),
+    export_c_func!(glDeleteVertexArraysOES(_, _)),
+    export_c_func!(glIsVertexArrayOES(_)),
 ];
 
 fn _get_currently_bound_buffer_object_name(env: &mut Environment, target: GLenum) -> GLuint {

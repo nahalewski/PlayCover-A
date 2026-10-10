@@ -683,7 +683,7 @@ impl GuestBridge {
                     }
                     A64State::Svc(SERVICE_SVC) => {
                         service_calls += 1;
-                        if service_calls > 1024 {
+                        if service_calls > 65536 {
                             return Err("host service call budget exceeded".into());
                         }
                         let token = cpu.reg(16);
@@ -693,6 +693,9 @@ impl GuestBridge {
                             .filter(|&i| i < self.services.len())
                             .ok_or("unregistered host service token")?;
                         let service = &mut self.services[index];
+                        if service_calls % 5000 == 0 {
+                            echo!("[a64] host service call count={service_calls} latest={}", service.name);
+                        }
                         if cpu.pc() != service.address + 8 {
                             return Err("host service trap is outside registered trampoline".into());
                         }
@@ -775,6 +778,10 @@ impl GuestBridge {
                     A64State::Normal if *ticks != 0 => (),
                     A64State::Normal => return Err(exhausted_evidence(cpu,depth)),
                     state => {
+                        let regs: Vec<u64> = (0..31).map(|i| cpu.reg(i)).collect();
+                        let lr = cpu.reg(A64Cpu::LR);
+                        let insns = lr.checked_sub(16).and_then(|at| cpu.read_bytes(at, 24));
+                        echo!("[a64] guest bridge stopped: {:?} at {:#x} lr={:#x} sp={:#x}\nregs={:x?}\ninsns={:x?}", state, cpu.pc(), lr, cpu.sp(), regs, insns);
                         return Err(format!(
                             "guest bridge stopped: {state:?} at {:#x}; guest lr={:#x} sp={:#x} before context restoration",
                             cpu.pc(), cpu.reg(A64Cpu::LR), cpu.sp()

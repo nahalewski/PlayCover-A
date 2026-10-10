@@ -1203,15 +1203,10 @@ pub fn install_skipped_method(env: &mut Environment, class_name: &str, selector:
     let Some(class) = env.objc.get_class(class_name, false, &mut env.mem) else {
         return;
     };
-    let Some(sel) = env.objc.lookup_selector(selector) else {
+    let sel = env.objc.register_host_selector(selector.to_string(), &mut env.mem);
+    let Some(_host_object) = try_class_host_object(&env.objc, class) else {
         return;
     };
-    let Some(host_object) = try_class_host_object(&env.objc, class) else {
-        return;
-    };
-    if !host_object.methods.contains_key(&sel) {
-        return;
-    }
     log!("Applying game-specific workaround: [{} {}] does nothing", class_name, selector);
     env.objc
         .borrow_mut::<ClassHostObject>(class)
@@ -1226,7 +1221,7 @@ fn imp_for_guest(env: &mut Environment, imp: IMP) -> IMP {
     match imp {
         IMP::Guest(_) => imp,
         IMP::Host(host_imp) => {
-            let host_function: crate::dyld::HostFunction = host_imp;
+            let host_function = host_imp.as_call_from_guest();
             let function = env
                 .dyld
                 .create_guest_function(&mut env.mem, "hostMethodIMP", host_function);

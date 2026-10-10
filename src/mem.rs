@@ -322,7 +322,7 @@ impl Mem {
         //        segments they shouldn't be able to. Adding that would fix
         //        this, along with removing this special case.
         assert!(self.null_segment_size == 0);
-        assert!(new_null_segment_size.is_multiple_of(PAGE_SIZE));
+        assert!(new_null_segment_size % PAGE_SIZE == 0);
         self.vm_allocator
             .allocate(Some(0), new_null_segment_size)
             .unwrap();
@@ -584,9 +584,9 @@ impl Mem {
             }
             Some(alloc) => alloc,
         };
-        assert!(alloc.base.is_multiple_of(PAGE_SIZE));
+        assert!(alloc.base % PAGE_SIZE == 0);
         let alloc_size = alloc.size.get();
-        assert!(alloc_size.is_multiple_of(PAGE_SIZE));
+        assert!(alloc_size % PAGE_SIZE == 0);
         let ptr = Ptr::from_bits(alloc.base);
         self.bytes_at_mut(ptr.cast(), alloc_size).fill(0);
         log_dbg!(

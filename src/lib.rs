@@ -174,28 +174,52 @@ Special options:
 
 #[cfg(feature = "a64")]
 fn read_a64_runtime(root: Option<&std::path::Path>, dependency: &str) -> Result<Vec<u8>, String> {
-    let root = root.ok_or_else(|| {
-        format!("ARM64 dependency {dependency} needs a runtime root; use --a64-runtime=PATH")
-    })?;
-    if root.join(".shared-cache-exports").is_file() {
-        return Err(format!(
-            "{dependency}: extracted shared-cache libraries require original cache mappings and iOS runtime services; ARM64 shared-cache loading is not implemented"
-        ));
+    let filename = dependency.rsplit_once('/').map(|(_, f)| f).unwrap_or(dependency);
+
+    let fallback_root;
+    let effective_root = match root {
+        Some(r) => Some(r),
+        None => {
+            fallback_root = crate::paths::user_data_base_path().join("ios-runtime");
+            if fallback_root.is_dir() {
+                Some(fallback_root.as_path())
+            } else {
+                None
+            }
+        }
+    };
+
+    if let Some(root) = effective_root {
+        if root.join(".shared-cache-exports").is_file() {
+            return Err(format!(
+                "{dependency}: extracted shared-cache libraries require original cache mappings and iOS runtime services; ARM64 shared-cache loading is not implemented"
+            ));
+        }
+        let relative = dependency.trim_start_matches('/');
+        if !relative
+            .split('/')
+            .any(|part| part == ".." || part.contains('\\') || part.contains(':'))
+        {
+            if let Ok(root_canon) = std::fs::canonicalize(root) {
+                if let Ok(path) = std::fs::canonicalize(root_canon.join(relative)) {
+                    if path.starts_with(&root_canon) {
+                        if let Ok(data) = std::fs::read(path) {
+                            return Ok(data);
+                        }
+                    }
+                }
+            }
+        }
     }
-    let relative = dependency.trim_start_matches('/');
-    if relative
-        .split('/')
-        .any(|part| part == ".." || part.contains('\\') || part.contains(':'))
-    {
-        return Err("Invalid ARM64 runtime dependency path".into());
+
+    if let Ok(mut resource) = crate::paths::ResourceFile::open(&format!("{}/{filename}", crate::paths::DYLIBS_DIR)) {
+        let mut buf = Vec::new();
+        if std::io::Read::read_to_end(resource.get(), &mut buf).is_ok() && !buf.is_empty() {
+            return Ok(buf);
+        }
     }
-    let root = std::fs::canonicalize(root).map_err(|e| e.to_string())?;
-    let path =
-        std::fs::canonicalize(root.join(relative)).map_err(|e| format!("{dependency}: {e}"))?;
-    if !path.starts_with(&root) {
-        return Err("ARM64 runtime dependency escapes runtime root".into());
-    }
-    std::fs::read(path).map_err(|e| format!("{dependency}: {e}"))
+
+    Err(format!("ARM64 dependency {dependency} needs a runtime root; use --a64-runtime=PATH"))
 }
 
 pub fn main<T: Iterator<Item = String>>(mut args: T) -> Result<(), String> {

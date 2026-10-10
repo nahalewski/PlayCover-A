@@ -80,6 +80,7 @@ impl GuestRet for IMP {
 pub trait HostIMP: CallFromGuest {
     /// See [MsgSendSignature::type_info].
     fn type_info(&self) -> (TypeId, &'static str);
+    fn as_call_from_guest(&'static self) -> crate::dyld::HostFunction;
 }
 
 macro_rules! impl_HostIMP {
@@ -92,6 +93,9 @@ macro_rules! impl_HostIMP {
             fn type_info(&self) -> (TypeId, &'static str) {
                 <(R, (id, SEL, $($P,)*)) as MsgSendSignature>::type_info()
             }
+            fn as_call_from_guest(&'static self) -> crate::dyld::HostFunction {
+                self
+            }
         }
         impl<R, $($P,)*> HostIMP for fn(&mut Environment, id, SEL, $($P,)* DotDotDot) -> R
         where
@@ -100,6 +104,9 @@ macro_rules! impl_HostIMP {
         {
             fn type_info(&self) -> (TypeId, &'static str) {
                 todo!("host-to-host message calls with var-args"); // TODO
+            }
+            fn as_call_from_guest(&'static self) -> crate::dyld::HostFunction {
+                self
             }
         }
 

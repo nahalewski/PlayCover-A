@@ -338,10 +338,10 @@ impl AudioFile {
         match self.0 {
             AudioFileInner::Wave(_) => {
                 let bytes_per_sample = self.bytes_per_sample();
-                assert!(offset.is_multiple_of(bytes_per_sample));
+                assert!(offset % bytes_per_sample == 0);
                 assert!(u64::try_from(buffer.len())
                     .unwrap()
-                    .is_multiple_of(bytes_per_sample));
+                    % bytes_per_sample == 0);
 
                 let sample_count = u64::try_from(buffer.len()).unwrap() / bytes_per_sample;
                 let sample_count: usize = sample_count.try_into().unwrap();

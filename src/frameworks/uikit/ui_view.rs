@@ -464,6 +464,14 @@ pub const CLASSES: ClassExports = objc_classes! {
     // nothing.
 }
 
+- (())setNeedsLayout {
+    // default implementation
+}
+
+- (())layoutIfNeeded {
+    () = msg![env; this layoutSubviews];
+}
+
 - (id)superview {
     env.objc.borrow::<UIViewHostObject>(this).superview
 }

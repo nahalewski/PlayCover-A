@@ -137,6 +137,7 @@ class IpaInfo(val displayName: String?, val icon: Bitmap?,
             var offset = 0L
             var sliceSize: Long? = null
             var selectedCpu: Int? = null
+            var hasArm64Slice = false
             if (magic == 0xcafebabe.toInt() || magic == 0xcafebabf.toInt()) {
                 val count = ByteBuffer.wrap(start).getInt(4)
                 require(count in 1..32)
@@ -150,6 +151,7 @@ class IpaInfo(val displayName: String?, val icon: Bitmap?,
                     val size = if (wide) table.getLong(at + 16) else table.getInt(at + 12).toLong() and 0xffffffffL
                     Triple(cpu, base, size)
                 }
+                hasArm64Slice = slices.any { it.first == 0x100000c }
                 val selected = slices.firstOrNull { it.first == 12 } ?: slices.firstOrNull { it.first == 0x100000c } ?: return null
                 require(selected.second >= 8L + count * stride && selected.third >= 28 && selected.second <= 128L * 1024 * 1024)
                 offset = selected.second; sliceSize = selected.third; selectedCpu = selected.first
@@ -183,7 +185,7 @@ class IpaInfo(val displayName: String?, val icon: Bitmap?,
                 cursor += length
             }
             require(cursor == size)
-            return MachOMetadata(minimum, wide)
+            return MachOMetadata(minimum, wide || hasArm64Slice)
         }
 
         /** Names of the external symbols an armv7 app imports (from its symbol table). */

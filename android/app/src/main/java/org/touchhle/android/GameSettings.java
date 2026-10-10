@@ -45,6 +45,8 @@ final class GameSettings {
     int fpsLimit = 0;       // --fps-limit=N, 0 = default
     boolean blockAds = true;
     boolean network = true;
+    boolean unlockStorePurchases = false;
+    String reportedAppVersion = null;
     // Android-only (SharedPreferences).
     boolean fpsCounter;
     int manualOrientation = -1;
@@ -67,6 +69,11 @@ final class GameSettings {
             else if (option.startsWith("--fps-limit=")) s.fpsLimit = parseInt(option.substring(12), 0);
             else if (option.equals("--allow-ads")) s.blockAds = false;
             else if (option.equals("--no-network-access")) s.network = false;
+            else if (option.equals("--unlock-store-purchases")) s.unlockStorePurchases = true;
+            else if (option.startsWith("--reported-app-version=")) s.reportedAppVersion = option.substring(23);
+        }
+        if (s.reportedAppVersion == null && bundleId != null && bundleId.toLowerCase().contains("zenoniaonline")) {
+            s.reportedAppVersion = "2.10.0";
         }
         s.fpsCounter = s.prefs.getBoolean(bundleId + ".fps_counter", false);
         s.manualOrientation = s.prefs.getInt(bundleId + ".orientation", -1);
@@ -179,7 +186,8 @@ final class GameSettings {
     private static boolean isManaged(String option) {
         return option.startsWith("--widescreen") || option.startsWith("--scale-hack=") ||
             option.startsWith("--fps-limit=") || option.equals("--allow-ads") ||
-            option.equals("--no-network-access");
+            option.equals("--no-network-access") || option.equals("--unlock-store-purchases") ||
+            option.startsWith("--reported-app-version=");
     }
 
     /** The flags the current settings need (nothing for defaults). */
@@ -195,6 +203,10 @@ final class GameSettings {
         if (fpsLimit > 0) options.add("--fps-limit=" + fpsLimit);
         if (!blockAds) options.add("--allow-ads");
         if (!network) options.add("--no-network-access");
+        if (unlockStorePurchases) options.add("--unlock-store-purchases");
+        if (reportedAppVersion != null && !reportedAppVersion.trim().isEmpty()) {
+            options.add("--reported-app-version=" + reportedAppVersion.trim());
+        }
         return options;
     }
 
@@ -254,7 +266,9 @@ final class GameSettings {
         String text = System.currentTimeMillis() + "\n" +
             "view=" + view + "\n" +
             "ads=" + (blockAds ? "block" : "allow") + "\n" +
-            "network=" + (network ? "on" : "off") + "\n";
+            "network=" + (network ? "on" : "off") + "\n" +
+            "store=" + (unlockStorePurchases ? "unlock" : "normal") + "\n" +
+            "app_version=" + (reportedAppVersion != null ? reportedAppVersion : "") + "\n";
         try {
             writeAtomically(new File(dir, "settings_cmd.txt"), text);
         } catch (Exception e) {

@@ -396,7 +396,7 @@ mod tests {
         assert!(cpu.read_bytes(base+PAGE,1).is_none());assert!(cpu.try_write_bytes(base+PAGE,&[1]).is_err());
         assert!(cpu.mutate_region(base+PAGE,1,|_|Ok(())).is_err());
         cpu.map_zeroed(0x18000,4096,5).unwrap();
-        cpu.write_bytes(0x18000,&0xf9000020u32.to_le_bytes());cpu.set_reg(0,9);cpu.set_reg(1,base+PAGE);cpu.set_pc(0x18000);
+        cpu.write_bytes(0x18000, &[0xf9000020u32, 0xd4000001u32].iter().flat_map(|w| w.to_le_bytes()).collect::<Vec<_>>().as_slice());cpu.set_reg(0,9);cpu.set_reg(1,base+PAGE);cpu.set_pc(0x18000);
         let mut ticks=100;assert_eq!(cpu.run_or_step(Some(&mut ticks)),A64State::MemoryError(base+PAGE));
         assert!(vm.deallocate(&mut cpu,&ports,[task,base,PAGE*3]).is_err());
         assert_eq!(cpu.read_bytes(base,1),Some(&[11][..]));

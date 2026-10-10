@@ -41,6 +41,16 @@ impl SemaphoreReplyTicket {
         self.name
     }
 }
+#[derive(Debug)]
+pub struct BootstrapReplyTicket {
+    reply: HostReplyTicket,
+    name: u32,
+}
+impl BootstrapReplyTicket {
+    pub fn name(&self) -> u32 {
+        self.name
+    }
+}
 // XNU MACH_PORT_MAKE(index,gen) uses index<<8 | gen>>24. The
 // IE_BITS_GEN roll-mask reserves the generation's low two name bits as 3.
 // These bits matter to libplatform's os_once owner/generation discriminator.
@@ -68,6 +78,9 @@ pub enum PortRight {
         thread: u64,
         references: u32,
     },
+    BootstrapSend {
+        references: u32,
+    },
     DeadName {
         references: u32,
     },
@@ -75,6 +88,11 @@ pub enum PortRight {
     /// Task-space receive right constructed with MPO_REPLY_PORT. This is not
     /// the separately thread-bound special reply port or an inserted send right.
     ConstructedReplyReceive,
+    GuardedPort {
+        guard: u64,
+        strict: bool,
+        send_references: u32,
+    },
 }
 
 pub struct MachIdentity {
@@ -90,6 +108,9 @@ pub struct MachIdentity {
     system_clock_name: Option<u32>,
     clock_reply: Option<(u64, u32)>,
     semaphore_replies: BTreeMap<u64, (u32, u32)>,
+    bootstrap_name: Option<u32>,
+    bootstrap_reply: Option<(u64, u32)>,
+    debug_control_port: Option<u32>,
 }
 
 impl MachIdentity {
@@ -97,6 +118,10 @@ impl MachIdentity {
         self.ports.len()
             + usize::from(
                 self.clock_reply
+                    .is_some_and(|(_, name)| !self.ports.contains_key(&name)),
+            )
+            + usize::from(
+                self.bootstrap_reply
                     .is_some_and(|(_, name)| !self.ports.contains_key(&name)),
             )
             + self.semaphore_replies.len()
@@ -123,6 +148,9 @@ impl MachIdentity {
             system_clock_name: None,
             clock_reply: None,
             semaphore_replies: BTreeMap::new(),
+            bootstrap_name: None,
+            bootstrap_reply: None,
+            debug_control_port: None,
         })
     }
 
@@ -338,6 +366,260 @@ impl MachIdentity {
         Ok(())
     }
 
+    pub fn prepare_bootstrap_reply(
+        &mut self,
+        task: u32,
+        receive: u32,
+    ) -> Result<BootstrapReplyTicket, String> {
+        if self.bootstrap_reply.is_some() {
+            return Err("bootstrap reply transaction already pending".into());
+        }
+        let existing = self.bootstrap_name;
+        if let Some(name) = existing {
+            if !matches!(self.right(name), Some(PortRight::BootstrapSend { references }) if references > 0)
+            {
+                return Err("bootstrap port identity inconsistent".into());
+            }
+        } else if self.occupied_ports() >= self.max_ports {
+            return Err("bootstrap port budget exhausted".into());
+        }
+        let name = existing.unwrap_or(self.next_name);
+        let next = if existing.is_none() {
+            Some(
+                name.checked_add(NAME_INDEX_STEP)
+                    .ok_or("bootstrap port name exhausted")?,
+            )
+        } else {
+            None
+        };
+        let reply = self.reserve_task_reply(task, receive)?;
+        if let Some(next) = next {
+            self.next_name = next;
+        }
+        self.bootstrap_reply = Some((reply.nonce, name));
+        Ok(BootstrapReplyTicket { reply, name })
+    }
+
+    fn validate_bootstrap_reply(&self, ticket: &BootstrapReplyTicket) -> Result<(), String> {
+        if ticket.reply.namespace != self.namespace
+            || !self.alive
+            || self.bootstrap_reply != Some((ticket.reply.nonce, ticket.name))
+        {
+            return Err("foreign/stale bootstrap reply ticket".into());
+        }
+        Ok(())
+    }
+
+    pub fn cancel_bootstrap_reply(&mut self, ticket: BootstrapReplyTicket) -> Result<(), String> {
+        self.validate_bootstrap_reply(&ticket)?;
+        self.retire_host_reply(ticket.reply)?;
+        self.bootstrap_reply = None;
+        Ok(())
+    }
+
+    pub fn commit_bootstrap_reply(&mut self, ticket: BootstrapReplyTicket) -> Result<(), String> {
+        self.validate_bootstrap_reply(&ticket)?;
+        let refs = match self.right(ticket.name) {
+            Some(PortRight::BootstrapSend { references }) => {
+                references.saturating_add(1).min(65535)
+            }
+            None => 1,
+            _ => return Err("reserved bootstrap right changed before delivery".into()),
+        };
+        self.retire_host_reply(ticket.reply)?;
+        self.ports.insert(
+            ticket.name,
+            PortRight::BootstrapSend {
+                references: refs,
+            },
+        );
+        self.bootstrap_name = Some(ticket.name);
+        self.bootstrap_reply = None;
+        Ok(())
+    }
+
+    pub fn reply_task_special_port(
+        &mut self,
+        cpu: &mut super::A64Cpu,
+        args: [u64; 8],
+    ) -> Result<u32, String> {
+        let [data, options, bits_size, remote_local, voucher_id, descriptors_receive, receive_priority, timeout] = args;
+        let task = remote_local as u32;
+        let receive = (remote_local >> 32) as u32;
+        let capacity = receive_priority as u32;
+        if options != 0x200000003
+            || bits_size != 0x2400001513
+            || voucher_id != 3409u64 << 32
+            || descriptors_receive != (receive as u64) << 32
+            || receive_priority >> 32 != 0
+            || capacity < 48
+            || capacity > 4096
+            || timeout != 0
+        {
+            return Err("unsupported task_get_special_port message envelope".into());
+        }
+        if !matches!(self.right(task), Some(PortRight::TaskSend { references }) if references > 0) {
+            return Ok(0x10000003); // MACH_SEND_INVALID_DEST
+        }
+        if !matches!(self.right(receive), Some(PortRight::ConstructedReplyReceive)) {
+            return Ok(0x10000009); // MACH_SEND_INVALID_REPLY
+        }
+        let mut request = [0u8; 36];
+        cpu.read_guest_into(data, &mut request)?;
+        let word = |offset: usize| u32::from_le_bytes(request[offset..offset + 4].try_into().unwrap());
+        if word(0) != 0x1513
+            || word(4) != 36
+            || word(8) != task
+            || word(12) != receive
+            || word(16) != 0
+            || word(20) != 3409
+        {
+            return Err("unsupported task_get_special_port request header".into());
+        }
+        if request[24..32] != [0, 0, 0, 0, 1, 0, 0, 0] {
+            return Err("unsupported task_get_special_port NDR".into());
+        }
+        let which_port = word(32);
+        if which_port != 4 {
+            return Err(format!("unsupported which_port {which_port} in task_get_special_port (expected TASK_BOOTSTRAP_PORT=4)"));
+        }
+        cpu.validate_guest_write(data, capacity as usize)?;
+        let ticket = self.prepare_bootstrap_reply(task, receive)?;
+        let mut response = [0u8; 48];
+        let put = |buf: &mut [u8], offset: usize, value: u32| {
+            buf[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        };
+        for (offset, value) in [
+            (0, 0x80001200u32),
+            (4, 40),
+            (12, receive),
+            (20, 3509),
+            (24, 1),
+            (28, ticket.name()),
+            (44, 8),
+        ] {
+            put(&mut response, offset, value);
+        }
+        response[38] = 17; // MACH_MSG_TYPE_MOVE_SEND
+        if let Err(error) = cpu.write_guest_into(data, &response) {
+            self.cancel_bootstrap_reply(ticket)?;
+            return Err(error);
+        }
+        self.commit_bootstrap_reply(ticket)?;
+        Ok(0)
+    }
+
+    /// Exact synchronous Mach task_set_special_port (3410) service.
+    /// Source contracts: apple-xnu task.defs, mach/task_special_ports.h.
+    pub fn reply_task_set_special_port(
+        &mut self,
+        cpu: &mut super::A64Cpu,
+        args: [u64; 8],
+    ) -> Result<u32, String> {
+        let [data, options, bits_size, remote_local, voucher_id, descriptors_receive, receive_priority, timeout] = args;
+        let task = remote_local as u32;
+        let receive = (remote_local >> 32) as u32;
+        let capacity = receive_priority as u32;
+        if options != 0x200000003
+            || bits_size != ((52u64 << 32) | 0x80001513)
+            || voucher_id != 3410u64 << 32
+            || descriptors_receive != ((u64::from(receive) << 32) | 1)
+            || receive_priority >> 32 != 0
+            || capacity < 44
+            || capacity > 4096
+            || timeout != 0
+        {
+            return Err("unsupported task_set_special_port message envelope".into());
+        }
+        if !matches!(self.right(task), Some(PortRight::TaskSend { references }) if references > 0) {
+            return Ok(0x10000003); // MACH_SEND_INVALID_DEST
+        }
+        if !matches!(self.right(receive), Some(PortRight::ConstructedReplyReceive)) {
+            return Ok(0x10000009); // MACH_SEND_INVALID_REPLY
+        }
+        let mut request = [0u8; 52];
+        cpu.read_guest_into(data, &mut request)?;
+        let word = |offset: usize| u32::from_le_bytes(request[offset..offset + 4].try_into().unwrap());
+        if word(0) != 0x80001513
+            || word(4) != 52
+            || word(8) != task
+            || word(12) != receive
+            || word(16) != 0
+            || word(20) != 3410
+            || word(24) != 1
+        {
+            return Err("unsupported task_set_special_port request header".into());
+        }
+        let special_port = word(28);
+        if word(32) != 0 || request[36] != 0 || request[37] != 0 || request[39] != 0 {
+            return Err("unsupported task_set_special_port descriptor padding/type".into());
+        }
+        let disposition = request[38];
+        if !matches!(disposition, 17 | 19 | 20) {
+            return Err(format!("unsupported disposition {disposition} in task_set_special_port"));
+        }
+        if request[40..48] != [0, 0, 0, 0, 1, 0, 0, 0] {
+            return Err("unsupported task_set_special_port NDR".into());
+        }
+        let which_port = word(48);
+        if which_port == 0 || which_port > 11 {
+            return Ok(4); // KERN_INVALID_ARGUMENT
+        }
+        if special_port != 0 {
+            let mut should_remove = false;
+            match self.ports.get_mut(&special_port) {
+                Some(PortRight::TaskSend { references })
+                | Some(PortRight::HostSend { references })
+                | Some(PortRight::ClockSend { references, .. })
+                | Some(PortRight::SemaphoreSend { references, .. })
+                | Some(PortRight::ThreadSend { references, .. })
+                | Some(PortRight::BootstrapSend { references }) => {
+                    if disposition == 19 {
+                        if *references > 1 {
+                            *references -= 1;
+                        } else {
+                            should_remove = true;
+                        }
+                    }
+                }
+                Some(PortRight::GuardedPort { send_references, .. }) => {
+                    if disposition == 19 && *send_references > 0 {
+                        *send_references -= 1;
+                    }
+                }
+                _ => return Ok(0x10000008), // MACH_SEND_INVALID_RIGHT
+            }
+            if should_remove {
+                self.ports.remove(&special_port);
+            }
+        }
+        match which_port {
+            4 => self.bootstrap_name = if special_port != 0 { Some(special_port) } else { None },
+            10 => self.debug_control_port = if special_port != 0 { Some(special_port) } else { None },
+            _ => {}
+        }
+        cpu.validate_guest_write(data, capacity as usize)?;
+        let ticket = self.reserve_task_reply(task, receive)?;
+        let mut response = [0u8; 44];
+        let put = |buf: &mut [u8], offset: usize, value: u32| {
+            buf[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        };
+        put(&mut response, 0, 0x1200);
+        put(&mut response, 4, 36);
+        put(&mut response, 12, receive);
+        put(&mut response, 20, 3510);
+        response[24..32].copy_from_slice(&[0, 0, 0, 0, 1, 0, 0, 0]);
+        put(&mut response, 32, 0); // KERN_SUCCESS
+        put(&mut response, 40, 8); // Trailer size = 8
+        if let Err(error) = cpu.write_guest_into(data, &response) {
+            self.cancel_task_reply(ticket)?;
+            return Err(error);
+        }
+        self.consume_task_reply(ticket)?;
+        echo!("[a64] genuine task_set_special_port task={task:#x} which_port={which_port} special_port={special_port:#x} -> KERN_SUCCESS");
+        Ok(0)
+    }
+
     /// _kernelrpc_mach_port_deallocate_trap (-18), current-task namespace only.
     /// Receive-only rights survive; this operation consumes send/dead-name urefs.
     pub fn deallocate(&mut self, task: u32, name: u32) -> u32 {
@@ -347,7 +629,9 @@ impl MachIdentity {
         if name == 0 || name == u32::MAX {
             return 0;
         }
-        if self.clock_reply.is_some_and(|(_, pending)| pending == name) {
+        if self.clock_reply.is_some_and(|(_, pending)| pending == name)
+            || self.bootstrap_reply.is_some_and(|(_, pending)| pending == name)
+        {
             return 5; /* synchronous copyout owns this name */
         }
         let Some(right) = self.right(name) else {
@@ -359,6 +643,8 @@ impl MachIdentity {
             | PortRight::ClockSend { references, .. }
             | PortRight::SemaphoreSend { references, .. }
             | PortRight::ThreadSend { references, .. }
+            | PortRight::BootstrapSend { references }
+            | PortRight::GuardedPort { send_references: references, .. }
             | PortRight::DeadName { references } => references,
             PortRight::ReplyReceive | PortRight::ConstructedReplyReceive => return 17,
         };
@@ -374,7 +660,9 @@ impl MachIdentity {
                 | PortRight::ClockSend { references, .. }
                 | PortRight::SemaphoreSend { references, .. }
                 | PortRight::ThreadSend { references, .. }
+                | PortRight::BootstrapSend { references }
                 | PortRight::DeadName { references } => *references -= 1,
+                PortRight::GuardedPort { ref mut send_references, .. } => *send_references -= 1,
                 _ => unreachable!(),
             }
         } else {
@@ -382,6 +670,10 @@ impl MachIdentity {
                 PortRight::TaskSend { .. } => {
                     self.ports
                         .insert(name, PortRight::TaskSend { references: 0 });
+                }
+                PortRight::GuardedPort { guard, strict, .. } => {
+                    self.ports
+                        .insert(name, PortRight::GuardedPort { guard, strict, send_references: 0 });
                 }
                 PortRight::HostSend { .. } => {
                     self.ports.remove(&name);
@@ -398,6 +690,10 @@ impl MachIdentity {
                     self.ports.remove(&name);
                     self.threads.insert(thread, None);
                 }
+                PortRight::BootstrapSend { .. } => {
+                    self.ports.remove(&name);
+                    self.bootstrap_name = None;
+                }
                 PortRight::DeadName { .. } => {
                     self.ports.remove(&name);
                 }
@@ -405,6 +701,116 @@ impl MachIdentity {
             }
         }
         0
+    }
+
+    /// _kernelrpc_mach_port_mod_refs_trap (-19), current-task namespace only.
+    /// Modifies user references for send rights (right=0) or dead names (right=4).
+    pub fn mod_refs(&mut self, task: u32, name: u32, right: u32, delta: i32) -> u32 {
+        if !matches!(self.right(task), Some(PortRight::TaskSend { references }) if references > 0) {
+            return 0x10000003; // MACH_SEND_INVALID_DEST
+        }
+        if name == 0 || name == u32::MAX {
+            return 15; // KERN_INVALID_NAME
+        }
+        if self.clock_reply.is_some_and(|(_, pending)| pending == name)
+            || self.bootstrap_reply.is_some_and(|(_, pending)| pending == name)
+        {
+            return 5; /* synchronous copyout owns this name */
+        }
+        let Some(port_right) = self.right(name) else {
+            return 15; // KERN_INVALID_NAME
+        };
+        match right {
+            0 => {
+                // MACH_PORT_RIGHT_SEND
+                let references = match port_right {
+                    PortRight::TaskSend { references }
+                    | PortRight::HostSend { references }
+                    | PortRight::ClockSend { references, .. }
+                    | PortRight::SemaphoreSend { references, .. }
+                    | PortRight::ThreadSend { references, .. }
+                    | PortRight::BootstrapSend { references }
+                    | PortRight::GuardedPort { send_references: references, .. } => references,
+                    PortRight::DeadName { .. }
+                    | PortRight::ReplyReceive
+                    | PortRight::ConstructedReplyReceive => return 17, // KERN_INVALID_RIGHT
+                };
+                if references == 65535 && delta >= 0 {
+                    return 0; // pegged
+                }
+                let new_refs = (references as i64) + (delta as i64);
+                if new_refs < 0 {
+                    return 17; // KERN_INVALID_RIGHT
+                }
+                if new_refs == 0 {
+                    match port_right {
+                        PortRight::TaskSend { .. } => {
+                            self.ports
+                                .insert(name, PortRight::TaskSend { references: 0 });
+                        }
+                        PortRight::GuardedPort { guard, strict, .. } => {
+                            self.ports
+                                .insert(name, PortRight::GuardedPort { guard, strict, send_references: 0 });
+                        }
+                        PortRight::HostSend { .. } => {
+                            self.ports.remove(&name);
+                            self.host_name = None;
+                        }
+                        PortRight::ClockSend { .. } => {
+                            self.ports.remove(&name);
+                            self.system_clock_name = None;
+                        }
+                        PortRight::SemaphoreSend { .. } => {
+                            self.ports.remove(&name);
+                        }
+                        PortRight::ThreadSend { thread, .. } => {
+                            self.ports.remove(&name);
+                            self.threads.insert(thread, None);
+                        }
+                        PortRight::BootstrapSend { .. } => {
+                            self.ports.remove(&name);
+                            self.bootstrap_name = None;
+                        }
+                        _ => unreachable!(),
+                    }
+                } else {
+                    let clamped = (new_refs as u32).min(65535);
+                    let entry = self.ports.get_mut(&name).unwrap();
+                    match entry {
+                        PortRight::TaskSend { references }
+                        | PortRight::HostSend { references }
+                        | PortRight::ClockSend { references, .. }
+                        | PortRight::SemaphoreSend { references, .. }
+                        | PortRight::ThreadSend { references, .. }
+                        | PortRight::BootstrapSend { references }
+                        | PortRight::GuardedPort { send_references: references, .. } => *references = clamped,
+                        _ => unreachable!(),
+                    }
+                }
+                0
+            }
+            4 => {
+                // MACH_PORT_RIGHT_DEAD_NAME
+                let references = match port_right {
+                    PortRight::DeadName { references } => references,
+                    _ => return 17, // KERN_INVALID_RIGHT
+                };
+                let new_refs = (references as i64) + (delta as i64);
+                if new_refs < 0 {
+                    return 17;
+                }
+                if new_refs == 0 {
+                    self.ports.remove(&name);
+                } else {
+                    let clamped = (new_refs as u32).min(65535);
+                    if let Some(PortRight::DeadName { references }) = self.ports.get_mut(&name) {
+                        *references = clamped;
+                    }
+                }
+                0
+            }
+            _ => 17, // KERN_INVALID_RIGHT
+        }
     }
 
     pub fn trap(&mut self, number: i64) -> Result<u32, String> {
@@ -531,9 +937,15 @@ impl MachIdentity {
         if !matches!(self.right(task),Some(PortRight::TaskSend{references}) if references>0) {
             return Err(MACH_SEND_INVALID_DEST);
         }
-        if flags != 0x1000 || context != 0 {
+        let right = if flags == 0x1000 && context == 0 {
+            PortRight::ConstructedReplyReceive
+        } else if flags & !0x31 == 0 && (flags & 1 == 0 || context != 0) {
+            let send_references = if flags & 0x10 != 0 { 1 } else { 0 };
+            let strict = flags & 0x20 != 0;
+            PortRight::GuardedPort { guard: context, strict, send_references }
+        } else {
             return Err(KERN_INVALID_ARGUMENT);
-        }
+        };
         if self.occupied_ports() >= self.max_ports {
             return Err(KERN_NO_SPACE);
         }
@@ -541,7 +953,7 @@ impl MachIdentity {
         let Some(next) = name.checked_add(NAME_INDEX_STEP) else {
             return Err(KERN_NO_SPACE);
         };
-        self.ports.insert(name, PortRight::ConstructedReplyReceive);
+        self.ports.insert(name, right);
         self.next_name = next;
         Ok(name)
     }
@@ -581,7 +993,7 @@ impl MachIdentity {
             return Err("reply receive right has a pending host RPC".into());
         }
         match self.ports.get(&name) {
-            Some(PortRight::ReplyReceive | PortRight::ConstructedReplyReceive) => {
+            Some(PortRight::ReplyReceive | PortRight::ConstructedReplyReceive | PortRight::GuardedPort { .. }) => {
                 self.ports.remove(&name);
                 Ok(())
             }
@@ -593,6 +1005,7 @@ impl MachIdentity {
                 | PortRight::ClockSend { .. }
                 | PortRight::SemaphoreSend { .. }
                 | PortRight::ThreadSend { .. }
+                | PortRight::BootstrapSend { .. }
                 | PortRight::DeadName { .. },
             ) => Err("non-receive Mach right cannot be destroyed as a reply port".into()),
             None => Err("unknown Mach reply receive right".into()),
@@ -608,6 +1021,9 @@ impl MachIdentity {
         self.clock_reply = None;
         self.system_clock_name = None;
         self.semaphore_replies.clear();
+        self.bootstrap_reply = None;
+        self.bootstrap_name = None;
+        self.debug_control_port = None;
         self.alive = false;
     }
 }
@@ -975,5 +1391,121 @@ mod tests {
         assert_eq!(mach.trap(-26).unwrap(), 0);
         assert!(mach.trap(-27).is_err());
         assert!(MachIdentity::new(4097).is_err());
+    }
+    #[test]
+    fn bootstrap_special_port_delivery_deallocate_and_preserve_ownership() {
+        use super::super::A64Cpu;
+        let mut cpu = A64Cpu::new_sparse();
+        cpu.map_zeroed(0x10000, 0x4000, 3).unwrap();
+        let mut mach = MachIdentity::new(4).unwrap();
+        let task = mach.trap(-28).unwrap();
+        let receive = mach.construct_reply(task, 0, 0x1000).unwrap();
+        let mut request = [0u8; 36];
+        for (offset, value) in [(0, 0x1513u32), (4, 36), (8, task), (12, receive), (20, 3409), (32, 4)] {
+            request[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        request[24..32].copy_from_slice(&[0, 0, 0, 0, 1, 0, 0, 0]);
+        cpu.write_guest_into(0x10000, &request).unwrap();
+        let args = [
+            0x10000,
+            0x200000003,
+            0x2400001513,
+            (u64::from(receive) << 32) | u64::from(task),
+            3409u64 << 32,
+            u64::from(receive) << 32,
+            48,
+            0,
+        ];
+        assert_eq!(mach.reply_task_special_port(&mut cpu, args).unwrap(), 0);
+        let read_u32 = |cpu: &A64Cpu, addr: u64| {
+            u32::from_le_bytes(cpu.read_bytes(addr, 4).unwrap().try_into().unwrap())
+        };
+        let reply_bits = read_u32(&cpu, 0x10000);
+        assert_eq!(reply_bits, 0x80001200);
+        let reply_size = read_u32(&cpu, 0x10004);
+        assert_eq!(reply_size, 40);
+        let reply_id = read_u32(&cpu, 0x10014);
+        assert_eq!(reply_id, 3509);
+        let desc_count = read_u32(&cpu, 0x10018);
+        assert_eq!(desc_count, 1);
+        let port_name = read_u32(&cpu, 0x1001c);
+        assert_ne!(port_name, 0);
+        assert_eq!(mach.right(port_name), Some(PortRight::BootstrapSend { references: 1 }));
+        assert_eq!(mach.deallocate(task, port_name), 0);
+        assert_eq!(mach.right(port_name), None);
+    }
+    #[test]
+    fn mod_refs_delta_lifecycle_and_validation() {
+        let mut mach = MachIdentity::new(4).unwrap();
+        let task = mach.trap(-28).unwrap();
+        let host = mach.trap(-29).unwrap();
+        assert_eq!(mach.right(host), Some(PortRight::HostSend { references: 1 }));
+        // Add 2 references: delta=+2
+        assert_eq!(mach.mod_refs(task, host, 0, 2), 0);
+        assert_eq!(mach.right(host), Some(PortRight::HostSend { references: 3 }));
+        // Drop 1 reference: delta=-1
+        assert_eq!(mach.mod_refs(task, host, 0, -1), 0);
+        assert_eq!(mach.right(host), Some(PortRight::HostSend { references: 2 }));
+        // Invalid right
+        assert_eq!(mach.mod_refs(task, host, 1, 1), 17);
+        // Foreign task
+        assert_eq!(mach.mod_refs(host, host, 0, 1), 0x10000003);
+        // Drop 2 references: delta=-2 -> removes right
+        assert_eq!(mach.mod_refs(task, host, 0, -2), 0);
+        assert_eq!(mach.right(host), None);
+        // Invalid name now
+        assert_eq!(mach.mod_refs(task, host, 0, 1), 15);
+    }
+    #[test]
+    fn task_set_special_port_lifecycle_and_validation() {
+        use super::super::A64Cpu;
+        let mut cpu = A64Cpu::new_sparse();
+        cpu.map_zeroed(0x10000, 0x4000, 3).unwrap();
+        let mut mach = MachIdentity::new(8).unwrap();
+        let task = mach.trap(-28).unwrap();
+        let receive = mach.construct_reply(task, 0, 0x1000).unwrap();
+        let guarded = mach.construct_reply(task, 0x1234, 0x31).unwrap();
+        assert_eq!(mach.right(guarded), Some(PortRight::GuardedPort { guard: 0x1234, strict: true, send_references: 1 }));
+
+        let mut request = [0u8; 52];
+        for (offset, value) in [
+            (0, 0x80001513u32),
+            (4, 52),
+            (8, task),
+            (12, receive),
+            (20, 3410),
+            (24, 1),
+            (28, guarded),
+            (48, 10), // TASK_DEBUG_CONTROL_PORT
+        ] {
+            request[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        request[38] = 19; // MACH_MSG_TYPE_MOVE_SEND
+        request[40..48].copy_from_slice(&[0, 0, 0, 0, 1, 0, 0, 0]); // NDR
+        cpu.write_guest_into(0x10000, &request).unwrap();
+
+        let args = [
+            0x10000,
+            0x200000003,
+            (52u64 << 32) | 0x80001513,
+            (u64::from(receive) << 32) | u64::from(task),
+            3410u64 << 32,
+            (u64::from(receive) << 32) | 1,
+            44,
+            0,
+        ];
+        assert_eq!(mach.reply_task_set_special_port(&mut cpu, args).unwrap(), 0);
+        let read_u32 = |cpu: &A64Cpu, addr: u64| {
+            u32::from_le_bytes(cpu.read_bytes(addr, 4).unwrap().try_into().unwrap())
+        };
+        assert_eq!(read_u32(&cpu, 0x10000), 0x1200); // msgh_bits
+        assert_eq!(read_u32(&cpu, 0x10004), 36);     // msgh_size
+        assert_eq!(read_u32(&cpu, 0x1000c), receive); // msgh_local_port
+        assert_eq!(read_u32(&cpu, 0x10014), 3510);   // reply msgh_id
+        assert_eq!(read_u32(&cpu, 0x10020), 0);      // RetCode = KERN_SUCCESS
+        assert_eq!(read_u32(&cpu, 0x10028), 8);      // trailer size
+
+        // Guarded port's send reference was moved into kernel debug_control_port slot
+        assert_eq!(mach.right(guarded), Some(PortRight::GuardedPort { guard: 0x1234, strict: true, send_references: 0 }));
     }
 }

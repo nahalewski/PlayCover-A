@@ -17,6 +17,9 @@ pub(super) struct ModernInputs {
  pub sdk_query:Option<(u64,super::dyld_sdk_query::ProgramSdk)>,
  pub objc_callbacks:Option<(u64,Vec<super::dyld_objc_callbacks::ObjcImage>)>,
  pub cache_range:Option<(u64,super::dyld_cache_range::CacheRange)>,
+ pub dyld_overridden:Option<u64>,
+ pub dyld_add_image:Option<u64>,
+ pub dyld_objc:Option<super::dyld_objc::DyldObjcEntries>,
 }
 #[derive(Debug,Clone,Copy,PartialEq,Eq)]
 enum Stage {Prepared,Attempting,Stopped,InitializerReturned}
@@ -60,7 +63,7 @@ impl CachedSession {
    Profile::Legacy(budget)=>(super::legacy_session::prepare(&mut app.link.loaded.cpu,&app._plan,services,inputs.arguments,&app.link.main_stack)?,budget),
    Profile::Modern(routes)=>(super::cache_init_probe::prepare_session(&mut app.link.loaded.cpu,&app._plan,services,
       inputs.arguments,&app.link.main_stack,routes.slide_route,routes.restricted_entry,
-      routes.immutable_route,routes.tlv_images,routes.sdk_query,routes.objc_callbacks,routes.cache_range)?,None),
+      routes.immutable_route,routes.tlv_images,routes.sdk_query,routes.objc_callbacks,routes.cache_range,routes.dyld_overridden,routes.dyld_add_image,routes.dyld_objc)?,None),
   };
   Ok(Self{app,process:initialization.session,initializer:initialization.call,stage:Stage::Prepared,initializer_budget,initializer_permit,legacy_budget})
  }

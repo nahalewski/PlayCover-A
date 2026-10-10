@@ -360,9 +360,20 @@ Other options:
         bytes of memory at r0, r0+216 and r1 when those are valid addresses.
         Works by temporarily replacing the instruction; later calls are not
         logged. Useful for finding out which of an app's routines really run.
+    --unlock-store-purchases
+        Unlock in-game purchases and DLC content by reducing store prices to zero and
+        automatically granting completed purchase transactions offline without contacting
+        external store servers.
+
+    --reported-app-version=X
+        Report a specific app version (CFBundleShortVersionString / CFBundleVersion)
+        to the guest application via NSBundle and CFBundle APIs. Useful for spoofing
+        the version number to connect to online servers or bypass version checks.
+
 --reported-ios-version=X
   Report a validated numeric iOS version to the guest UIDevice. Android uses
   the detected IPA minimum version. This reports metadata and does not provide
   additional framework support. Without this option, use the bundle's valid
   MinimumOSVersion, falling back to 2.0.
+
 

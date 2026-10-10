@@ -94,7 +94,7 @@ pub(super) fn bundle_initializer_test(
     };
     super::cache_init_probe::execute(&mut prepared.link.loaded.cpu,&prepared._plan,services,
         inputs.arguments,&prepared.link.main_stack,routes.slide_route,routes.restricted_entry,
-        routes.immutable_route,routes.tlv_images,routes.sdk_query,routes.objc_callbacks,routes.cache_range)
+        routes.immutable_route,routes.tlv_images,routes.sdk_query,routes.objc_callbacks,routes.cache_range,routes.dyld_overridden,routes.dyld_add_image,routes.dyld_objc)
 }
 /// Shared actual mapping/argument provenance for the disposable diagnostic and
 /// persistent owner. Neither path receives an initialization receipt here.
@@ -249,6 +249,40 @@ fn prepare_bundle_initialization_inner(
         "/usr/lib/system/libdyld.dylib","__dyld_get_shared_cache_range")?
         .ok_or("genuine libdyld cache range export missing")?;
     if range_definition.weak{return Err("dyld cache range export unexpectedly weak".into());}
+    let overridden_definition=symbols.resolve_definition(&prepared.link.loaded.cpu,
+        "/usr/lib/system/libdyld.dylib","_dyld_shared_cache_some_image_overridden")?
+        .ok_or("genuine libdyld cache overridden export missing")?;
+    if overridden_definition.weak{return Err("dyld cache overridden export unexpectedly weak".into());}
+    let add_image_definition=symbols.resolve_definition(&prepared.link.loaded.cpu,
+        "/usr/lib/system/libdyld.dylib","__dyld_register_func_for_add_image")?
+        .ok_or("genuine libdyld register_func_for_add_image export missing")?;
+    if add_image_definition.weak{return Err("dyld register_func_for_add_image export unexpectedly weak".into());}
+    let for_each_class_def=symbols.resolve_definition(&prepared.link.loaded.cpu,
+        "/usr/lib/system/libdyld.dylib","__dyld_for_each_objc_class")?
+        .ok_or("genuine libdyld for_each_objc_class export missing")?;
+    let class_count_def=symbols.resolve_definition(&prepared.link.loaded.cpu,
+        "/usr/lib/system/libdyld.dylib","__dyld_objc_class_count")?
+        .ok_or("genuine libdyld objc_class_count export missing")?;
+    let for_each_proto_def=symbols.resolve_definition(&prepared.link.loaded.cpu,
+        "/usr/lib/system/libdyld.dylib","__dyld_for_each_objc_protocol")?
+        .ok_or("genuine libdyld for_each_objc_protocol export missing")?;
+    let find_proto_def=symbols.resolve_definition(&prepared.link.loaded.cpu,
+        "/usr/lib/system/libdyld.dylib","__dyld_find_protocol_conformance")?
+        .ok_or("genuine libdyld find_protocol_conformance export missing")?;
+    let is_constant_def=symbols.resolve_definition(&prepared.link.loaded.cpu,
+        "/usr/lib/system/libdyld.dylib","__dyld_is_objc_constant")?
+        .ok_or("genuine libdyld is_objc_constant export missing")?;
+    let has_interposing_def=symbols.resolve_definition(&prepared.link.loaded.cpu,
+        "/usr/lib/system/libdyld.dylib","_dyld_has_inserted_or_interposing_libraries")?
+        .ok_or("genuine libdyld has_inserted_or_interposing_libraries export missing")?;
+    let dyld_objc_entries=super::dyld_objc::DyldObjcEntries{
+        for_each_class:for_each_class_def.address,
+        class_count:class_count_def.address,
+        for_each_protocol:for_each_proto_def.address,
+        find_protocol:find_proto_def.address,
+        is_constant:is_constant_def.address,
+        has_interposing:has_interposing_def.address,
+    };
     let cache_range=super::dyld_cache_range::CacheRange::read(&prepared.link.loaded.cpu,&prepared._plan)?;
     let catalogue=prepared._plan.images.iter().map(|image|(image.path.clone(),image.address)).collect();
     let cached=super::image_infos::cached_closure(&prepared.link.loaded.cpu,&catalogue,
@@ -274,7 +308,10 @@ fn prepare_bundle_initialization_inner(
         immutable_route:(immutable_definition.address,immutable_ranges),tlv_images,
         sdk_query:Some((sdk_definition.address,program_sdk)),
         objc_callbacks:Some((callbacks_definition.address,objc_images)),
-        cache_range:Some((range_definition.address,cache_range))})};
+        cache_range:Some((range_definition.address,cache_range)),
+        dyld_overridden:Some(overridden_definition.address),
+        dyld_add_image:Some(add_image_definition.address),
+        dyld_objc:Some(dyld_objc_entries)})};
     Ok((prepared,inputs))
 }
 fn initialization_arguments(prepared:&mut PreparedCacheApp,header:u64,path:&str)->Result<Vec<u64>,String>{

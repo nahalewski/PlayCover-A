@@ -242,8 +242,17 @@ pub const CLASSES: ClassExports = objc_classes! {
 // as we don't have yet a networking support
 @implementation NSURLCache: NSObject
 + (id)sharedURLCache {
-    // TODO
-    nil
+    let cache: id = msg_class![env; NSURLCache new];
+    autorelease(env, cache)
+}
+
++ (())setSharedURLCache:(id)_cache {
+}
+
+- (id)initWithMemoryCapacity:(NSUInteger)_memory_capacity
+                 diskCapacity:(NSUInteger)_disk_capacity
+                     diskPath:(id)_path {
+    this
 }
 @end
 

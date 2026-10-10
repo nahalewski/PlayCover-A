@@ -26,13 +26,17 @@ impl ProcessIdentity {
 }
 fn trap_number(cpu:&A64Cpu)->Result<i64,String> {
  let raw=cpu.reg(16);
- // Original15G77 mach_absolute_time uses MOVN W16,#2, zero-extending
- // -3 into X16. Only this audited original stub gets the LP32 decoding;
- // platform0x80000000 and all other selectors retain their existing ABI.
- if raw==0xffff_fffd && cpu.pc()==0x18095bbe4 {
+ // mach_absolute_time uses MOVN W16,#2, zero-extending -3 into X16 (0xffff_fffd).
+ // Only audited original stubs get the decoding; all other selectors retain their ABI.
+ if raw==0xffff_fffd {
+  let stub = match cpu.pc() {
+   0x18095bbe4 => 0x18095bbdc,
+   0x1c260d35c => 0x1c260d354,
+   _ => return Ok(raw as i64),
+  };
   let original=[0x50,0,0x80,0x12,1,0x10,0,0xd4,0xc0,3,0x5f,0xd6];
-  if cpu.mapped_permissions(0x18095bbdc).is_none_or(|p|p&4==0)
-   ||cpu.read_bytes(0x18095bbdc,12).is_none_or(|bytes|bytes!=original) {
+  if cpu.mapped_permissions(stub).is_none_or(|p|p&4==0)
+   ||cpu.read_bytes(stub,12).is_none_or(|bytes|bytes!=original) {
    return Err("original32-bit Mach absolute-time selector stub differs".into());
   }
   return Ok(-3);
@@ -162,12 +166,30 @@ impl ProcessState {
                 echo!("[a64] genuine Mach send-right deallocate pc={pc:#x} task={task:#x} name={name:#x} result={result:#x}");
                 return Ok(());
             }
+            if number == -19 {
+                let task = cpu.reg(0);
+                let name = cpu.reg(1);
+                let right = cpu.reg(2);
+                let delta = cpu.reg(3) as i64 as i32;
+                let result = match (u32::try_from(task), u32::try_from(name), u32::try_from(right)) {
+                    (Err(_), _, _) => 0x1000_0003, // MACH_SEND_INVALID_DEST
+                    (_, Err(_), _) => 15, // KERN_INVALID_NAME
+                    (_, _, Err(_)) => 17, // KERN_INVALID_RIGHT
+                    (Ok(task), Ok(name), Ok(right)) => ports.mod_refs(task, name, right, delta),
+                };
+                cpu.set_reg(0, u64::from(result));
+                echo!("[a64] genuine Mach port mod_refs pc={pc:#x} task={task:#x} name={name:#x} right={right} delta={delta} result={result:#x}");
+                return Ok(());
+            }
             if number == -47 {
                 let args = std::array::from_fn(|i| cpu.reg(i));
                 let message_id = args[4] >> 32;
                 let reply = match message_id {
                     200 => super::mach_host_info::reply(cpu, ports, args, priorities),
                     206 => clock.reply(cpu, ports, args),
+                    225 => super::mach_atm::reply(cpu, ports, args),
+                    3409 => ports.reply_task_special_port(cpu, args),
+                    3410 => ports.reply_task_set_special_port(cpu, args),
                     3418 => semaphores.reply(cpu, ports, args),
                     8000 => super::restartable::reply(cpu,ports,scheduler,args),
                     _ => Err(format!("unsupported initializer Mach RPC {message_id}")),
@@ -213,10 +235,28 @@ impl ProcessState {
                 echo!("[a64] genuine BSD366 process registration owner={owner:?} pc={pc:#x} args={args:x?} installed-control features={features:#x}; no workqueue/thread creation receipt");
                 return Ok(());
             }
-            if number == 398 {
+            if number == 398 || number == 5 {
                 let args: [u64; 3] = std::array::from_fn(|i| cpu.reg(i));
-                entropy.open(cpu, args)?;
-                echo!("[a64] genuine owned entropy open pc={pc:#x} result={:#x}", cpu.reg(0));
+                let path_addr = args[0];
+                let path_bytes = if path_addr != 0 {
+                    if let Some(bytes) = cpu.read_bytes(path_addr, 256) {
+                        let len = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+                        bytes[..len].to_vec()
+                    } else {
+                        Vec::new()
+                    }
+                } else {
+                    Vec::new()
+                };
+                if path_bytes == b"/dev/urandom" {
+                    entropy.open(cpu, args)?;
+                    echo!("[a64] genuine owned entropy open pc={pc:#x} result={:#x}", cpu.reg(0));
+                    return Ok(());
+                }
+                let path_str = String::from_utf8_lossy(&path_bytes);
+                echo!("[a64] genuine BSD{number} open pc={pc:#x} path={path_str:?} flags={:#x} mode={:#x} -> ENOENT (2)", args[1], args[2]);
+                cpu.set_reg(0, 2); // ENOENT
+                cpu.set_pstate(cpu.pstate() | (1 << 29)); // carry flag set
                 return Ok(());
             }
             if number == 54 {
@@ -269,12 +309,188 @@ impl ProcessState {
                 echo!("[a64] routed BSD478 owned thread control pc={pc:#x} args={args:x?} result={:#x}", cpu.reg(0));
                 return Ok(());
             }
+            if number == 202 {
+                super::sysctl::sysctl(cpu)?;
+                return Ok(());
+            }
+            if number == 336 {
+                let callnum = cpu.reg(0) as i32;
+                let pid = cpu.reg(1) as i32;
+                let flavor = cpu.reg(2) as u32;
+                let _arg = cpu.reg(3);
+                let buffer = cpu.reg(4);
+                let buffersize = cpu.reg(5) as i32;
+
+                if callnum == 2 && flavor == 13 { // PROC_INFO_CALL_PIDINFO, PROC_PIDT_SHORTBSDINFO
+                    if (buffersize as usize) < 64 {
+                        cpu.set_reg(0, 22); // EINVAL
+                        cpu.set_pstate(cpu.pstate() | (1 << 29));
+                        return Ok(());
+                    }
+                    if cpu.validate_guest_write(buffer, 64).is_err() {
+                        cpu.set_reg(0, 14); // EFAULT
+                        cpu.set_pstate(cpu.pstate() | (1 << 29));
+                        return Ok(());
+                    }
+                    let mut info = [0u8; 64];
+                    let proc_id = identity.id;
+                    info[0..4].copy_from_slice(&proc_id.to_le_bytes()); // pbsi_pid
+                    info[4..8].copy_from_slice(&1u32.to_le_bytes());    // pbsi_ppid
+                    info[8..12].copy_from_slice(&proc_id.to_le_bytes()); // pbsi_pgid
+                    info[12..16].copy_from_slice(&2u32.to_le_bytes());   // pbsi_status (SRUN)
+                    let comm = b"Terraria\0\0\0\0\0\0\0\0";
+                    info[16..32].copy_from_slice(&comm[..16]);
+                    info[32..36].copy_from_slice(&4u32.to_le_bytes());   // pbsi_flags (PROC_FLAG_LP64)
+                    info[36..40].copy_from_slice(&501u32.to_le_bytes()); // pbsi_uid
+                    info[40..44].copy_from_slice(&501u32.to_le_bytes()); // pbsi_gid
+                    info[44..48].copy_from_slice(&501u32.to_le_bytes()); // pbsi_ruid
+                    info[48..52].copy_from_slice(&501u32.to_le_bytes()); // pbsi_rgid
+                    info[52..56].copy_from_slice(&501u32.to_le_bytes()); // pbsi_svuid
+                    info[56..60].copy_from_slice(&501u32.to_le_bytes()); // pbsi_svgid
+                    let _ = cpu.write_guest_into(buffer, &info);
+                    cpu.set_reg(0, 64);
+                    cpu.set_pstate(cpu.pstate() & !(1 << 29));
+                    echo!("[a64] genuine BSD336 proc_info PIDINFO/SHORTBSDINFO pid={pid} -> 64 bytes written");
+                    return Ok(());
+                }
+                cpu.set_reg(0, 22); // EINVAL
+                cpu.set_pstate(cpu.pstate() | (1 << 29));
+                echo!("[a64] unsupported BSD336 proc_info callnum={callnum} flavor={flavor}");
+                return Ok(());
+            }
+            if number == 220 {
+                let path_addr = cpu.reg(0);
+                let path = if path_addr != 0 {
+                    if let Some(bytes) = cpu.read_bytes(path_addr, 256) {
+                        let len = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+                        String::from_utf8_lossy(&bytes[..len]).to_string()
+                    } else {
+                        String::new()
+                    }
+                } else {
+                    String::new()
+                };
+                cpu.set_reg(0, 2); // ENOENT
+                cpu.set_pstate(cpu.pstate() | (1 << 29)); // set carry flag
+                echo!("[a64] genuine BSD220 getattrlist pc={pc:#x} path={path:?} -> ENOENT (2)");
+                return Ok(());
+            }
+            if number == 116 {
+                let tp = cpu.reg(0);
+                let tzp = cpu.reg(1);
+                let mach_time_ptr = cpu.reg(2);
+
+                for (address, size) in [(tp, 16), (tzp, 8), (mach_time_ptr, 8)] {
+                    if address != 0 && cpu.validate_guest_write(address, size).is_err() {
+                        cpu.set_reg(0, 14); // EFAULT
+                        cpu.set_pstate(cpu.pstate() | (1 << 29));
+                        return Ok(());
+                    }
+                }
+
+                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+                let mut timeval = [0u8; 16];
+                timeval[..8].copy_from_slice(&(now.as_secs() as i64).to_le_bytes());
+                timeval[8..12].copy_from_slice(&(now.subsec_micros() as i32).to_le_bytes());
+
+                if tp != 0 {
+                    let _ = cpu.write_guest_into(tp, &timeval);
+                }
+                if tzp != 0 {
+                    let _ = cpu.write_guest_into(tzp, &[0u8; 8]);
+                }
+                if mach_time_ptr != 0 {
+                    let ticks = (now.as_nanos().min(u64::MAX as u128) as u64).to_le_bytes();
+                    let _ = cpu.write_guest_into(mach_time_ptr, &ticks);
+                }
+
+                cpu.set_reg(0, 0);
+                cpu.set_pstate(cpu.pstate() & !(1 << 29));
+                echo!("[a64] genuine gettimeofday pc={pc:#x} tp={tp:#x} sec={}", now.as_secs());
+                return Ok(());
+            }
             if number == -31 {
                 let args: [u64; 8] = std::array::from_fn(|i| cpu.reg(i));
                 let result=super::legacy_mach_msg::reply(cpu,ports,args,priorities,clock,semaphores).map_err(|error|format!("{error}; {}",capture_message(cpu,number,pc,args).unwrap_or_else(|error|error)))?;
                 cpu.set_reg(0,u64::from(result));
                 echo!("[a64] genuine original mach_msg owned host service reply pc={pc:#x} result={result:#x}; owned ordinary reply receive retained");
                 return Ok(());
+            }
+            if number == 33 {
+                let path_addr = cpu.reg(0);
+                let mode = cpu.reg(1);
+                let path_bytes = if path_addr != 0 {
+                    if let Some(bytes) = cpu.read_bytes(path_addr, 256) {
+                        let len = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+                        bytes[..len].to_vec()
+                    } else {
+                        Vec::new()
+                    }
+                } else {
+                    Vec::new()
+                };
+                let path_str = String::from_utf8_lossy(&path_bytes);
+                echo!("[a64] genuine BSD33 access pc={pc:#x} path={path_str:?} mode={mode:#x} -> ENOENT (2)");
+                cpu.set_reg(0, 2); // ENOENT
+                cpu.set_pstate(cpu.pstate() | (1 << 29)); // carry flag set
+                return Ok(());
+            }
+            if number == 381 {
+                let policy_addr = cpu.reg(0);
+                let call = cpu.reg(1) as u32;
+                let arg = cpu.reg(2);
+                let policy_bytes = if policy_addr != 0 {
+                    if let Some(bytes) = cpu.read_bytes(policy_addr, 64) {
+                        let len = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+                        bytes[..len].to_vec()
+                    } else {
+                        Vec::new()
+                    }
+                } else {
+                    Vec::new()
+                };
+                let policy_str = String::from_utf8_lossy(&policy_bytes);
+                echo!("[a64] genuine BSD381 __mac_syscall pc={pc:#x} policy={policy_str:?} call={call} arg={arg:#x} -> ENOENT (2)");
+                cpu.set_reg(0, 2); // ENOENT (not sandboxed / no container)
+                cpu.set_pstate(cpu.pstate() | (1 << 29)); // carry flag set
+                return Ok(());
+            }
+            if number == 169 {
+                let pid = cpu.reg(0) as i32;
+                let ops = cpu.reg(1) as u32;
+                let useraddr = cpu.reg(2);
+                let usersize = cpu.reg(3) as usize;
+
+                if ops == 0 {
+                    // CS_OPS_STATUS
+                    if usersize < 4 {
+                        cpu.set_reg(0, 22); // EINVAL
+                        cpu.set_pstate(cpu.pstate() | (1 << 29));
+                        return Ok(());
+                    }
+                    let status: u32 = 0x2000_0001; // CS_VALID | CS_SIGNED
+                    if cpu.write_guest_into(useraddr, &status.to_le_bytes()).is_err() {
+                        cpu.set_reg(0, 14); // EFAULT
+                        cpu.set_pstate(cpu.pstate() | (1 << 29));
+                        return Ok(());
+                    }
+                    cpu.set_reg(0, 0);
+                    cpu.set_pstate(cpu.pstate() & !(1 << 29)); // carry flag clear
+                    echo!("[a64] genuine BSD169 csops CS_OPS_STATUS pid={pid} status={status:#x} -> 0");
+                    return Ok(());
+                }
+                cpu.set_reg(0, 22); // EINVAL
+                cpu.set_pstate(cpu.pstate() | (1 << 29));
+                echo!("[a64] unsupported BSD169 csops ops={ops} pid={pid}");
+                return Ok(());
+            }
+            if number > 0 {
+                return Err(format!(
+                    "unsupported BSD syscall {number} at {pc:#x}; lr={:#x} sp={:#x} x0..x5={:x?}",
+                    cpu.reg(30),
+                    cpu.sp(),
+                    std::array::from_fn::<_, 6, _>(|i| cpu.reg(i))
+                ));
             }
             let name = ports.trap_for_thread(number, *thread).map_err(|error| {
                 format!(
@@ -479,6 +695,19 @@ impl Drop for ExecutionSession {fn drop(&mut self){self.lease.live.set(false);}}
   cpu.write_guest_into(0x41001,&[0x77]).unwrap();
   let base=session.call_using(&mut cpu,&GuestCall{entry:lazy,integers:vec![259],..Default::default()},1000,|cpu,call,budget,handler|bridge.call_with_supervisor_handler(cpu,call,budget,handler)).unwrap().integers[0];
   assert_eq!(base,0x41000);assert_eq!(cpu.read_bytes(base+1,1).unwrap(),&[0x77]);assert_eq!(session.calls_returned,2);assert_eq!(cpu.tpidrro_el0(),0x200e0);assert!(!session.is_quarantined());
+ }
+ #[test]fn csops_status_returns_codesign_flags_and_clears_carry(){
+  let(mut cpu,_,mut session)=fixture();
+  cpu.set_reg(16,169);
+  cpu.set_reg(0,1);
+  cpu.set_reg(1,0);
+  cpu.set_reg(2,0x20000);
+  cpu.set_reg(3,4);
+  cpu.set_pstate(0xb0000000);
+  session.process.dispatch(&mut cpu,0x80).unwrap();
+  assert_eq!(cpu.reg(0),0);
+  assert_eq!(cpu.pstate(),0x90000000);
+  assert_eq!(cpu.read_bytes(0x20000,4).unwrap(),&0x20000001u32.to_le_bytes());
  }
 }
 fn capture_message(cpu: &A64Cpu, number: i64, pc: u64, args: [u64; 8]) -> Result<String, String> {

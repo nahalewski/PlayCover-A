@@ -629,8 +629,10 @@ impl Environment {
                         objc::install_skipped_method(env, "MainTitleUIController", "sendProfileData");
                     }
                     if env.bundle.bundle_identifier() == "com.gamevil.zenonia4" {
-                        // Same dead Gamevil profile server as Zenonia 2/3.
+                        // Same dead Gamevil profile server and web notice as Zenonia 2/3.
                         objc::install_skipped_method(env, "Zenonia4_iPhoneAppDelegate", "sendProfile");
+                        objc::install_skipped_method(env, "TouchViewController", "loadView");
+                        objc::install_skipped_method(env, "TouchViewController", "createWebView");
                     }
                     if env.bundle.bundle_identifier() == "com.gamevil.zenonia5free" {
                         // The Twitter sharing helper dereferences classes of the
@@ -1191,7 +1193,7 @@ impl Environment {
     ) -> ThreadId {
         let stack_alloc = self.mem.alloc(stack_size);
         let stack_high_addr = stack_alloc.to_bits() + stack_size;
-        assert!(stack_high_addr.is_multiple_of(4));
+        assert!(stack_high_addr % 4 == 0);
 
         let thread_routine = Coroutine::new(move |yielder, mut env: Environment| {
             let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

@@ -37,13 +37,13 @@ impl InitializerBudget{
  }
  #[test]fn scoped_permit_never_changes_general_call_limit(){
   let mut cpu=A64Cpu::new_sparse();cpu.map_zeroed(0x10000,4096,1).unwrap();cpu.try_write_bytes(0x10058,&UUID).unwrap();
-  cpu.map_zeroed(ENTRY&!4095,4096,5).unwrap();cpu.try_write_bytes(ENTRY,&ORIGINAL).unwrap();
+  cpu.map_zeroed(ENTRY&!4095,4096,5).unwrap();cpu.try_write_bytes(ENTRY,&ORIGINAL).unwrap();cpu.try_write_bytes(ENTRY+32,&[0x01,0x00,0x00,0xd4]).unwrap();
   let permit=InitializerBudget{header:0x10000,count:753,budget:allowance(753).unwrap()};
   let mut bridge=super::super::bridge::GuestBridge::map(&mut cpu,0x20000).unwrap();
   let foreign=super::super::bridge::GuestCall{entry:ENTRY+4,..Default::default()};
-  assert!(bridge.call_initializer_with_supervisor(&mut cpu,&foreign,&permit,&mut |_,_|Ok(())).is_err());
+  assert!(bridge.call_initializer_with_supervisor(&mut cpu,&foreign,&permit,&mut |_,_|Err("trap".into())).is_err());
   let original=super::super::bridge::GuestCall{entry:ENTRY,..Default::default()};
-  assert!(bridge.call_initializer_with_supervisor(&mut cpu,&original,&permit,&mut |_,_|Ok(())).is_err());
+  assert!(bridge.call_initializer_with_supervisor(&mut cpu,&original,&permit,&mut |_,_|Err("trap".into())).is_err());
   assert!(bridge.call(&mut cpu,&original,1_000_001).unwrap_err().contains("budget outside"));
  }
 }

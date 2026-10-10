@@ -96,7 +96,7 @@ pub fn find_fullscreen_eagl_layer(env: &mut Environment) -> id {
             return nil;
         }
 
-        if let Some(&next) = layer_host_obj.sublayers.last() {
+        if let Some(&next) = layer_host_obj.sublayers.iter().rev().find(|&&l| !env.objc.borrow::<CALayerHostObject>(l).hidden) {
             layer = next;
         } else {
             break;

@@ -133,9 +133,12 @@ pub(super) fn execute(
     sdk_query:Option<(u64,super::dyld_sdk_query::ProgramSdk)>,
     objc_callbacks:Option<(u64,Vec<super::dyld_objc_callbacks::ObjcImage>)>,
     cache_range:Option<(u64,super::dyld_cache_range::CacheRange)>,
+    dyld_overridden:Option<u64>,
+    dyld_add_image:Option<u64>,
+    dyld_objc:Option<super::dyld_objc::DyldObjcEntries>,
 )->Result<(),String> {
     let caller_context=cpu.save_context();
-    let prepared=prepare_session(cpu,plan,services,arguments,main_stack,slide_route,restricted_entry,immutable_route,tlv_images,sdk_query,objc_callbacks,cache_range);
+    let prepared=prepare_session(cpu,plan,services,arguments,main_stack,slide_route,restricted_entry,immutable_route,tlv_images,sdk_query,objc_callbacks,cache_range,dyld_overridden,dyld_add_image,dyld_objc);
     let mut prepared=match prepared {
         Ok(prepared)=>prepared,
         Err(error)=>{cpu.restore_context(&caller_context);return Err(error);}
@@ -162,6 +165,9 @@ pub(super) fn prepare_session(
     sdk_query:Option<(u64,super::dyld_sdk_query::ProgramSdk)>,
     objc_callbacks:Option<(u64,Vec<super::dyld_objc_callbacks::ObjcImage>)>,
     cache_range:Option<(u64,super::dyld_cache_range::CacheRange)>,
+    dyld_overridden:Option<u64>,
+    dyld_add_image:Option<u64>,
+    dyld_objc:Option<super::dyld_objc::DyldObjcEntries>,
 ) -> Result<PreparedInitialization, String> {
     use std::io::{Read, Seek, SeekFrom};
     let mut header = std::fs::File::open(
@@ -210,6 +216,18 @@ pub(super) fn prepare_session(
     if let Some((entry,range))=cache_range {
         let target=services.install_dyld_cache_range(cpu,entry,range)?;
         echo!("[a64] original mapped shared-cache range entry={entry:#x} target={target:#x}; original VMspan provenance, no allocated-byte sum");
+    }
+    if let Some(entry)=dyld_overridden {
+        let target=services.install_dyld_overridden(cpu,entry)?;
+        echo!("[a64] original dyld overridden query entry={entry:#x} target={target:#x}; reported false (no cache images overridden)");
+    }
+    if let Some(entry)=dyld_add_image {
+        let target=services.install_dyld_add_image(cpu,entry)?;
+        echo!("[a64] original dyld add-image query entry={entry:#x} target={target:#x}; registered callback handler");
+    }
+    if let Some(entries)=dyld_objc {
+        services.install_dyld_objc(cpu, entries)?;
+        echo!("[a64] original dyld ObjC optimization query hooks installed");
     }
     super::commpage_ro::ensure_mapped(cpu)?;
     let mut ports = super::mach_identity::MachIdentity::new(64)?;

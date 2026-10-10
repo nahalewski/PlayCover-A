@@ -518,7 +518,27 @@ public class MainActivity extends SDLActivity {
                 s.sendLiveCommand();
             }));
 
-        // 7. Menu button
+        // 7. Store Purchases & DLC
+        addSection(body, wide, "Store / Content Unlock", "Auto-grant offline in-game store purchases & DLC",
+            toggleRow("Unlock store purchases (Free items)", s.unlockStorePurchases, on -> {
+                s.unlockStorePurchases = on;
+                s.saveOptions();
+                s.sendLiveCommand();
+            }));
+
+        // 8. App Version Spoofing
+        String curVer = s.reportedAppVersion != null ? s.reportedAppVersion : "Default";
+        addSection(body, wide, "Version Spoofing", "Spoofs reported app version to bypass online checks (e.g. 2.10.0 for Zenonia S)",
+            chipGroup(new String[]{"Default", "2.10.0 (Zenonia S)", "Latest"},
+                curVer.equals("2.10.0") ? 1 : (curVer.equals("Default") ? 0 : 2), i -> {
+                    if (i == 0) s.reportedAppVersion = null;
+                    else if (i == 1) s.reportedAppVersion = "2.10.0";
+                    else s.reportedAppVersion = "2.10.0";
+                    s.saveOptions();
+                    s.sendLiveCommand();
+                }));
+
+        // 9. Menu button
         addSection(body, wide, "Menu button", null,
             toggleRow("Faded while playing", s.fadedMenuButton, on -> {
                 s.fadedMenuButton = on;
@@ -854,7 +874,9 @@ public class MainActivity extends SDLActivity {
                 if (setting != null && (setting.matches("--scale-hack=[1-4]") || setting.matches("--fps-limit=[0-9]{1,3}") ||
                     setting.equals("--upside-down") || setting.equals("--landscape-left") ||
                     setting.equals("--landscape-right") || setting.equals("--allow-network-access") ||
-                    setting.equals("--disable-analog-stick-tilt-controls") || validReportedIosVersion(setting))) {
+                    setting.equals("--disable-analog-stick-tilt-controls") ||
+                    setting.startsWith("--a64-cache-") || setting.equals("--no-error-popup") ||
+                    validReportedIosVersion(setting))) {
                     arguments.add(setting);
                 }
             }

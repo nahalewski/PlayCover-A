@@ -45,7 +45,7 @@ fn make_path_and_check(
             path.last().unwrap(),
             env::consts::EXE_SUFFIX
         ));
-        println!("{}", buf.iter().last().unwrap().display())
+        println!("{}", buf.iter().last().unwrap().to_string_lossy())
     } else {
         for part in path {
             buf.push(part);

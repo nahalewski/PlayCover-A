@@ -36,6 +36,12 @@ mod credentials;
 mod dyld_sdk_query;
 #[path = "a64_dyld_cache_range.rs"]
 mod dyld_cache_range;
+#[path = "a64_dyld_overridden.rs"]
+mod dyld_overridden;
+#[path = "a64_dyld_add_image.rs"]
+mod dyld_add_image;
+#[path = "a64_dyld_objc.rs"]
+mod dyld_objc;
 #[path = "a64_restartable.rs"]
 mod restartable;
 #[path = "a64_dyld_objc_callbacks.rs"]
@@ -109,6 +115,8 @@ mod mach_vm;
 mod mach_port_construct;
 #[path = "a64_mach_host_info.rs"]
 mod mach_host_info;
+#[path = "a64_mach_atm.rs"]
+mod mach_atm;
 #[path = "a64_mach_clock.rs"]
 mod mach_clock;
 #[path = "a64_mach_semaphore.rs"]
@@ -148,6 +156,8 @@ mod mprotect_tests;
 mod protection_backend_tests;
 #[path = "a64_posix_shm.rs"]
 mod posix_shm;
+#[path = "a64_sysctl.rs"]
+mod sysctl;
 #[path = "a64_main_stack.rs"]
 mod main_stack;
 #[path = "a64_pthread_registration.rs"]

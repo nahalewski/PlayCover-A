@@ -75,6 +75,15 @@ impl SelectedServices {
     pub(super) fn install_dyld_cache_range(&mut self,cpu:&mut A64Cpu,entry:u64,range:super::dyld_cache_range::CacheRange)->Result<u64,String>{
         super::dyld_cache_range::install(cpu,&mut self.bridge,entry,range)
     }
+    pub(super) fn install_dyld_overridden(&mut self,cpu:&mut A64Cpu,entry:u64)->Result<u64,String>{
+        super::dyld_overridden::install(cpu,&mut self.bridge,entry)
+    }
+    pub(super) fn install_dyld_add_image(&mut self,cpu:&mut A64Cpu,entry:u64)->Result<u64,String>{
+        super::dyld_add_image::install(cpu,&mut self.bridge,entry)
+    }
+    pub(super) fn install_dyld_objc(&mut self,cpu:&mut A64Cpu,entries:super::dyld_objc::DyldObjcEntries)->Result<(),String>{
+        super::dyld_objc::install(cpu,&mut self.bridge,entries)
+    }
     pub(super) fn install_dyld_restricted(&mut self,cpu:&mut A64Cpu,entry:u64)->Result<u64,String> {
         super::dyld_slide::install_restricted(cpu,&mut self.bridge,entry,super::dyld_slide::LoaderPolicy::declared_paths_only())
     }

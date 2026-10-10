@@ -38,14 +38,14 @@ fun join(prefix: String, separator: String, branding: String): String {
 }
 
 android {
-    ndkVersion = "25.2.9519653"
+    ndkVersion = "25.1.8937393"
     compileSdk = 34
     buildFeatures {
         buildConfig = true
     }
     defaultConfig {
         val branding = getTouchHLEBranding()
-        applicationId = "org.touchhle.android"
+        applicationId = "org.touchhle.android.a64test"
         if (!branding.isEmpty()) {
             applicationIdSuffix = branding.lowercase()
         }
@@ -138,6 +138,7 @@ cargoNdk {
     extraCargoEnv = mapOf(
         "ANDROID_NDK" to android.ndkDirectory.toString(),
         "ANDROID_NDK_HOME" to android.ndkDirectory.toString(),
+        "CMAKE" to "${rootDir.parentFile}/tools/cmake_wrapper.sh",
     )
 
     if (DefaultNativePlatform.host().operatingSystem.isWindows) {

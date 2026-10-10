@@ -349,6 +349,13 @@ pub const CLASSES: ClassExports = objc_classes! {
 }
 
 - (id)objectForInfoDictionaryKey:(id)key {
+    if key != nil && env.options.reported_app_version.is_some() {
+        let key_str = ns_string::to_rust_string(env, key);
+        if key_str == "CFBundleVersion" || key_str == "CFBundleShortVersionString" {
+            let version = env.options.reported_app_version.as_ref().unwrap();
+            return ns_string::from_rust_string(env, version.clone());
+        }
+    }
     let info_dict = msg![env; this infoDictionary];
     // TODO: return the localized value of a key when one is available
     msg![env; info_dict objectForKey:key]

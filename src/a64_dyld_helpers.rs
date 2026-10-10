@@ -6,6 +6,7 @@ use super::A64Cpu;
 use super::bridge::GuestBridge;
 pub(super) const INITIALIZER:u64=0x1a6c7df20;
 pub(super) const HELPER_OBJECT:u64=0x1e1d30380;
+pub(super) const GAPIS_POINTER:u64=0x1e1d30388;
 pub(super) fn install_prefix(cpu:&mut A64Cpu,bridge:&mut GuestBridge,entry:u64,helpers:Helpers,arena:u64,plans:Vec<super::tlv::Plan>,owner:u64)->Result<u64,String> {
     install_prefix_inner(cpu,bridge,entry,helpers,arena,plans,owner,None,None)
 }
@@ -18,6 +19,20 @@ fn install_prefix_inner(cpu:&mut A64Cpu,bridge:&mut GuestBridge,entry:u64,helper
     let mut original=[0u8;28];cpu.read_guest_into(entry,&mut original)?;
     if original!=ORIGINAL {return Err("original dyld initializer instructions mismatch".into());}
     cpu.map_zeroed(arena,4096,3)?;
+    if cpu.mapped_permissions(GAPIS_POINTER).is_some_and(|p| p & 2 != 0) {
+        let fallback_stub = bridge.register_service(cpu, "dyld_gapis_fallback", |_frame| {
+            echo!("[a64] dyld gapis fallback stub invoked; returning 0");
+            Ok(super::bridge::ReturnValues::integer(0))
+        })?.guest_address();
+        let vtable = arena + 256;
+        for i in 0..128u64 {
+            cpu.try_write_bytes(vtable + i * 8, &fallback_stub.to_le_bytes())?;
+        }
+        let object = arena + 1280;
+        cpu.try_write_bytes(object, &vtable.to_le_bytes())?;
+        cpu.try_write_bytes(GAPIS_POINTER, &object.to_le_bytes())?;
+        echo!("[a64] initialized dyld gAPIs pointer at {GAPIS_POINTER:#x} -> object={object:#x} vtable={vtable:#x}");
+    }
     let target=match scheduler {
         Some(scheduler)=>super::tlv_bootstrap::install_owned(cpu,bridge,helpers,arena,plans,owner,scheduler,lease.ok_or("owned bootstrap missing live session lease")?)?,
         None=>super::tlv_bootstrap::install(cpu,bridge,helpers,arena,plans,owner)?,
