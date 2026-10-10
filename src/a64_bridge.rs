@@ -15,6 +15,9 @@ const STACK_SIZE: usize = 64 * 1024;
 const MAX_SERVICES: usize = 128;
 const MAX_TICKS: u64 = 1_000_000;
 const MAX_SERVICE_MEMORY: usize = 1024 * 1024;
+/// a64_frameworks hook: separate per-call budget for explicit bulk data copies
+/// (audio sample buffers, decoded images). Ordinary access keeps 1 MiB.
+pub(super) const MAX_BULK_MEMORY: usize = 64 * 1024 * 1024;
 pub(super) const MAX_METADATA_MEMORY: usize = 16 * 1024 * 1024;
 const MAX_METADATA_REQUEST: usize = 64 * 1024;
 const MAX_METADATA_READS: usize = 1_000_000;
@@ -101,6 +104,7 @@ impl ReturnValues {
 pub(super) struct ServiceFrame<'a> {
     cpu: &'a mut A64Cpu,
     remaining_memory: usize,
+    remaining_bulk: usize,
     stack_range: (u64, u64),
     depth: usize,
     continuations: &'a mut Vec<GuestContinuation>,
@@ -281,6 +285,26 @@ impl ServiceFrame<'_> {
     pub(super) fn write(&mut self, address: u64, bytes: &[u8]) -> Result<(), String> {
         self.charge(bytes.len())?;
         self.cpu.write_guest_into(address, bytes)
+    }
+    /// a64_frameworks hook: bulk data copy charged to its own 64 MiB per-call
+    /// budget. Same permission/bounds checks as `read`; the budget is checked
+    /// before any host allocation.
+    pub(super) fn read_bulk(&mut self, address: u64, len: usize) -> Result<Vec<u8>, String> {
+        self.charge_bulk(len)?;
+        let mut bytes = vec![0; len];
+        self.cpu.read_guest_into(address, &mut bytes)?;
+        Ok(bytes)
+    }
+    pub(super) fn write_bulk(&mut self, address: u64, bytes: &[u8]) -> Result<(), String> {
+        self.charge_bulk(bytes.len())?;
+        self.cpu.write_guest_into(address, bytes)
+    }
+    fn charge_bulk(&mut self, len: usize) -> Result<(), String> {
+        self.remaining_bulk = self
+            .remaining_bulk
+            .checked_sub(len)
+            .ok_or("host service bulk copy budget exceeded")?;
+        Ok(())
     }
     /// Validate a whole caller-owned read/write range without exposing the CPU or
     /// allocating a buffer. Validation consumes the ordinary service budget.
@@ -709,6 +733,7 @@ impl GuestBridge {
                         let outcome = (service.handler)(&mut ServiceFrame {
                             cpu,
                             remaining_memory: MAX_SERVICE_MEMORY,
+                            remaining_bulk: MAX_BULK_MEMORY,
                             stack_range: (slice_bottom, slice_top),
                             depth,
                             continuations: &mut continuations,

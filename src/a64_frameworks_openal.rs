@@ -44,9 +44,9 @@ const AL_VELOCITY: i32 = 0x1006;
 const AL_ORIENTATION: i32 = 0x100F;
 /// Generous but bounded name-array length for gen/delete/queue calls.
 const MAX_NAMES: i32 = 4096;
-/// alBufferData must fit the bridge's per-call guest-memory budget (1 MiB),
+/// alBufferData copies through the bridge's bulk budget (64 MiB per call),
 /// with headroom for the call's other reads.
-const MAX_BUFFER_DATA: i32 = 1024 * 1024 - 4096;
+const MAX_BUFFER_DATA: i32 = crate::a64::bridge::MAX_BULK_MEMORY as i32;
 
 macro_rules! symbols {
     ($($name:ident),* $(,)?) => {
@@ -582,13 +582,13 @@ impl OpenAl {
                 let frequency = arg_i32(frame, 4)?;
                 if !(0..=MAX_BUFFER_DATA).contains(&size) {
                     return Err(format!(
-                        "OpenAL alBufferData of {size} bytes exceeds the bridge's per-call guest copy budget"
+                        "OpenAL alBufferData of {size} bytes exceeds the bridge's per-call bulk copy budget"
                     ));
                 }
                 let bytes = if size == 0 || data == 0 {
                     Vec::new()
                 } else {
-                    frame.read(data, size as usize)?
+                    frame.read_bulk(data, size as usize)?
                 };
                 unsafe {
                     al::alBufferData(
@@ -641,6 +641,9 @@ mod tests {
     static DEVICE: Mutex<()> = Mutex::new(());
 
     const DATA: u64 = 0x80000;
+    /// A predecoded sound larger than the ordinary 1 MiB service budget.
+    const BIG: u64 = 0x1000_0000;
+    const BIG_LEN: u64 = 3 << 20;
 
     struct Guest {
         cpu: A64Cpu,
@@ -653,6 +656,7 @@ mod tests {
             std::env::set_var("ALSOFT_DRIVERS", "null");
             let mut cpu = A64Cpu::new_sparse();
             cpu.map_zeroed(DATA, 0x20000, 3).unwrap();
+            cpu.map_zeroed(BIG, BIG_LEN as usize, 3).unwrap();
             let mut bridge = GuestBridge::map(&mut cpu, 0x20000).unwrap();
             let frameworks = install(
                 &mut cpu,
@@ -839,11 +843,29 @@ mod tests {
         assert_ne!(guest.call("alGetError", &[], &[]), 0);
         assert_eq!(guest.u32_at(unqueued), 0xdeadbeef);
 
-        // Oversized copies fail explicitly instead of truncating.
+        // A 3 MiB predecoded sound uses the bulk budget and arrives intact.
+        let ramp: Vec<u8> = (0..BIG_LEN).map(|i| (i % 251) as u8).collect();
+        guest.cpu.write_bytes(BIG, &ramp);
+        guest.call("alBufferData", &[buffer as u64, 0x1101, BIG, BIG_LEN, 44100], &[]);
+        assert_eq!(guest.call("alGetError", &[], &[]), 0);
+        // AL_SIZE (0x2004) via the host to confirm the full copy landed.
+        assert_eq!(
+            unsafe {
+                let mut value = 0;
+                al::alGetBufferi(buffer, 0x2004, &mut value);
+                value
+            },
+            BIG_LEN as i32
+        );
+        // Beyond the bulk budget fails explicitly instead of truncating.
         assert!(guest
-            .try_call("alBufferData", &[buffer as u64, 0x1101, pcm, 2 << 20, 22050], &[])
+            .try_call("alBufferData", &[buffer as u64, 0x1101, BIG, 65 << 20, 22050], &[])
             .unwrap_err()
             .contains("budget"));
+        // An unmapped tail fails without touching the AL buffer.
+        assert!(guest
+            .try_call("alBufferData", &[buffer as u64, 0x1101, BIG, BIG_LEN + 4096, 22050], &[])
+            .is_err());
 
         guest.call("alDeleteSources", &[32, sources], &[]);
         guest.call("alDeleteBuffers", &[1, buffers], &[]);
