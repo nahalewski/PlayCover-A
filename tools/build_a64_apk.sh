@@ -1,6 +1,8 @@
 #!/bin/bash
 set -euo pipefail
 source ~/.cargo/env
+# Same debug keystore as the 32-bit/release builds (ANDROID_SDK_HOME/.android/debug.keystore), so updates install over each other.
+export ANDROID_SDK_HOME="$HOME/android-sdk"
 export ANDROID_HOME="$HOME/android-sdk"
 export ANDROID_SDK_ROOT="$ANDROID_HOME"
 export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/25.2.9519653"
@@ -40,5 +42,5 @@ if not target.is_symlink():
 PY
 cd "$dst/android"
 printf 'sdk.dir=%s\nndk.dir=%s\n' "$ANDROID_HOME" "$ANDROID_NDK_HOME" > local.properties
-"$HOME/gradle-8.11.1/bin/gradle" --no-daemon assembleDebug
+"$HOME/gradle-8.11.1/bin/gradle" --no-daemon ${NDK_VERSION:+-PndkVersion=$NDK_VERSION} assembleDebug
 cp app/build/outputs/apk/debug/app-debug.apk "$src/../PlayCover-A-arm64-experimental.apk"

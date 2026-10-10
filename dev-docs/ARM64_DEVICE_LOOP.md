@@ -1,7 +1,7 @@
 # ARM64 device test loop (Samsung Galaxy Tab S11)
 
 How to build, stage, launch and read results for a 64-bit iOS app (example:
-Terraria 4.5.0) on the debuggable test package `org.touchhle.android.a64test`.
+Terraria 4.5.0) on the debuggable test package `org.touchhle.android`.
 Last verified 2026-10-10 on SM-X930 (`gts11uwifi`), APK SHA256
 `578217537a63381359593e94ca1b05405ceb3e7975da94b95ef6bd6d0e9944a1`.
 
@@ -12,8 +12,7 @@ Run the Python tools from that folder: they write evidence to
 
 ## 0. Rules
 
-- Only touch `org.touchhle.android.a64test`. The user's release app
-  `org.touchhle.android` and every other package stay untouched.
+- There is ONE app now (32-bit and 64-bit runtimes, `org.touchhle.android`). Never uninstall it or clear its data on a user device; staging only adds files under its private `files/ios-runtime` and `files/touchHLE_device_tests`. Do not touch other packages.
 - One builder and one device launcher at a time.
 - A diagnostic run that reaches an error is not a boot. Never report one as a
   title screen or gameplay.
@@ -26,7 +25,7 @@ wsl bash -lc "cd '/mnt/c/Users/Ben/Downloads/Godot_v4.7.2-stable_mono_win64/iOS 
 
 `build_a64_apk.sh` rsyncs the Windows tree into `~/touchHLE-a64-integration`
 (uncommitted edits included), then `build_9pro_test.sh` rewrites the
-applicationId to `org.touchhle.android.a64test` and builds a debug APK.
+applicationId to `org.touchhle.android` and builds a debug APK.
 The output is `PlayCover-A-9Pro-test.apk` in the workspace parent. The 32-bit builder uses
 `~/touchHLE` and does not collide with this one.
 
@@ -35,7 +34,7 @@ The output is `PlayCover-A-9Pro-test.apk` in the workspace parent. The 32-bit bu
 ```bash
 adb devices -l     # the tablet is on wireless adb: adb-R52Y8066STA-QDNQZy._adb-tls-connect._tcp
 adb -s SERIAL install -r PlayCover-A-9Pro-test.apk      # -r keeps app data
-adb -s SERIAL shell sha256sum $(adb -s SERIAL shell pm path org.touchhle.android.a64test | sed s/package://)
+adb -s SERIAL shell sha256sum $(adb -s SERIAL shell pm path org.touchhle.android | sed s/package://)
 ```
 
 The package must stay debuggable, because staging uses `run-as`.
@@ -62,9 +61,9 @@ C:/Python314/python.exe touchHLE-src/tools/stage_a64_device.py \
 
 This puts the files in app-private storage:
 
-- `/data/user/0/org.touchhle.android.a64test/files/ios-runtime/cache/dyld_shared_cache_arm64*`
+- `/data/user/0/org.touchhle.android/files/ios-runtime/cache/dyld_shared_cache_arm64*`
   (the subcaches must sit next to the main file)
-- `/data/user/0/org.touchhle.android.a64test/files/touchHLE_device_tests/Terraria_4.5.0.ipa`
+- `/data/user/0/org.touchhle.android/files/touchHLE_device_tests/Terraria_4.5.0.ipa`
 
 Each file is hashed locally and checked against the manifest. It is then pushed
 to `/data/local/tmp`, verified, piped into `run-as ... cat`, and verified again
@@ -98,7 +97,7 @@ measured):
 C:/Python314/python.exe touchHLE-src/tools/test_ipa_device.py --ipa C:/Users/Ben/Desktop/ipa/Terraria_4.5.0.ipa \
   --serial SERIAL --adb-port 5037 --device gts11uwifi --existing-private-only \
   --label terraria-YYYY-MM-DD-session --wait-seconds 45 \
-  --extra-args "--no-error-popup --a64-cache-session-test=/data/user/0/org.touchhle.android.a64test/files/ios-runtime/cache/dyld_shared_cache_arm64"
+  --extra-args "--no-error-popup --a64-cache-session-test=/data/user/0/org.touchhle.android/files/ios-runtime/cache/dyld_shared_cache_arm64"
 ```
 
 Other probes go in the same `--extra-args` slot (see the option parser in `src/lib.rs`):
@@ -117,7 +116,7 @@ Each run writes `pixel-fold-tests/<label>.json` and `<label>.log` (plus
 - The `[a64] ...` lines in `.log` just before the error are the last host
   services and traps that ran.
 
-When finished, run `adb -s SERIAL shell am force-stop org.touchhle.android.a64test`.
+When finished, run `adb -s SERIAL shell am force-stop org.touchhle.android`.
 
 ## 5. Desktop native harness (same code, no device, about 1 minute)
 

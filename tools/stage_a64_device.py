@@ -1,4 +1,4 @@
-"""Stage an original ARM64 dyld cache and/or IPAs into the a64test app's private files.
+"""Stage an original ARM64 dyld cache and/or IPAs into the app's private files.
 
 Run from the workspace parent (the folder that holds ios-runtime/ and
 pixel-fold-tests/). Every file is SHA256-verified locally, after the push to
@@ -33,7 +33,7 @@ def main():
     p.add_argument('--serial', required=True)
     p.add_argument('--device', required=True, help='Expected ro.product.device, e.g. gts11uwifi')
     p.add_argument('--adb-port', default='5037')
-    p.add_argument('--package', default='org.touchhle.android.a64test')
+    p.add_argument('--package', default='org.touchhle.android')
     p.add_argument('--cache-manifest', type=Path, help='JSON with files[{file,bytes,sha256}] (e.g. tablet-ios16-runtime.json)')
     p.add_argument('--cache-source', type=Path, help='Local directory holding the cache files named in the manifest')
     p.add_argument('--cache-dest', default='ios-runtime/cache', help='Directory relative to the app files/ dir')

@@ -38,14 +38,15 @@ fun join(prefix: String, separator: String, branding: String): String {
 }
 
 android {
-    ndkVersion = "25.1.8937393"
+    // One app for 32-bit and 64-bit iOS apps. -PndkVersion=... overrides the NDK on machines that have another one.
+    ndkVersion = (findProperty("ndkVersion") as String?) ?: "25.1.8937393"
     compileSdk = 34
     buildFeatures {
         buildConfig = true
     }
     defaultConfig {
         val branding = getTouchHLEBranding()
-        applicationId = "org.touchhle.android.a64test"
+        applicationId = "org.touchhle.android"
         if (!branding.isEmpty()) {
             applicationIdSuffix = branding.lowercase()
         }
@@ -135,11 +136,15 @@ cargoNdk {
     targets = arrayListOf("arm64")
     module = ".."
     librariesNames = arrayListOf("libtouchHLE.so", "libSDL2.so", "libc++_shared.so")
-    extraCargoEnv = mapOf(
-        "ANDROID_NDK" to android.ndkDirectory.toString(),
-        "ANDROID_NDK_HOME" to android.ndkDirectory.toString(),
-        "CMAKE" to "${rootDir.parentFile}/tools/cmake_wrapper.sh",
-    )
+    extraCargoEnv = buildMap {
+        put("ANDROID_NDK", android.ndkDirectory.toString())
+        put("ANDROID_NDK_HOME", android.ndkDirectory.toString())
+        // The wrapper only exists for Homebrew's cmake on macOS.
+        val cmakeWrapper = File("${rootDir.parentFile}/tools/cmake_wrapper.sh")
+        if (cmakeWrapper.exists() && File("/opt/homebrew/bin/cmake").exists()) {
+            put("CMAKE", cmakeWrapper.path)
+        }
+    }
 
     if (DefaultNativePlatform.host().operatingSystem.isWindows) {
         val binPath =

@@ -72,7 +72,7 @@ def main():
     p.add_argument("--existing-private-only", action="store_true", help="Launch only a SHA-matching already staged private IPA; never copy or overwrite")
     a = p.parse_args()
     source = Path(a.ipa)
-    package = 'org.touchhle.android.a64test'
+    package = 'org.touchhle.android'
     folder = Path('pixel-fold-tests')
     folder.mkdir(exist_ok=True)
     assert re.fullmatch(r'[a-z0-9-]+', a.label)
