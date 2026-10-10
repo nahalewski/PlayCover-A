@@ -176,13 +176,36 @@ There is no flat `Mem`.
        Terraria.
    - No owned OpenAL call has run inside the app yet: the session has not
      reached app code.
-3. **M3: AudioToolbox owned.**
-   - `AudioSession*`: properties that openal-soft really supports. Set
-     sample rate is recorded, and get returns the actual mixer rate.
-   - `AudioFileOpenWithCallbacks` reads through guest callbacks
-     (`request_guest_call`). `ExtAudioFile*` decodes via symphonia into the
-     client format.
-   - Test: decode a WAV/OGG fixture through guest read callbacks.
+3. **M3 (done): bulk copy, then AudioToolbox owned.**
+   - The bridge has a separate 64 MiB per-call bulk budget
+     (`ServiceFrame::read_bulk`/`write_bulk`). `alBufferData` uses it; a
+     3 MiB buffer is tested.
+   - *Driven calls* let an owned function call guest callbacks
+     synchronously. A 22-instruction guest driver loop per family `blr`s the
+     callback from guest code and resumes the host with its x0
+     (x17 = index | 0x8000). No bridge continuation change was needed.
+   - `AudioFileOpenWithCallbacks` calls the guest size proc, then the read
+     proc in 256 KiB chunks into an owned guest I/O buffer, and decodes with
+     the shared host decoder.
+   - `ExtAudioFile*` serves signed 16-bit interleaved PCM at the file's rate
+     and channel count, which is what ALmixer asks for. Other client formats
+     return `fmt?`. 8-bit WAV is widened.
+   - `AudioSession*` keeps the app's settings. Errors are real: `!ini`,
+     `init`, `pty?`, `!siz`. Hardware values are the host mixer's nominal
+     44.1 kHz.
+   - `AudioServicesPlaySystemSound` is ignored with one log line. Coromon
+     can only pass the vibrate ID, and the host has no haptics.
+   - Tests:
+     - The ALmixer CoreAudio decoder sequence runs through real guest
+       ARM64 read/size procs (two read chunks, EOF, rewind, dispose/close
+       order).
+     - A real Coromon MP3 (`sounds/worldSounds/all/footsteps/ledge.mp3`)
+       decodes to 44.1 kHz stereo S16 through the same path. This is an
+       opt-in ignored test with `COROMON_MP3=`.
+   - Harness: Coromon's routed imports went 85 -> 99, so all 14
+     AudioToolbox imports now bind to owned code. Terraria went 52 -> 55: it
+     imports 3 of these AudioToolbox functions, which are now owned for it
+     too. Both stop at the same libSystem boundary as before.
 4. **M4: CoreGraphics/ImageIO/CoreText decision.**
    - Run the genuine `CGBitmapContextCreate`/`CGContextDrawImage`/
      `CGImageSource*` once the initializers pass.
@@ -197,9 +220,12 @@ There is no flat `Mem`.
 
 ## 6. Limits that are known now
 
-- `alBufferData` larger than the 1 MiB per-call service budget is rejected
-  explicitly, with an error naming the size. ALmixer streams music in small
-  chunks; large predecoded sounds need a bridge bulk-copy API.
+- `alBufferData` and `ExtAudioFileRead` copies go through the 64 MiB bulk
+  budget. Larger requests fail explicitly.
+- `AudioFileOpenWithCallbacks` reads the whole encoded file, up to 64 MiB,
+  then decodes it all at open, as the 32-bit layer does. Coromon's largest
+  track is 8.2 MB. The data format it reports is the decoded LPCM, not
+  `.mp3`. ALmixer only uses rate, channels and bits from it.
 - Calls from guest threads other than the main thread go through the same
   bridge. Scheduling belongs to the thread scheduler.
 - The owned `alSourceUnqueueBuffers` reads `alGetError()` before it unqueues.

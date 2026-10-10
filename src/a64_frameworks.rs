@@ -16,6 +16,13 @@
 //! call-clobbered under AAPCS64/Apple ABI; LR is untouched, so the family
 //! stub's `ret` returns straight to the caller and the bridge still sees the
 //! service trap at exactly `stub + 8`.
+//!
+//! Driven calls: a function that must call back into guest code before it
+//! can return (AudioFileOpenWithCallbacks' read/size procs) branches to a
+//! small per-family guest driver loop instead. The host returns either
+//! `Drive::Done(result)` or `Drive::Call{function, args}`; the driver performs
+//! the `blr` from guest code (ordinary nesting, ordinary stack) and passes the
+//! callback's x0 back to the host with x17 = index | RESUME_FLAG.
 use super::{
     bridge::{GuestBridge, ReturnValues, ServiceFrame},
     A64Cpu,
@@ -24,14 +31,19 @@ use std::{cell::RefCell, collections::BTreeSet, rc::Rc};
 
 #[path = "a64_frameworks_openal.rs"]
 pub(super) mod openal;
+#[path = "a64_frameworks_audio_toolbox.rs"]
+pub(super) mod audio_toolbox;
 
 const PAGE: u64 = 4096;
-/// One RX trampoline page followed by the RW arena.
+/// One RX trampoline page, the RW handle/string arena, then a RW guest I/O
+/// buffer that driven calls hand to guest callbacks (e.g. read procs).
 pub(super) const ARENA_BYTES: u64 = 3 * PAGE;
-pub(super) const RESERVED_BYTES: u64 = PAGE + ARENA_BYTES;
+pub(super) const IO_BYTES: u64 = 256 * 1024;
+pub(super) const RESERVED_BYTES: u64 = PAGE + ARENA_BYTES + IO_BYTES;
 const TRAMPOLINE_BYTES: u64 = 8;
-const MAX_TRAMPOLINES: usize = (PAGE / TRAMPOLINE_BYTES) as usize;
 const HANDLE_BYTES: u64 = 16;
+/// x17 bit set by the driver loop when resuming a driven call.
+const RESUME_FLAG: u64 = 0x8000;
 
 /// Guest-visible storage owned by the framework layer: opaque 16-byte handles
 /// (never host pointers) and immutable NUL-terminated strings.
@@ -41,6 +53,8 @@ pub(super) struct Arena {
     next: u64,
     free_handles: Vec<u64>,
     live_handles: BTreeSet<u64>,
+    io: (u64, u64),
+    io_owner: Option<&'static str>,
 }
 impl Arena {
     fn new(base: u64, len: u64) -> Self {
@@ -50,7 +64,24 @@ impl Arena {
             next: base,
             free_handles: Vec::new(),
             live_handles: BTreeSet::new(),
+            io: (0, 0),
+            io_owner: None,
         }
+    }
+    /// Exclusive use of the guest I/O buffer for one in-flight driven call.
+    /// A nested driven call that also needs it fails explicitly.
+    pub(super) fn claim_io(&mut self, owner: &'static str) -> Result<(u64, u64), String> {
+        if self.io.1 == 0 {
+            return Err("framework guest I/O buffer not mapped".into());
+        }
+        if let Some(current) = self.io_owner {
+            return Err(format!("framework guest I/O buffer busy ({current}) for {owner}"));
+        }
+        self.io_owner = Some(owner);
+        Ok(self.io)
+    }
+    pub(super) fn release_io(&mut self) {
+        self.io_owner = None;
     }
     fn bump(&mut self, len: u64) -> Result<u64, String> {
         let len = len.checked_add(15).ok_or("framework arena size overflow")? & !15;
@@ -114,7 +145,96 @@ pub(super) trait Family {
         frame: &mut ServiceFrame<'_>,
         arena: &mut Arena,
     ) -> Result<ReturnValues, String>;
+    /// Whether `index` goes through the guest driver loop (`begin`/`resume`).
+    fn driven(&self, _index: usize) -> bool {
+        false
+    }
+    /// Start a driven call; `frame` holds the original arguments.
+    fn begin(
+        &mut self,
+        index: usize,
+        _frame: &mut ServiceFrame<'_>,
+        _arena: &mut Arena,
+    ) -> Result<Drive, String> {
+        Err(format!("framework function {index} is not driven"))
+    }
+    /// Continue the innermost driven call with the callback's x0.
+    fn resume(
+        &mut self,
+        index: usize,
+        _callback_result: u64,
+        _frame: &mut ServiceFrame<'_>,
+        _arena: &mut Arena,
+    ) -> Result<Drive, String> {
+        Err(format!("framework function {index} is not driven"))
+    }
 }
+
+/// Next action of a driven call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Drive {
+    /// Return this value in x0 to the original caller.
+    Done(u64),
+    /// Call guest `function(args[0..6])`, then resume with its x0.
+    Call { function: u64, args: [u64; 6] },
+}
+impl Drive {
+    fn values(self) -> ReturnValues {
+        match self {
+            Drive::Done(value) => {
+                let mut values = ReturnValues::integer(0);
+                values.integers[1] = value;
+                values
+            }
+            Drive::Call { function, args } => {
+                let mut values = ReturnValues::integer(1);
+                values.integers[1] = function;
+                values.vectors[0] = [args[0], args[1]];
+                values.vectors[1] = [args[2], args[3]];
+                values.vectors[2] = [args[4], args[5]];
+                values
+            }
+        }
+    }
+}
+
+/// Guest driver loop for one family. Contract with `Drive::values`:
+/// x0 = 0 means done (result in x1); x0 = 1 means call x1 with arguments in
+/// v0.d[0], v0.d[1], v1.d[0], v1.d[1], v2.d[0], v2.d[1].
+fn driver_code(at: u64, service: u64) -> Result<Vec<u32>, String> {
+    let pc = |i: usize| at + 4 * i as u64;
+    let bl = |i: usize| -> Result<u32, String> { Ok(branch(pc(i), service)? | 0x8000_0000) };
+    let mut code = vec![
+        0xA9BE7BFD, // 0  stp x29, x30, [sp, #-32]!
+        0x910003FD, // 1  mov x29, sp
+        0xA90153F3, // 2  stp x19, x20, [sp, #16]
+        0xAA1103F4, // 3  mov x20, x17
+        0,          // 4  bl service (begin, original x0..x7)
+        0,          // 5  loop: cbz x0, done
+        0xAA0103E9, // 6  mov x9, x1
+        0x9E660000, // 7  fmov x0, d0
+        0x4E183C01, // 8  mov x1, v0.d[1]
+        0x9E660022, // 9  fmov x2, d1
+        0x4E183C23, // 10 mov x3, v1.d[1]
+        0x9E660044, // 11 fmov x4, d2
+        0x4E183C45, // 12 mov x5, v2.d[1]
+        0xD63F0120, // 13 blr x9
+        0xAA0003E1, // 14 mov x1, x0
+        0xB2710291, // 15 orr x17, x20, #0x8000
+        0,          // 16 bl service (resume)
+        0,          // 17 b loop
+        0xAA0103E0, // 18 done: mov x0, x1
+        0xA94153F3, // 19 ldp x19, x20, [sp, #16]
+        0xA8C27BFD, // 20 ldp x29, x30, [sp], #32
+        0xD65F03C0, // 21 ret
+    ];
+    code[4] = bl(4)?;
+    code[5] = 0xB400_0000 | ((((pc(18) - pc(5)) >> 2) as u32 & 0x7ffff) << 5);
+    code[16] = bl(16)?;
+    code[17] = branch(pc(17), pc(5))?;
+    Ok(code)
+}
+const DRIVER_BYTES: u64 = 22 * 4;
 
 pub(super) struct Binding {
     pub provider: &'static str,
@@ -124,12 +244,12 @@ pub(super) struct Binding {
 
 pub(super) struct Frameworks {
     code: u64,
-    used_trampolines: usize,
+    code_end: u64,
     pub bindings: Vec<Binding>,
 }
 impl Frameworks {
     pub(super) fn instruction_range(&self) -> (u64, u64) {
-        (self.code, self.code + self.used_trampolines as u64 * TRAMPOLINE_BYTES)
+        (self.code, self.code_end)
     }
 }
 
@@ -168,13 +288,22 @@ pub(super) fn install(
         }
         address += PAGE;
     }
-    let total: usize = families.iter().map(|f| f.symbols().len()).sum();
-    if total > MAX_TRAMPOLINES {
+    let code_bytes: u64 = families
+        .iter()
+        .map(|f| f.symbols().len() as u64 * TRAMPOLINE_BYTES + DRIVER_BYTES)
+        .sum();
+    if code_bytes > PAGE
+        || families
+            .iter()
+            .any(|f| f.symbols().len() as u64 >= RESUME_FLAG)
+    {
         return Err("framework trampoline page capacity exceeded".into());
     }
     cpu.map_zeroed(base, PAGE as usize, 5)?;
-    cpu.map_zeroed(base + PAGE, ARENA_BYTES as usize, 3)?;
-    let arena = Rc::new(RefCell::new(Arena::new(base + PAGE, ARENA_BYTES)));
+    cpu.map_zeroed(base + PAGE, (ARENA_BYTES + IO_BYTES) as usize, 3)?;
+    let mut arena = Arena::new(base + PAGE, ARENA_BYTES);
+    arena.io = (base + PAGE + ARENA_BYTES, IO_BYTES);
+    let arena = Rc::new(RefCell::new(arena));
     let mut bindings = Vec::new();
     let mut next = base;
     for family in families {
@@ -189,21 +318,44 @@ pub(super) fn install(
             cpu,
             &format!("_touchHLE_a64_frameworks_{name}_dispatch"),
             move |frame| {
-                let index = frame.dispatch_index() as usize;
-                if index >= count {
-                    return Err(format!("framework {name} dispatch index {index} invalid"));
+                let raw = frame.dispatch_index();
+                let resume = raw & RESUME_FLAG != 0;
+                let index = (raw & !RESUME_FLAG) as usize;
+                if index >= count || raw > 0xffff {
+                    return Err(format!("framework {name} dispatch index {raw:#x} invalid"));
                 }
-                handler_family
-                    .borrow_mut()
-                    .call(index, frame, &mut handler_arena.borrow_mut())
+                let mut family = handler_family.borrow_mut();
+                let arena = &mut handler_arena.borrow_mut();
+                if !family.driven(index) {
+                    if resume {
+                        return Err(format!("framework {name} resume of undriven {index}"));
+                    }
+                    return family.call(index, frame, arena);
+                }
+                let drive = if resume {
+                    let result = frame.integer(1)?;
+                    family.resume(index, result, frame, arena)?
+                } else {
+                    family.begin(index, frame, arena)?
+                };
+                Ok(drive.values())
             },
         )?;
+        let driver = next + count as u64 * TRAMPOLINE_BYTES;
+        let driver_bytes: Vec<u8> = driver_code(driver, service.guest_address())?
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        cpu.try_write_bytes(driver, &driver_bytes)?;
+        let driven: Vec<bool> = (0..count).map(|i| family.borrow().driven(i)).collect();
         let mut entries = Vec::with_capacity(count);
         for (index, &symbol) in symbols.iter().enumerate() {
-            let code = [
-                movz_x17(index)?,
-                branch(next + 4, service.guest_address())?,
-            ];
+            let target = if driven[index] {
+                driver
+            } else {
+                service.guest_address()
+            };
+            let code = [movz_x17(index)?, branch(next + 4, target)?];
             let bytes: Vec<u8> = code.into_iter().flat_map(u32::to_le_bytes).collect();
             cpu.try_write_bytes(next, &bytes)?;
             entries.push((symbol, next));
@@ -214,18 +366,22 @@ pub(super) fn install(
             });
             next += TRAMPOLINE_BYTES;
         }
+        next = driver + DRIVER_BYTES;
         family.borrow_mut().bind_entries(&entries);
     }
     Ok(Frameworks {
         code: base,
-        used_trampolines: total,
+        code_end: next,
         bindings,
     })
 }
 
 /// The default family set for ARM64 app sessions.
 pub(super) fn default_families() -> Vec<Box<dyn Family>> {
-    vec![Box::new(openal::OpenAl::default())]
+    vec![
+        Box::new(openal::OpenAl::default()),
+        Box::new(audio_toolbox::AudioToolbox::default()),
+    ]
 }
 
 // ABI helpers shared by families.
@@ -343,7 +499,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(frameworks.bindings.len(), 3);
-        assert_eq!(frameworks.instruction_range(), (0x200000, 0x200018));
+        assert_eq!(
+            frameworks.instruction_range(),
+            (0x200000, 0x200018 + DRIVER_BYTES)
+        );
         // Exactly one service slot was consumed.
         assert_eq!(bridge.instruction_ranges().len(), 2);
         let call = |cpu: &mut A64Cpu, bridge: &mut GuestBridge, entry, integers, vectors| {
