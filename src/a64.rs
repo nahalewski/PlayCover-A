@@ -256,6 +256,9 @@ mod pthread_tls_services;
 mod pthread_mutex_services;
 #[path = "a64_pthread_cond_services.rs"]
 mod pthread_cond_services;
+// a64_frameworks: emulator-owned non-UIKit frameworks (OpenAL, ...).
+#[path = "a64_frameworks.rs"]
+mod frameworks;
 
 pub fn cache_prepare(
     bytes: &[u8],

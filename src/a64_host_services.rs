@@ -33,7 +33,10 @@ impl Selection {
         Ok(())
     }
     pub(super) fn mapped_bytes(self) -> u64 {
-        super::bridge::RUNTIME_MAPPED_BYTES + if self.core_foundation { ARENA_BYTES } else { 0 }
+        super::bridge::RUNTIME_MAPPED_BYTES
+            + if self.core_foundation { ARENA_BYTES } else { 0 }
+            // a64_frameworks hook: owned framework trampolines + arena.
+            + super::frameworks::RESERVED_BYTES
     }
 }
 
@@ -45,6 +48,8 @@ pub(super) struct SelectedServices {
     pub lifetime: Rc<RefCell<Lifetime>>,
     scratch_end: u64,
     pub foundation: Option<super::foundation_startup::Foundation>,
+    /// a64_frameworks hook: owned non-UIKit framework families.
+    frameworks: Option<super::frameworks::Frameworks>,
 }
 impl SelectedServices {
     pub(super) fn set_thread_storage(&mut self,state:std::rc::Rc<super::thread_storage::ThreadStorage>){self.bridge.set_thread_storage(state);}
@@ -125,7 +130,7 @@ impl SelectedServices {
                 }
             }
         }
-        Ok(Self {
+        let mut services = Self {
             bridge,
             bindings,
             lifetime,
@@ -140,7 +145,44 @@ impl SelectedServices {
                 })
                 .ok_or("selected service scratch end overflow")?,
             foundation: None,
-        })
+            frameworks: None,
+        };
+        // a64_frameworks hook: owned non-UIKit framework families. Each binding
+        // still applies only over a verified genuine cached export.
+        services.enable_frameworks(cpu, super::frameworks::default_families())?;
+        Ok(services)
+    }
+    /// a64_frameworks hook: map the owned framework families after the current
+    /// scratch end and bind their symbols. Like every selected route, a binding
+    /// only applies after the genuine cached export has been verified.
+    pub(super) fn enable_frameworks(
+        &mut self,
+        cpu: &mut A64Cpu,
+        families: Vec<Box<dyn super::frameworks::Family>>,
+    ) -> Result<(), String> {
+        if self.frameworks.is_some() {
+            return Err("owned frameworks already installed".into());
+        }
+        let base = self
+            .scratch_end
+            .checked_add(4095)
+            .ok_or("framework scratch alignment overflow")?
+            & !4095;
+        let frameworks = super::frameworks::install(cpu, &mut self.bridge, base, families)?;
+        for binding in &frameworks.bindings {
+            if self
+                .bindings
+                .insert((binding.provider, binding.symbol.into()), binding.address)
+                .is_some()
+            {
+                return Err(format!("duplicate owned framework route {}", binding.symbol));
+            }
+        }
+        self.scratch_end = base
+            .checked_add(super::frameworks::RESERVED_BYTES)
+            .ok_or("framework scratch end overflow")?;
+        self.frameworks = Some(frameworks);
+        Ok(())
     }
     pub(super) fn enable_foundation(
         &mut self,
@@ -214,6 +256,9 @@ impl SelectedServices {
         let mut ranges = self.bridge.instruction_ranges();
         if let Some(foundation) = &self.foundation {
             ranges.push(foundation.owned_code());
+        }
+        if let Some(frameworks) = &self.frameworks {
+            ranges.push(frameworks.instruction_range());
         }
         ranges
     }

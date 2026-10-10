@@ -193,6 +193,11 @@ impl ServiceFrame<'_> {
     pub(super) fn indirect_result(&self) -> u64 {
         self.cpu.reg(8)
     }
+    /// a64_frameworks hook: per-symbol family trampolines load their function
+    /// index into x17 (IP1, call-clobbered like x16) before branching here.
+    pub(super) fn dispatch_index(&self) -> u64 {
+        self.cpu.reg(17)
+    }
     pub(super) fn caller_return_address(&self) -> u64 {
         self.cpu.reg(30)
     }

@@ -158,19 +158,24 @@ There is no flat `Mem`.
 
 ## 5. Milestones (each testable on the desktop)
 
-1. **M1 (this change): family dispatcher plus OpenAL core.**
-   - Trampoline/arena pages, `dispatch_index`, and `enable_frameworks`.
-   - The OpenAL alc/al state, buffer, source and listener calls Coromon
-     imports, backed by openal-soft.
-   - Native tests replay ALmixer_Init's call sequence and buffer playback
-     through real guest trampolines, using the null backend
-     (`ALSOFT_DRIVERS=null`).
-2. **M2: wire routing into the cache session.**
-   - Call `enable_frameworks` where `SelectedServices::install` runs
-     (`a64_linker.rs`).
-   - Check with `--a64-cache-prepare` that Coromon's 57 OpenAL imports bind to
-     trampolines. This needs a strong-export check against the iOS 16.7 cache.
-   - Coordinate with the Initializer work, which owns the session files.
+1. **M1 (done): family dispatcher plus OpenAL core.**
+   - Trampoline/arena pages, `ServiceFrame::dispatch_index`, and
+     `SelectedServices::enable_frameworks`.
+   - All 57 OpenAL functions Coromon imports, backed by OpenAL Soft
+     (`src/a64_frameworks_openal.rs`).
+   - 7 native tests, including a replay of ALmixer_Init and of buffer
+     playback/streaming through real guest trampolines, using the OpenAL Soft
+     null backend.
+2. **M2 (done): routing wired into every selected-service session.**
+   - `SelectedServices::install` enables the default families. It costs one
+     bridge slot and 16 KiB, which `Selection::mapped_bytes` counts.
+   - Desktop session harness evidence (2026-10-10):
+     - Coromon's routed import records rose from 28 to 85. All 57 OpenAL
+       imports bound over genuine strong iOS 16.7.16 exports.
+     - The libSystem-initializer boundary is unchanged for Coromon and for
+       Terraria.
+   - No owned OpenAL call has run inside the app yet: the session has not
+     reached app code.
 3. **M3: AudioToolbox owned.**
    - `AudioSession*`: properties that openal-soft really supports. Set
      sample rate is recorded, and get returns the actual mixer rate.
