@@ -117,6 +117,70 @@ fn aiff_pcm_to_wav(bytes: &[u8]) -> Option<Vec<u8>> {
     Some(wav)
 }
 
+/// Convert an AIFF-C file compressed with Apple IMA4 ADPCM (`ima4`, 34-byte
+/// packets of 64 frames per channel, channels interleaved packet by packet) to
+/// a 16-bit WAV file in memory. Returns `None` for anything else.
+fn aifc_ima4_to_wav(bytes: &[u8]) -> Option<Vec<u8>> {
+    if bytes.len() < 12 || &bytes[0..4] != b"FORM" || &bytes[8..12] != b"AIFC" {
+        return None;
+    }
+    let mut pos = 12;
+    let (mut channels, mut frames, mut rate) = (0usize, 0usize, 0u32);
+    let mut is_ima4 = false;
+    let mut data: Option<&[u8]> = None;
+    while pos + 8 <= bytes.len() {
+        let id = &bytes[pos..pos + 4];
+        let size = u32::from_be_bytes(bytes[pos + 4..pos + 8].try_into().ok()?) as usize;
+        let body = bytes.get(pos + 8..(pos + 8 + size).min(bytes.len()))?;
+        if id == b"COMM" && body.len() >= 22 {
+            channels = u16::from_be_bytes([body[0], body[1]]) as usize;
+            frames = u32::from_be_bytes(body[2..6].try_into().ok()?) as usize;
+            let exponent = (u16::from_be_bytes([body[8], body[9]]) & 0x7fff) as i32;
+            let mantissa = u64::from_be_bytes(body[10..18].try_into().ok()?);
+            rate = (mantissa as f64 * 2f64.powi(exponent - 16383 - 63)).round() as u32;
+            is_ima4 = &body[18..22] == b"ima4";
+        } else if id == b"SSND" && body.len() >= 8 {
+            let offset = u32::from_be_bytes(body[0..4].try_into().ok()?) as usize;
+            data = body.get(8 + offset..);
+        }
+        pos += 8 + size + (size & 1);
+    }
+    let data = data?;
+    if !is_ima4 || channels == 0 || channels > 2 || rate == 0 {
+        return None;
+    }
+    // One channel's packets in order; `frames` counts frames per channel.
+    let mut per_channel: Vec<Vec<i16>> = vec![Vec::new(); channels];
+    for (index, packet) in data.chunks_exact(34).enumerate() {
+        let decoded = decode_ima4(packet.try_into().ok()?);
+        per_channel[index % channels].extend_from_slice(&decoded);
+    }
+    let available = per_channel.iter().map(Vec::len).min().unwrap_or(0);
+    let frames = if frames == 0 { available } else { frames.min(available) };
+    let mut pcm: Vec<u8> = Vec::with_capacity(frames * channels * 2);
+    for frame in 0..frames {
+        for channel in &per_channel {
+            pcm.extend_from_slice(&channel[frame].to_le_bytes());
+        }
+    }
+    let block_align = (channels * 2) as u16;
+    let mut wav = Vec::with_capacity(44 + pcm.len());
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + pcm.len() as u32).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&(channels as u16).to_le_bytes());
+    wav.extend_from_slice(&rate.to_le_bytes());
+    wav.extend_from_slice(&(rate * u32::from(block_align)).to_le_bytes());
+    wav.extend_from_slice(&block_align.to_le_bytes());
+    wav.extend_from_slice(&16u16.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&(pcm.len() as u32).to_le_bytes());
+    wav.extend_from_slice(&pcm);
+    Some(wav)
+}
+
 pub struct AudioFile(AudioFileInner);
 enum AudioFileInner {
     Wave(hound::WavReader<Cursor<Vec<u8>>>),
@@ -153,7 +217,7 @@ impl AudioFile {
         // format, then recreating the reader if that works.
         // Uncompressed AIFF (e.g. Flappy Bird's sfx_point.aif, which has a
         // COMT chunk the generic decoder trips over) is rewrapped as WAV.
-        let bytes = match aiff_pcm_to_wav(&bytes) {
+        let bytes = match aiff_pcm_to_wav(&bytes).or_else(|| aifc_ima4_to_wav(&bytes)) {
             Some(wav) => wav,
             None => bytes,
         };

@@ -266,7 +266,18 @@ impl IpaFileRef {
                 },
             );
             let mut buf = Vec::new();
-            file.read_to_end(&mut buf).unwrap();
+            if let Err(e) = file.read_to_end(&mut buf) {
+                // A damaged dump: the entry's checksum (or data) is bad. The
+                // bytes that could be read are still given to the app, which
+                // may well cope with one damaged resource, rather than
+                // stopping the whole app.
+                log!(
+                    "Warning: file {:?} in the IPA bundle is damaged ({}), using the {} bytes that could be read",
+                    file.name(),
+                    e,
+                    buf.len()
+                );
+            }
             Rc::from(buf)
         });
         let cached_file = Rc::clone(archive_cache.get(&self.index).unwrap());

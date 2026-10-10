@@ -749,24 +749,20 @@ class LauncherActivity : AppCompatActivity() {
             startGame(app)
             return
         }
-        // The emulator can only run one app per process, so a game that is
-        // already running has to be quit before another one can start.
-        MaterialAlertDialogBuilder(this)
-            .setTitle("A game is already running")
-            .setMessage("Switch back to it, or quit it and start ${prettyName(app)}?")
-            .setPositiveButton("Switch back") { _, _ ->
-                startActivity(
-                    Intent(this, MainActivity::class.java)
-                        .addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
-                )
-            }
-            .setNegativeButton("Quit it and start") { _, _ ->
-                running.forEach { android.os.Process.killProcess(it) }
-                // Give Android a moment to tear the old process down.
-                window.decorView.postDelayed({ startGame(app) }, 500)
-            }
-            .setNeutralButton("Cancel", null)
-            .show()
+        // The emulator can only run one app per process. Opening the game that
+        // is already running just goes back to it; opening another game ends the
+        // running one first (quitting or restarting a game on purpose is in the
+        // in-game menu).
+        if (prefs.getString("last_launch_name", null) == app.name) {
+            startActivity(
+                Intent(this, MainActivity::class.java)
+                    .addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+            )
+            return
+        }
+        running.forEach { android.os.Process.killProcess(it) }
+        // Give Android a moment to tear the old process down.
+        window.decorView.postDelayed({ startGame(app) }, 500)
     }
 
     private fun confirmRemove(app: File) {

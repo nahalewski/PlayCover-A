@@ -36,6 +36,12 @@ public class MainActivity extends SDLActivity {
     @Override
     protected void onCreate(android.os.Bundle state) {
         super.onCreate(state);
+        // Lets the game end when the app is closed from the recent apps list.
+        try {
+            startService(new android.content.Intent(this, GameCleanupService.class));
+        } catch (RuntimeException e) {
+            // Only a convenience; never stop the game over it.
+        }
         String path = getIntent().getStringExtra(EXTRA_APP_PATH);
         if (path == null || path.trim().isEmpty()) {
             // A launcher shortcut or restored empty activity must never enter

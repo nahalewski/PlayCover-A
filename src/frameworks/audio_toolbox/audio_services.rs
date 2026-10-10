@@ -165,8 +165,10 @@ fn AudioServicesPlaySystemSound(env: &mut Environment, sys_sound_id: SystemSound
                 );
             }
         } else {
-            panic!(
-                "Incorrect/unsupported system sound {:x} played!",
+            // iOS silently ignores an ID that was never created (or whose
+            // sound file could not be loaded).
+            log!(
+                "Warning: AudioServicesPlaySystemSound({:x}): no such sound, ignoring",
                 sys_sound_id
             );
         }

@@ -74,6 +74,13 @@
             android:exported="false"
             android:foregroundServiceType="dataSync" />
 
+        <!-- Ends the game process when the app is closed from the recent apps list -->
+        <service
+            android:name="org.touchhle.android.GameCleanupService"
+            android:process=":game"
+            android:stopWithTask="false"
+            android:exported="false" />
+
         <!-- Example of setting SDL hints from AndroidManifest.xml:
         <meta-data android:name="SDL_ENV.SDL_ACCELEROMETER_AS_JOYSTICK" android:value="0"/>
          -->

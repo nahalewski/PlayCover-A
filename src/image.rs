@@ -77,8 +77,15 @@ impl Image {
             )
         };
         if pixels.is_null() {
-            let reason = unsafe { CStr::from_ptr(stbi_failure_reason()) };
-            return Err(reason.to_str().unwrap().to_string());
+            let reason = unsafe { stbi_failure_reason() };
+            // The reason is a plain C string, but be careful with damaged
+            // images: never panic over its text.
+            let reason = if reason.is_null() {
+                "unknown image decoding error".to_string()
+            } else {
+                unsafe { CStr::from_ptr(reason) }.to_string_lossy().into_owned()
+            };
+            return Err(reason);
         }
 
         let width: u32 = x.try_into().unwrap();
