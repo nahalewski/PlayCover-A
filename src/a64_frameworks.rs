@@ -33,6 +33,10 @@ use std::{cell::RefCell, collections::BTreeSet, rc::Rc};
 pub(super) mod openal;
 #[path = "a64_frameworks_audio_toolbox.rs"]
 pub(super) mod audio_toolbox;
+#[path = "a64_frameworks_security.rs"]
+pub(super) mod security;
+#[path = "a64_frameworks_system_configuration.rs"]
+pub(super) mod system_configuration;
 
 const PAGE: u64 = 4096;
 /// One RX trampoline page, the RW handle/string arena, then a RW guest I/O
@@ -381,6 +385,8 @@ pub(super) fn default_families() -> Vec<Box<dyn Family>> {
     vec![
         Box::new(openal::OpenAl::default()),
         Box::new(audio_toolbox::AudioToolbox::default()),
+        Box::new(system_configuration::SystemConfiguration::default()),
+        Box::new(security::Security::default()),
     ]
 }
 
