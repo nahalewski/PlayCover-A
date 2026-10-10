@@ -224,24 +224,59 @@ impl Font {
         (v_metrics.ascent - v_metrics.descent, v_metrics.line_gap)
     }
 
+    /// Map a character the way iPhone OS's (WebKit-based) string measurement
+    /// does: C0/C1 control characters take no space at all, while tab,
+    /// newline and no-break space are measured as an ordinary space.
+    /// Returns [None] for characters that are dropped.
+    fn ios_measured_char(c: char) -> Option<char> {
+        match c {
+            '\t' | '\n' | '\u{a0}' => Some(' '),
+            '\0'..='\u{1f}' | '\u{7f}'..='\u{9f}' => None,
+            _ => Some(c),
+        }
+    }
+
     /// Calculate the width of a line. This does not handle newlines!
     fn calculate_line_width(&self, font_size: f32, line: &str) -> f32 {
         let mut line_x_min: f32 = 0.0;
         let mut line_x_max: f32 = 0.0;
 
-        for glyph in self
+        // Without this, control characters would be measured as the
+        // (wide) .notdef glyph. Civilization Revolution measures every byte
+        // value to lay out its bitmap fonts, so this matters.
+        let line: String = line.chars().filter_map(Self::ios_measured_char).collect();
+        // WebKit rounds the width of a space to a whole number of pixels;
+        // other glyphs keep their fractional advances. Verified against the
+        // glyph atlases Civilization Revolution ships, which were laid out
+        // using the widths real iPhone OS returned.
+        let scale = self.scale(font_size);
+        let space_advance = self.font.glyph(' ').scaled(scale).h_metrics().advance_width;
+        let space_adjustment = space_advance.round() - space_advance;
+        let mut adjustment: f32 = 0.0;
+
+        for (glyph, c) in self
             .font
-            .layout(line, self.scale(font_size), Default::default())
+            .layout(&line, scale, Default::default())
+            .zip(line.chars())
         {
-            let position = glyph.position();
-            let h_metrics = glyph.unpositioned().h_metrics();
+            let mut position = glyph.position();
+            position.x += adjustment;
+            let mut h_metrics = glyph.unpositioned().h_metrics();
+            if c == ' ' {
+                h_metrics.advance_width += space_adjustment;
+                adjustment += space_adjustment;
+            }
 
             // This method used to use pixel_bounding_box() for metrics, but
             // now uses h_metrics() in order to support whitespace characters.
             // This definition of character width was chosen because it gave
             // similar results to the old implementation, not because it's
             // optimal; maybe it could be improved.
-            let glyph_x_min = position.x.min(position.x + h_metrics.left_side_bearing);
+            // A negative left side bearing (e.g. 'j', 'w', '_' in Liberation
+            // Sans Bold) does not widen the measurement on iPhone OS: the
+            // width is just the advances. Verified with Civilization
+            // Revolution's glyph atlases, where counting it shifts the glyphs.
+            let glyph_x_min = position.x;
             let glyph_x_max = position.x + h_metrics.advance_width;
 
             line_x_min = line_x_min.min(glyph_x_min);
@@ -372,6 +407,18 @@ impl Font {
         }
 
         lines
+    }
+
+    /// Calculate the size of text measured as a single line, as UIKit's
+    /// unconstrained `sizeWithFont:` does: newlines do not start new lines
+    /// (they are measured like spaces) and the height is one line high.
+    pub fn calculate_single_line_text_size(&self, font_size: f32, text: &str) -> (f32, f32) {
+        if text.is_empty() {
+            return (0.0, 0.0);
+        }
+        let width = self.calculate_line_width(font_size, text);
+        let (line_height, _line_gap) = self.line_height_and_gap(font_size);
+        (width, line_height)
     }
 
     /// Calculate the on-screen width and height of text with a given font size.

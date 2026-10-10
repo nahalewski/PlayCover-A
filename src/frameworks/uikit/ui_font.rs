@@ -157,20 +157,32 @@ pub const CLASSES: ClassExports = objc_classes! {
     let font = env.framework_state.uikit.ui_font.get_font_by_kind(host_object.kind);
     font.descent(host_object.size)
 }
+// Despite its name, UIKit's `-[UIFont leading]` is not the typographic line
+// gap: the iPhone OS 2.0–3.2 documentation describes it as "the height in
+// points of text lines", and iOS 4 deprecated it in favour of `lineHeight`,
+// which returns the same value. Games use it as the glyph row height (e.g.
+// Civilization Revolution's bitmap-font loader), so returning only the line
+// gap (well under one point) collapses every glyph to zero height.
 - (CGFloat)leading {
-    let host_object = env.objc.borrow::<UIFontHostObject>(this);
-    let font = env.framework_state.uikit.ui_font.get_font_by_kind(host_object.kind);
-    font.line_gap(host_object.size)
+    msg![env; this lineHeight]
 }
 
 - (CGFloat)lineHeight {
-    // This is calculated based on the documentation:
+    // This is the ascent, descent and line gap added together, as described
+    // in the documentation:
     // https://developer.apple.com/library/archive/documentation/TextFonts/Conceptual/CocoaTextArchitecture/FontHandling/FontHandling.html
-    let ascender: CGFloat = msg![env; this ascender];
-    let descender: CGFloat = msg![env; this descender];
-    let leading: CGFloat = msg![env; this leading];
+    // iPhone OS rounds each part up to a whole pixel. This was verified with
+    // the glyph atlases Civilization Revolution ships for Arial-BoldMT at
+    // 15, 19, 30 and 40 points, whose row pitches (leading + 5) are 24, 29,
+    // 41 and 53, i.e. leading 19, 24, 36 and 48: the unrounded sum would give
+    // 17.8, 21.8, 34.5 and 46.0.
+    let host_object = env.objc.borrow::<UIFontHostObject>(this);
+    let font = env.framework_state.uikit.ui_font.get_font_by_kind(host_object.kind);
+    let ascender = font.ascent(host_object.size);
+    let descender = font.descent(host_object.size);
+    let line_gap = font.line_gap(host_object.size);
     assert!(descender <= 0.0);
-    ascender + leading - descender
+    ascender.ceil() + line_gap.ceil() + (-descender).ceil()
 }
 
 @end
@@ -238,9 +250,15 @@ pub fn size_with_font(
         text,
     );
 
-    let wrap = constrained.map(|(size, ui_mode)| (size.width, convert_line_break_mode(ui_mode)));
-
-    let (width, height) = font.calculate_text_size(host_object.size, text, wrap);
+    let (width, height) = match constrained {
+        // Unconstrained `sizeWithFont:` measures a single line.
+        None => font.calculate_single_line_text_size(host_object.size, text),
+        Some((size, ui_mode)) => font.calculate_text_size(
+            host_object.size,
+            text,
+            Some((size.width, convert_line_break_mode(ui_mode))),
+        ),
+    };
 
     CGSize { width, height }
 }
