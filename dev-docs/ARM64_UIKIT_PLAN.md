@@ -302,6 +302,36 @@ on the startup path, according to the needs analysis.
 - **ObjC notification (agent A).** Append the image's `ObjcImage` ahead of the
   app.
 
+### 4.1 Bind routing (ready in UIKit files, not yet wired)
+
+`a64_uikit_bind.rs`: `Routes::route(provider, symbol)` resolves imports from the
+owned providers (UIKit, QuartzCore, `@rpath/MetalANGLE`) to image addresses,
+and `Routes::coverage` classifies an import list. A miss for an owned provider
+is a real gap: the loader must fail, or weak-zero the import, and never fall
+back to the cached library.
+
+Coromon's real main-binary imports were checked on 2026-10-10 (ignored test,
+needs `PLAYCOVER_COROMON_BINARY`):
+
+| Result | Count | What it covers |
+| --- | --- | --- |
+| Routed | 16 | UIApplicationMain, the core UIKit classes and metaclasses, and the 3 MGL classes |
+| Missing (required) | 143 | 72 MetalANGLE `gl*` functions (frameworks gles family), plus 71 UIKit/QuartzCore items (see below) |
+| Missing (weak) | 5 | |
+
+The 71 UIKit/QuartzCore items are:
+- classes: UIColor, UIFont, UIImage, UITouch, UIControl, UIAlertController, UIGestureRecognizer and others;
+- `CADisplayLink` and `CACurrentMediaTime`;
+- the notification and key NSString constants;
+- the `UIGraphics*`, `UIImagePNGRepresentation` and `UIAccessibility*` functions.
+
+These 71 items are the milestone 2 work list.
+
+The loader hook stays a few marked lines in agent A's bind path. Rule: for a
+provider in `OWNED_PROVIDERS`, call `route()` before resolving against the
+cache. The hook has not been added, because agent A had not landed its dyld
+and loader changes as of playcover/main bbf45ca6.
+
 ## 5. Milestones (each with a desktop test)
 
 1. **DONE.** Synthetic image, dispatch, core classes, view loading,

@@ -657,3 +657,70 @@ fn table_budget_fits_single_service_and_entry_limit() {
     assert!(classes <= image::MAX_CLASSES);
     assert!(methods + 4 <= image::MAX_ENTRIES);
 }
+
+#[test]
+fn bind_routes_only_owned_providers_and_reports_gaps() {
+    let f = Fixture::new(None, vec![]);
+    let routes = super::bind::Routes::from_layout(&f.layout);
+    assert_eq!(routes.route(super::INSTALL_NAME, "_OBJC_CLASS_$_UIView"), f.layout.class("UIView"));
+    assert_eq!(routes.route(super::METALANGLE, "_OBJC_CLASS_$_MGLKView"), f.layout.class("MGLKView"));
+    assert_eq!(routes.route(super::INSTALL_NAME, "_UIApplicationMain"), f.layout.function("_UIApplicationMain"));
+    // Provider identity matters: MGLKView is not a UIKit export.
+    assert_eq!(routes.route(super::INSTALL_NAME, "_OBJC_CLASS_$_MGLKView"), None);
+    let coverage = routes.coverage([
+        (super::INSTALL_NAME, "_OBJC_CLASS_$_UIWindow", false),
+        (super::QUARTZCORE, "_OBJC_CLASS_$_CADisplayLink", false),
+        (super::INSTALL_NAME, "_UIAccessibilityIsVoiceOverRunning", true),
+        ("/System/Library/Frameworks/Foundation.framework/Foundation", "_OBJC_CLASS_$_NSString", false),
+    ]);
+    assert_eq!(coverage.routed.len(), 1);
+    assert_eq!(coverage.missing_required, vec![(super::QUARTZCORE.to_string(), "_OBJC_CLASS_$_CADisplayLink".to_string())]);
+    assert_eq!(coverage.missing_weak.len(), 1);
+}
+
+/// Coromon's real import list (classic dyld-info binds) against the owned
+/// exports: PLAYCOVER_COROMON_BINARY=/path/to/Payload/Coromon.app/Coromon.
+/// Prints the remaining UIKit/QuartzCore/MetalANGLE gaps (milestone 2 list).
+#[test]
+#[ignore]
+fn actual_coromon_imports_against_owned_exports() {
+    let path = std::env::var("PLAYCOVER_COROMON_BINARY").expect("PLAYCOVER_COROMON_BINARY");
+    let file = std::fs::read(path).unwrap();
+    let bytes = super::super::thin_arm64_slice(&file).unwrap();
+    let metadata = super::super::MachO64::parse_metadata(bytes).unwrap();
+    let imports = match metadata.legacy_fixups {
+        Some(streams) => super::super::legacy::imports(bytes, streams, &metadata.segments).unwrap(),
+        None => super::super::fixups::imports(bytes).unwrap(),
+    };
+    let named: Vec<(String, String, bool)> = imports
+        .iter()
+        .filter(|i| i.library_ordinal > 0)
+        .map(|i| (metadata.dependencies[i.library_ordinal as usize - 1].name.clone(), i.name.clone(), i.weak))
+        .collect();
+    let f = Fixture::new(None, vec![]);
+    let routes = super::bind::Routes::from_layout(&f.layout);
+    let coverage = routes.coverage(named.iter().map(|(p, s, w)| (p.as_str(), s.as_str(), *w)));
+    echo!(
+        "PLAYCOVER_UIKIT_COVERAGE routed={} missing_required={} missing_weak={}",
+        coverage.routed.len(),
+        coverage.missing_required.len(),
+        coverage.missing_weak.len()
+    );
+    for (provider, symbol) in &coverage.routed {
+        echo!("PLAYCOVER_UIKIT_ROUTED {provider} {symbol}");
+    }
+    for (provider, symbol) in &coverage.missing_required {
+        echo!("PLAYCOVER_UIKIT_MISSING {provider} {symbol}");
+    }
+    for expected in [
+        (super::INSTALL_NAME, "_UIApplicationMain"),
+        (super::INSTALL_NAME, "_OBJC_CLASS_$_UIViewController"),
+        (super::METALANGLE, "_OBJC_CLASS_$_MGLKViewController"),
+        (super::METALANGLE, "_OBJC_CLASS_$_MGLContext"),
+    ] {
+        assert!(
+            coverage.routed.contains(&(expected.0.to_string(), expected.1.to_string())),
+            "{expected:?} must be routed"
+        );
+    }
+}

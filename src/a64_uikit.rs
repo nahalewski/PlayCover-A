@@ -27,6 +27,8 @@
 #![allow(dead_code)]
 #[path = "a64_uikit_app.rs"]
 pub(super) mod app;
+#[path = "a64_uikit_bind.rs"]
+pub(super) mod bind;
 #[path = "a64_uikit_asm.rs"]
 pub(super) mod asm;
 #[path = "a64_uikit_image.rs"]
